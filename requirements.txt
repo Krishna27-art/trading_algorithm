@@ -1,0 +1,26 @@
+# Core Zerodha API
+kiteconnect>=5.0.1
+
+# Data processing and analysis
+pandas>=2.2.0
+numpy>=1.26.0
+
+# Technical indicators
+ta>=0.11.0
+
+# Security and environment configuration
+python-dotenv>=1.0.0
+pyotp>=2.9.0
+
+# Networking & Utilities
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Web API & Server
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.6.0
+
+# Optional Visualization / Dashboard support
+tabulate>=0.9.0
+matplotlib>=3.8.0

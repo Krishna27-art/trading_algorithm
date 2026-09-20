@@ -1,0 +1,24 @@
+{
+  "name": "trading-algorithm",
+  "version": "1.0.0",
+  "description": "Semi-automated trading algorithm with Zerodha Kite Connect",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently -n \"backend,frontend\" -c \"blue,green\" \"npm run backend\" \"npm run frontend\"",
+    "backend": "source .venv/bin/activate && uvicorn backend.main:app --reload --port 8000",
+    "frontend": "cd frontend && npm run dev",
+    "auth": "source .venv/bin/activate && python auth.py",
+    "strategy": "source .venv/bin/activate && python strategy_template.py"
+  },
+  "keywords": [
+    "trading",
+    "zerodha",
+    "kiteconnect",
+    "algorithmic-trading"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

@@ -1,110 +1,238 @@
-import React, { useState } from 'react';
-import { User, Wallet, Cpu, BookOpen, LogOut, ShieldCheck, Compass, Radio } from 'lucide-react';
-import UserTab from './tabs/UserTab';
-import MarginsTab from './tabs/MarginsTab';
-import StrategyTab from './tabs/StrategyTab';
-import GuideTab from './tabs/GuideTab';
+import React, { useState, useEffect } from 'react';
+import Sidebar from './terminal/Sidebar';
+import TopNavbar from './terminal/TopNavbar';
+import TopKpiBar from './terminal/TopKpiBar';
+import MarketStrategyPanel from './terminal/MarketStrategyPanel';
+import MarketLevelsCard from './terminal/MarketLevelsCard';
+import StrategyStatusCard from './terminal/StrategyStatusCard';
+import SignalCard from './terminal/SignalCard';
+import ActiveTradeCard from './terminal/ActiveTradeCard';
+import OrderExecutionPanel from './terminal/OrderExecutionPanel';
+import RiskManagementPanel from './terminal/RiskManagementPanel';
+import MarketSessionTimeline from './terminal/MarketSessionTimeline';
+import SystemHealthBar from './terminal/SystemHealthBar';
+import SettingsModal from './terminal/SettingsModal';
+
+// Dedicated Subpages
+import PositionsPage from './terminal/PositionsPage';
+import OrdersPage from './terminal/OrdersPage';
+import PerformancePage from './terminal/PerformancePage';
+import StrategyPage from './terminal/StrategyPage';
+import RiskPage from './terminal/RiskPage';
+import SystemPage from './terminal/SystemPage';
 
 export default function Dashboard({ user, onLogout }) {
-  const [activeTab, setActiveTab] = useState('user');
-  const [loggingOut, setLoggingOut] = useState(false);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [telemetry, setTelemetry] = useState(null);
+  const [margins, setMargins] = useState(null);
+  const [trades, setTrades] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [health, setHealth] = useState(null);
+  const [backtestReport, setBacktestReport] = useState(null);
+  const [loadingBacktest, setLoadingBacktest] = useState(false);
+  const [tradingMode, setTradingMode] = useState('PAPER'); // 'PAPER' | 'LIVE'
+  const [showSettings, setShowSettings] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  const handleLogout = async () => {
-    setLoggingOut(true);
+  // Polling data at a clean interval
+  const fetchData = async () => {
     try {
-      await fetch('/api/logout', { method: 'POST' });
+      const [telRes, marRes, trdRes, ordRes, hltRes] = await Promise.all([
+        fetch('/api/strategy/telemetry'),
+        fetch('/api/margins'),
+        fetch('/api/strategy/trades'),
+        fetch('/api/strategy/orders'),
+        fetch('/api/system/health'),
+      ]);
+
+      if (telRes.ok) setTelemetry(await telRes.json());
+      if (marRes.ok) setMargins(await marRes.json());
+      if (trdRes.ok) {
+        const d = await trdRes.json();
+        setTrades(d.trades || []);
+      }
+      if (ordRes.ok) {
+        const d = await ordRes.json();
+        setOrders(d.orders || []);
+      }
+      if (hltRes.ok) setHealth(await hltRes.json());
     } catch (e) {
-      console.error('Logout error:', e);
-    } finally {
-      onLogout();
-      setLoggingOut(false);
+      console.warn('Dashboard fetch telemetry warning:', e);
     }
   };
 
-  const tabs = [
-    { id: 'user', label: 'User Profile', icon: User },
-    { id: 'margins', label: 'Margins & Funds', icon: Wallet },
-    { id: 'strategy', label: 'Semi-Auto Algo', icon: Cpu },
-    { id: 'guide', label: 'Setup & Instructions', icon: BookOpen },
-  ];
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRunBacktest = async () => {
+    setLoadingBacktest(true);
+    try {
+      const res = await fetch('/api/strategy/backtest', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setBacktestReport(data.report);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingBacktest(false);
+    }
+  };
+
+  const handleQuickExecute = (sig) => {
+    fetchData();
+  };
+
+  const handleSquareOff = async () => {
+    if (window.confirm('Are you sure you want to square off your open position immediately?')) {
+      try {
+        await fetch('/api/orders/place', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: 'NIFTY',
+            direction: telemetry?.active_trade?.direction === 'BUY' ? 'SELL' : 'BUY',
+            order_type: 'MARKET',
+            quantity: telemetry?.active_trade?.quantity || 25,
+            mode: tradingMode,
+          }),
+        });
+        fetchData();
+      } catch (e) {
+        alert('Error squaring off: ' + e.message);
+      }
+    }
+  };
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Top Navbar */}
-      <header className="glass-panel rounded-none border-x-0 border-t-0 border-b border-white/10 sticky top-0 z-30 px-4 sm:px-8 py-3.5 backdrop-blur-xl bg-slate-950/80">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          {/* Logo & Brand */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-emerald-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-              <Compass className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-extrabold text-white tracking-tight text-base sm:text-lg">Kite Algo Hub</span>
-                <span className="badge badge-emerald hidden sm:inline-flex">
-                  <Radio className="w-3 h-3 animate-pulse text-emerald-400" />
-                  Live Session
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400">Zerodha Semi-Automated Trading</p>
-            </div>
-          </div>
-
-          {/* User Status & Logout */}
-          <div className="flex items-center gap-3 sm:gap-4">
-            <div className="hidden sm:flex flex-col text-right">
-              <span className="text-xs font-bold text-slate-200">{user?.user_name || 'Trader'}</span>
-              <span className="text-[10px] font-mono text-slate-400">ID: {user?.user_id}</span>
-            </div>
-
-            <button
-              onClick={handleLogout}
-              disabled={loggingOut}
-              className="btn-danger-subtle"
-              title="Log out and clear session"
-            >
-              <LogOut className="w-4 h-4" />
-              <span className="hidden sm:inline">Logout</span>
-            </button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen flex bg-[#090d16] text-slate-100 antialiased">
+      {/* 1. Left Sidebar Navigation */}
+      <Sidebar
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        user={user}
+        onLogout={onLogout}
+        onOpenSettings={() => setShowSettings(true)}
+        telemetry={telemetry}
+        tradingMode={tradingMode}
+        setTradingMode={setTradingMode}
+      />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6 space-y-6">
-        {/* Navigation Tabs */}
-        <div className="glass-panel p-1.5 flex items-center gap-1 overflow-x-auto border border-white/10">
-          {tabs.map((t) => {
-            const Icon = t.icon;
-            const isActive = activeTab === t.id;
-            return (
-              <button
-                key={t.id}
-                onClick={() => setActiveTab(t.id)}
-                className={`tab-btn rounded-xl flex-1 justify-center whitespace-nowrap ${
-                  isActive ? 'active shadow-sm' : ''
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-indigo-400' : 'text-slate-400'}`} />
-                <span>{t.label}</span>
-              </button>
-            );
-          })}
-        </div>
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* 2. Top Navbar */}
+        <TopNavbar
+          user={user}
+          telemetry={telemetry}
+          onLogout={onLogout}
+          onOpenSettings={() => setShowSettings(true)}
+          tradingMode={tradingMode}
+          setTradingMode={setTradingMode}
+          onToggleMobileSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
+        />
 
-        {/* Tab Content Panels */}
-        <div className="py-2">
-          {activeTab === 'user' && <UserTab />}
-          {activeTab === 'margins' && <MarginsTab />}
-          {activeTab === 'strategy' && <StrategyTab />}
-          {activeTab === 'guide' && <GuideTab />}
-        </div>
-      </main>
+        {/* Dynamic Page Container */}
+        <main className="flex-1 p-4 sm:p-6 space-y-4 max-w-[1600px] w-full mx-auto">
+          {activeTab === 'dashboard' && (
+            <div className="space-y-4 animate-fade-in">
+              {/* Top KPI Cards Row */}
+              <TopKpiBar telemetry={telemetry} margins={margins} />
 
-      {/* Footer */}
-      <footer className="border-t border-white/5 py-4 px-4 text-center text-xs text-slate-500">
-        <p>Zerodha Kite Connect Semi-Automated Algorithm • Session preserved for local development</p>
-      </footer>
+              {/* Main Real Dashboard Grid (~60% Chart / ~40% Strategy & Signal) */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                {/* Left Column (~58% - 7 Cols): Candlestick Chart, Timeline, Market Levels */}
+                <div className="lg:col-span-7 space-y-4">
+                  <MarketStrategyPanel telemetry={telemetry} />
+                  <MarketSessionTimeline
+                    currentPhase={telemetry?.market_phase || 'ENTRY_SCANNING'}
+                  />
+                  <MarketLevelsCard telemetry={telemetry} />
+                </div>
+
+                {/* Right Column (~42% - 5 Cols): Strategy Status, Signal, Active Trade, Order Panel, Risk */}
+                <div className="lg:col-span-5 space-y-4">
+                  <StrategyStatusCard telemetry={telemetry} />
+                  <SignalCard
+                    signal={telemetry?.active_signal}
+                    onQuickExecute={handleQuickExecute}
+                    isLiveMode={tradingMode === 'LIVE'}
+                  />
+                  <ActiveTradeCard
+                    trade={telemetry?.active_trade}
+                    onSquareOff={handleSquareOff}
+                  />
+                  <OrderExecutionPanel
+                    tradingMode={tradingMode}
+                    setTradingMode={setTradingMode}
+                    onOrderPlaced={fetchData}
+                    ltp={telemetry?.current_price}
+                  />
+                  <RiskManagementPanel telemetry={telemetry} />
+                </div>
+              </div>
+
+              {/* Subsystem Health Bar at bottom */}
+              <SystemHealthBar health={health} />
+            </div>
+          )}
+
+          {activeTab === 'strategy' && (
+            <div className="animate-fade-in">
+              <StrategyPage telemetry={telemetry} />
+            </div>
+          )}
+
+          {activeTab === 'positions' && (
+            <div className="animate-fade-in">
+              <PositionsPage
+                trades={trades}
+                activeTrade={telemetry?.active_trade}
+                onRefresh={fetchData}
+              />
+            </div>
+          )}
+
+          {activeTab === 'orders' && (
+            <div className="animate-fade-in">
+              <OrdersPage orders={orders} onRefresh={fetchData} />
+            </div>
+          )}
+
+          {activeTab === 'risk' && (
+            <div className="animate-fade-in">
+              <RiskPage telemetry={telemetry} />
+            </div>
+          )}
+
+          {activeTab === 'performance' && (
+            <div className="animate-fade-in">
+              <PerformancePage
+                backtestReport={backtestReport}
+                onRunBacktest={handleRunBacktest}
+                isLoading={loadingBacktest}
+              />
+            </div>
+          )}
+
+          {activeTab === 'system' && (
+            <div className="animate-fade-in">
+              <SystemPage health={health} />
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          strategyState={telemetry}
+          user={user}
+        />
+      )}
     </div>
   );
 }

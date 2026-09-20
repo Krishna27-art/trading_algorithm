@@ -17,6 +17,8 @@ session_token.json
 *.log
 data/
 downloads/
+database/
+credentials.txt
 
 # Node
 node_modules/

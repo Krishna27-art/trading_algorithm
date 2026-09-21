@@ -45,12 +45,22 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
         quantity: int,
         price: Optional[float] = None,
         tag: Optional[str] = "algo",
+        client_order_id: Optional[str] = None,
     ) -> OrderRecord:
+        # Check duplicate client_order_id
+        if client_order_id:
+            for existing in self.orders.values():
+                if existing.client_order_id == client_order_id:
+                    logger.warning(
+                        f"[{self.name}] Duplicate client_order_id {client_order_id} detected. Returning existing order."
+                    )
+                    return existing
+
         order_id = f"paper_{uuid.uuid4().hex[:8]}"
         created_at = datetime.now()
 
         # Realistic Slippage adjustment
-        ref_price = price if price is not None else self.last_ltp.get(symbol, 24000.0)
+        ref_price = price if price is not None else self.last_ltp.get(symbol, 100.0)
         if direction == OrderDirection.BUY:
             fill_price = ref_price + self.slippage_points
         else:
@@ -60,6 +70,7 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
         record = OrderRecord(
             order_id=order_id,
             broker_order_id=f"SIM_{order_id}",
+            client_order_id=client_order_id,
             symbol=symbol,
             direction=direction,
             order_type=order_type,
@@ -121,6 +132,9 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
                     "current_price": self.last_ltp.get(sym, 0.0),
                 })
         return result
+
+    def get_orders(self) -> List[Dict[str, Any]]:
+        return [o.model_dump() for o in self.orders.values()]
 
     def get_margins(self) -> Dict[str, float]:
         return {

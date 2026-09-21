@@ -16,6 +16,7 @@ class OrderStatus(str, Enum):
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    UNKNOWN = "UNKNOWN"
 
 
 class OrderType(str, Enum):
@@ -70,6 +71,8 @@ class TradeRecord(BaseModel):
 class OrderRecord(BaseModel):
     order_id: str
     broker_order_id: Optional[str] = None
+    client_order_id: Optional[str] = None
+    signal_id: Optional[str] = None
     symbol: str
     direction: OrderDirection
     order_type: OrderType

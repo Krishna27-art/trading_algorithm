@@ -74,31 +74,37 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
         order_type: OrderType,
         quantity: int,
         price: Optional[float] = None,
+        exchange: Optional[str] = None,
         tag: Optional[str] = "algo",
+        client_order_id: Optional[str] = None,
     ) -> OrderRecord:
         if not self.kite:
             raise RuntimeError("Kite adapter is not connected.")
 
         txn_type = self.kite.TRANSACTION_TYPE_BUY if direction == OrderDirection.BUY else self.kite.TRANSACTION_TYPE_SELL
         ord_type = self.kite.ORDER_TYPE_LIMIT if order_type == OrderType.LIMIT else self.kite.ORDER_TYPE_MARKET
-        exchange = self.kite.EXCHANGE_NFO if "NIFTY" in symbol else self.kite.EXCHANGE_NSE
+        target_exchange = exchange or (self.kite.EXCHANGE_NFO if getattr(self, "default_exchange", "NSE") == "NFO" else self.kite.EXCHANGE_NSE)
+
+        # Kite tag field has an 8-character or 20-character limit depending on API version; use tag or slice client_order_id
+        order_tag = tag or (client_order_id[:8] if client_order_id else "algo")
 
         try:
             order_id = self.kite.place_order(
                 variety=self.kite.VARIETY_REGULAR,
-                exchange=exchange,
+                exchange=target_exchange,
                 tradingsymbol=symbol,
                 transaction_type=txn_type,
                 quantity=quantity,
                 product=self.kite.PRODUCT_MIS,
                 order_type=ord_type,
                 price=price,
-                tag=tag,
+                tag=order_tag,
             )
             logger.info(f"[{self.name}] Order placed successfully. Broker Order ID: {order_id}")
             return OrderRecord(
                 order_id=order_id,
                 broker_order_id=order_id,
+                client_order_id=client_order_id,
                 symbol=symbol,
                 direction=direction,
                 order_type=order_type,
@@ -107,7 +113,7 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
                 status=OrderStatus.SUBMITTED,
                 created_at=datetime.now(),
                 updated_at=datetime.now(),
-                tag=tag,
+                tag=order_tag,
             )
         except Exception as e:
             logger.error(f"[{self.name}] Order placement failed: {e}")
@@ -148,6 +154,15 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
             return pos.get("net", [])
         except Exception as e:
             logger.error(f"[{self.name}] Error fetching positions: {e}")
+            return []
+
+    def get_orders(self) -> List[Dict[str, Any]]:
+        if not self.kite:
+            return []
+        try:
+            return self.kite.orders()
+        except Exception as e:
+            logger.error(f"[{self.name}] Error fetching orders: {e}")
             return []
 
     def get_margins(self) -> Dict[str, float]:

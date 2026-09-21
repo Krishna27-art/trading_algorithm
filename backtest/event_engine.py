@@ -3,6 +3,7 @@ Event-Driven Intraday Backtesting Engine.
 Zero look-ahead bias, realistic order fills, slippage, and statutory tax modeling.
 """
 
+from enum import Enum
 from datetime import datetime, time
 from typing import Dict, List, Optional
 import pandas as pd
@@ -16,10 +17,24 @@ from risk.position_sizer import PositionSizer
 from risk.transaction_costs import TransactionCostCalculator
 
 
+class ExecutionPolicy(str, Enum):
+    CONSERVATIVE = "CONSERVATIVE"  # Default: if both SL and target are hit in same candle, assume SL hit first
+    OPTIMISTIC = "OPTIMISTIC"      # Assume target hit first
+    LOWER_TIMEFRAME = "LOWER_TIMEFRAME"
+
+
 class EventDrivenBacktester:
-    def __init__(self, instrument: InstrumentConfig, app_settings: AppSettings = settings):
+    def __init__(
+        self,
+        instrument: InstrumentConfig,
+        app_settings: AppSettings = settings,
+        execution_policy: ExecutionPolicy = ExecutionPolicy.CONSERVATIVE,
+        slippage_points: float = 0.50,
+    ):
         self.instrument = instrument
         self.settings = app_settings
+        self.execution_policy = execution_policy
+        self.slippage_points = slippage_points
         self.position_sizer = PositionSizer(app_settings.risk)
         self.cost_calculator = TransactionCostCalculator(app_settings.costs)
 
@@ -29,7 +44,16 @@ class EventDrivenBacktester:
         returns the aggregated performance report.
         """
         all_trades = self.generate_trades(df_15m, initial_capital=initial_capital)
-        return PerformanceAnalyzer.generate_report(all_trades, initial_capital=initial_capital)
+        start_d = df_15m["datetime"].min() if "datetime" in df_15m.columns else None
+        end_d = df_15m["datetime"].max() if "datetime" in df_15m.columns else None
+        all_dates = df_15m["datetime"].dt.date.unique().tolist() if "datetime" in df_15m.columns else None
+        return PerformanceAnalyzer.generate_report(
+            all_trades,
+            initial_capital=initial_capital,
+            backtest_start_date=start_d,
+            backtest_end_date=end_d,
+            all_trading_dates=all_dates,
+        )
 
     def generate_trades(self, df_15m: pd.DataFrame, initial_capital: float = 1000000.0) -> List[dict]:
         """
@@ -115,75 +139,105 @@ class EventDrivenBacktester:
 
                     # B. Active Position Management for LONG
                     if position == 1:
-                        # Trailing to Breakeven (+1R reached)
-                        if not trailing_breakeven_active:
-                            if high_p >= (entry_price + initial_risk_dist):
-                                stop_loss = entry_price
-                                trailing_breakeven_active = True
+                        current_sl = stop_loss
+                        sl_hit = (low_p <= current_sl)
+                        target_hit = (high_p >= target)
 
-                        # Stop Loss Hit
-                        if low_p <= stop_loss:
-                            exit_price = stop_loss
+                        if sl_hit and target_hit:
+                            # Both hit in the same candle: resolve using ExecutionPolicy
+                            if self.execution_policy == ExecutionPolicy.OPTIMISTIC:
+                                exit_price = max(open_p, target)
+                                exit_reason = "PROFIT_TARGET"
+                            else:
+                                # CONSERVATIVE (default): assume stop hit first
+                                exit_price = min(open_p, current_sl)
+                                exit_reason = "BREAKEVEN_SL" if trailing_breakeven_active else "STOP_LOSS"
+                            self._close_position(trade_record, exit_price, row["datetime"], exit_reason, all_trades)
+                            daily_realized_pnl += trade_record["pnl_net"]
+                            current_capital += trade_record["pnl_net"]
+                            position = 0
+                            trade_record = None
+                            continue
+
+                        elif sl_hit:
+                            # Gap through stop: if open is already below stop, fill at open (not ideal SL)
+                            exit_price = min(open_p, current_sl)
                             exit_reason = "BREAKEVEN_SL" if trailing_breakeven_active else "STOP_LOSS"
-                            self._close_position(
-                                trade_record, exit_price, row["datetime"], exit_reason, all_trades
-                            )
+                            self._close_position(trade_record, exit_price, row["datetime"], exit_reason, all_trades)
                             daily_realized_pnl += trade_record["pnl_net"]
                             current_capital += trade_record["pnl_net"]
                             position = 0
                             trade_record = None
                             continue
 
-                        # Target Hit
-                        elif high_p >= target:
-                            exit_price = target
+                        elif target_hit:
+                            # Gap through target: if open is already above target, fill at open
+                            exit_price = max(open_p, target)
                             exit_reason = "PROFIT_TARGET"
-                            self._close_position(
-                                trade_record, exit_price, row["datetime"], exit_reason, all_trades
-                            )
+                            self._close_position(trade_record, exit_price, row["datetime"], exit_reason, all_trades)
                             daily_realized_pnl += trade_record["pnl_net"]
                             current_capital += trade_record["pnl_net"]
                             position = 0
                             trade_record = None
                             continue
+
+                        # If position remains open, check if +1R was reached to trail stop to breakeven for subsequent candles
+                        if not trailing_breakeven_active and high_p >= (entry_price + initial_risk_dist):
+                            stop_loss = entry_price
+                            trailing_breakeven_active = True
 
                     # C. Active Position Management for SHORT
                     elif position == -1:
-                        # Trailing to Breakeven (+1R reached)
-                        if not trailing_breakeven_active:
-                            if low_p <= (entry_price - initial_risk_dist):
-                                stop_loss = entry_price
-                                trailing_breakeven_active = True
+                        current_sl = stop_loss
+                        sl_hit = (high_p >= current_sl)
+                        target_hit = (low_p <= target)
 
-                        # Stop Loss Hit
-                        if high_p >= stop_loss:
-                            exit_price = stop_loss
+                        if sl_hit and target_hit:
+                            # Both hit in the same candle: resolve using ExecutionPolicy
+                            if self.execution_policy == ExecutionPolicy.OPTIMISTIC:
+                                exit_price = min(open_p, target)
+                                exit_reason = "PROFIT_TARGET"
+                            else:
+                                # CONSERVATIVE (default): assume stop hit first
+                                exit_price = max(open_p, current_sl)
+                                exit_reason = "BREAKEVEN_SL" if trailing_breakeven_active else "STOP_LOSS"
+                            self._close_position(trade_record, exit_price, row["datetime"], exit_reason, all_trades)
+                            daily_realized_pnl += trade_record["pnl_net"]
+                            current_capital += trade_record["pnl_net"]
+                            position = 0
+                            trade_record = None
+                            continue
+
+                        elif sl_hit:
+                            # Gap through stop: if open is already above stop, fill at open (not ideal SL)
+                            exit_price = max(open_p, current_sl)
                             exit_reason = "BREAKEVEN_SL" if trailing_breakeven_active else "STOP_LOSS"
-                            self._close_position(
-                                trade_record, exit_price, row["datetime"], exit_reason, all_trades
-                            )
+                            self._close_position(trade_record, exit_price, row["datetime"], exit_reason, all_trades)
                             daily_realized_pnl += trade_record["pnl_net"]
                             current_capital += trade_record["pnl_net"]
                             position = 0
                             trade_record = None
                             continue
 
-                        # Target Hit
-                        elif low_p <= target:
-                            exit_price = target
+                        elif target_hit:
+                            # Gap through target: if open is already below target, fill at open
+                            exit_price = min(open_p, target)
                             exit_reason = "PROFIT_TARGET"
-                            self._close_position(
-                                trade_record, exit_price, row["datetime"], exit_reason, all_trades
-                            )
+                            self._close_position(trade_record, exit_price, row["datetime"], exit_reason, all_trades)
                             daily_realized_pnl += trade_record["pnl_net"]
                             current_capital += trade_record["pnl_net"]
                             position = 0
                             trade_record = None
                             continue
+
+                        # If position remains open, check if +1R was reached to trail stop to breakeven for subsequent candles
+                        if not trailing_breakeven_active and low_p <= (entry_price - initial_risk_dist):
+                            stop_loss = entry_price
+                            trailing_breakeven_active = True
 
                 # 3. Check 2% Daily Circuit Breaker Kill-Switch
                 if -daily_realized_pnl >= max_allowed_daily_loss:
-                    break # Cease all trading for today
+                    break  # Cease all trading for today
 
                 # 4. Entry Scanning (09:45 to 13:30 IST), max 1 trade per day
                 if position == 0 and trades_today == 0:
@@ -192,9 +246,7 @@ class EventDrivenBacktester:
 
                     # LONG ENTRY
                     if close_p > orb.high and close_p > vwap:
-                        initial_stop = orb.low
-                        raw_risk = close_p - initial_stop
-
+                        raw_risk = close_p - orb.low
                         effective_risk = min(raw_risk, self.instrument.max_risk_cap) if orb.width > self.instrument.max_orb_range else raw_risk
                         qty = self.position_sizer.calculate_order_quantity(
                             capital=current_capital,
@@ -206,7 +258,8 @@ class EventDrivenBacktester:
                         if qty > 0:
                             position = 1
                             entry_price = close_p
-                            stop_loss = initial_stop
+                            # Align actual stop loss with effective_risk so true risk equals budget
+                            stop_loss = entry_price - effective_risk
                             target = close_p + (self.settings.strategy.risk_reward_ratio * effective_risk)
                             initial_risk_dist = effective_risk
                             trades_today += 1
@@ -223,9 +276,7 @@ class EventDrivenBacktester:
 
                     # SHORT ENTRY
                     elif close_p < orb.low and close_p < vwap:
-                        initial_stop = orb.high
-                        raw_risk = initial_stop - close_p
-
+                        raw_risk = orb.high - close_p
                         effective_risk = min(raw_risk, self.instrument.max_risk_cap) if orb.width > self.instrument.max_orb_range else raw_risk
                         qty = self.position_sizer.calculate_order_quantity(
                             capital=current_capital,
@@ -237,7 +288,8 @@ class EventDrivenBacktester:
                         if qty > 0:
                             position = -1
                             entry_price = close_p
-                            stop_loss = initial_stop
+                            # Align actual stop loss with effective_risk so true risk equals budget
+                            stop_loss = entry_price + effective_risk
                             target = close_p - (self.settings.strategy.risk_reward_ratio * effective_risk)
                             initial_risk_dist = effective_risk
                             trades_today += 1
@@ -288,6 +340,7 @@ class EventDrivenBacktester:
         trade["pnl_gross"] = round(gross_pnl, 2)
         trade["pnl_net"] = net_pnl
         trade["total_costs"] = costs.total_cost
+        trade["slippage_cost"] = costs.slippage_cost
         trade["r_multiple"] = r_mult
 
         all_trades.append(trade)

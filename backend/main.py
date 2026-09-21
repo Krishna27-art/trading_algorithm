@@ -343,26 +343,68 @@ def get_strategy_trades():
     return {"trades": trades, "count": len(trades)}
 
 
+@app.get("/api/strategy/scanner")
+def get_universe_scan(top_n: int = 5, refresh: bool = False):
+    """
+    Scans and ranks the NIFTY 50 universe using live batched Kite quotes
+    (or synthetic market data if unauthenticated), computing explainable scores.
+    """
+    from scanner.stock_ranker import NiftyUniverseScanner
+
+    kite = get_active_kite()
+    scanner = NiftyUniverseScanner()
+    ranked, data_source = scanner.scan_universe(
+        kite_client=kite,
+        top_n=top_n,
+        force_refresh_history=refresh,
+    )
+    return {
+        "status": "success",
+        "data_source": data_source,
+        "timestamp": datetime.now().isoformat(),
+        "count": len(ranked),
+        "top_n": top_n,
+        "scoring_weights": {
+            "rvol_weight": 30,
+            "gap_weight": 25,
+            "volatility_weight": 25,
+            "vwap_dist_weight": 20,
+            "total_max": 100,
+        },
+        "candidates": [m.to_dict() for m in ranked],
+    }
+
+
 @app.post("/api/strategy/backtest")
-def trigger_backtest(days: int = 180):
+def trigger_backtest(days: int = 180, symbol: str = "NIFTY"):
     """Executes the event-driven backtester over historical 15m candles."""
     from backtest.event_engine import EventDrivenBacktester
     from config.settings import settings
+    from config.universe import create_instrument_config_for_equity, resolve_universe_tokens
     from data.historical_loader import HistoricalDataLoader
     from datetime import datetime
+
+    if symbol and symbol != "NIFTY":
+        tokens = resolve_universe_tokens()
+        token = tokens.get(symbol)
+        inst = create_instrument_config_for_equity(symbol, token)
+        base_p = 2000.0
+    else:
+        inst = settings.instruments[0]
+        base_p = 24000.0
 
     df = HistoricalDataLoader.generate_synthetic_nifty_data(
         start_date=datetime(2025, 1, 1),
         days=days,
-        base_price=24000.0,
+        base_price=base_p,
     )
-    inst = settings.instruments[0]
     backtester = EventDrivenBacktester(instrument=inst, app_settings=settings)
     report = backtester.run(df, initial_capital=settings.risk.initial_capital)
 
     return {
         "success": True,
         "report": {
+            "symbol": inst.symbol,
             "total_trades": report.total_trades,
             "long_trades": report.long_trades,
             "short_trades": report.short_trades,
@@ -389,21 +431,30 @@ def trigger_backtest(days: int = 180):
 
 
 @app.get("/api/strategy/telemetry")
-def get_strategy_telemetry():
+def get_strategy_telemetry(symbol: str = "NIFTY"):
     """Provides high-density real-time telemetry for the ORB + VWAP workstation."""
     from config.settings import settings
+    from config.universe import create_instrument_config_for_equity, resolve_universe_tokens
     from data.market_calendar import MarketCalendar, SessionPhase
     from database.db import DatabaseManager
     from datetime import datetime, time
+
+    if symbol and symbol != "NIFTY":
+        tokens = resolve_universe_tokens()
+        target_inst = create_instrument_config_for_equity(symbol, tokens.get(symbol))
+        base_p = 2000.0
+    else:
+        target_inst = settings.instruments[0]
+        base_p = 24000.0
 
     now = datetime.now()
     cur_time = now.time()
     phase = MarketCalendar.get_session_phase(cur_time)
     is_open = (time(9, 15) <= cur_time <= time(15, 30)) and MarketCalendar.is_trading_day(now.date())
 
-    # Generate session candle series for NIFTY 50 intraday chart
+    # Generate session candle series for selected intraday chart
     from data.historical_loader import HistoricalDataLoader
-    df_sample = HistoricalDataLoader.generate_synthetic_nifty_data(days=1, seed=42)
+    df_sample = HistoricalDataLoader.generate_synthetic_nifty_data(days=1, seed=42, base_price=base_p)
     
     # Calculate intraday session VWAP
     from indicators.vwap import calculate_session_vwap
@@ -427,7 +478,7 @@ def get_strategy_telemetry():
     orb_high = round(float(orb_bars["high"].max()), 2)
     orb_low = round(float(orb_bars["low"].min()), 2)
     orb_width = round(orb_high - orb_low, 2)
-    vol_filter_passed = (orb_width >= settings.instruments[0].min_orb_range)
+    vol_filter_passed = (orb_width >= target_inst.min_orb_range)
 
     latest_bar = df_sample.iloc[-1]
     ltp = round(float(latest_bar["close"]), 2)
@@ -448,7 +499,7 @@ def get_strategy_telemetry():
         or_status = "COMPLETED"
     elif not vol_filter_passed:
         algo_state = "DAILY LIMIT REACHED"
-        or_status = "FILTER FAILED (< 40 PTS)"
+        or_status = f"FILTER FAILED (< {target_inst.min_orb_range:.1f} PTS)"
     else:
         or_status = "COMPLETED"
         if ltp > orb_high and ltp > current_vwap:
@@ -460,15 +511,16 @@ def get_strategy_telemetry():
 
     # Active Signal Details
     active_signal = None
+    lot_multiplier = target_inst.lot_size
     if vol_filter_passed and cur_time >= time(9, 45):
         if ltp > orb_high and ltp > current_vwap:
-            effective_risk = min(ltp - orb_low, settings.instruments[0].max_risk_cap) if orb_width > 120 else (ltp - orb_low)
+            effective_risk = min(ltp - orb_low, target_inst.max_risk_cap) if orb_width > target_inst.max_orb_range else (ltp - orb_low)
             target = ltp + 2.0 * effective_risk
-            risk_amount = round(effective_risk * 25, 2)
-            reward_amount = round((target - ltp) * 25, 2)
+            risk_amount = round(effective_risk * lot_multiplier, 2)
+            reward_amount = round((target - ltp) * lot_multiplier, 2)
             active_signal = {
                 "type": "LONG",
-                "symbol": "NIFTY 50 Near-Month",
+                "symbol": target_inst.symbol,
                 "trigger": f"Breakout above OR High ({orb_high:.2f}) & above VWAP ({current_vwap:.2f})",
                 "entry": ltp,
                 "stop_loss": orb_low,
@@ -480,13 +532,13 @@ def get_strategy_telemetry():
                 "time": "10:00 IST",
             }
         elif ltp < orb_low and ltp < current_vwap:
-            effective_risk = min(orb_high - ltp, settings.instruments[0].max_risk_cap) if orb_width > 120 else (orb_high - ltp)
+            effective_risk = min(orb_high - ltp, target_inst.max_risk_cap) if orb_width > target_inst.max_orb_range else (orb_high - ltp)
             target = ltp - 2.0 * effective_risk
-            risk_amount = round(effective_risk * 25, 2)
-            reward_amount = round((ltp - target) * 25, 2)
+            risk_amount = round(effective_risk * lot_multiplier, 2)
+            reward_amount = round((ltp - target) * lot_multiplier, 2)
             active_signal = {
                 "type": "SHORT",
-                "symbol": "NIFTY 50 Near-Month",
+                "symbol": target_inst.symbol,
                 "trigger": f"Breakdown below OR Low ({orb_low:.2f}) & below VWAP ({current_vwap:.2f})",
                 "entry": ltp,
                 "stop_loss": orb_high,
@@ -525,7 +577,7 @@ def get_strategy_telemetry():
     daily_remaining = max(daily_risk_limit - daily_used, 0.0)
 
     return {
-        "symbol": "NIFTY",
+        "symbol": target_inst.symbol,
         "current_price": ltp,
         "price_change_pts": change_pts,
         "price_change_pct": change_pct,

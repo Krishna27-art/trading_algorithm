@@ -24,15 +24,15 @@ class PositionSizer:
         instrument: InstrumentConfig,
         or_width: Optional[float] = None,
         available_margin: Optional[float] = None,
-        estimated_price: float = 24000.0,
+        estimated_price: Optional[float] = None,
+        enforce_max_risk_cap: bool = False,
     ) -> int:
         """
-        Calculates position size in units/shares.
-        Respects:
-        - 1% account risk fraction
-        - 80-point maximum risk cap when OR_width > 120 points
-        - Contract lot size rounding (e.g. multiples of 25 for Nifty futures)
-        - Available margin capacity
+        Calculates position size in units/shares based on TRUE economic stop risk:
+            Quantity = floor(Risk_Capital / Actual_Stop_Distance)
+        Rounded down to contract lot size.
+        Guarantees:
+            Actual_Risk = Quantity * Actual_Stop_Distance <= Risk_Budget
         """
         if stop_distance <= 0 or capital <= 0:
             return 0
@@ -40,27 +40,31 @@ class PositionSizer:
         # Maximum capital willing to risk on this trade (default 1%)
         risk_budget = capital * self.risk_config.risk_per_trade_pct
 
-        # Apply research rule: If OR_width > 120 pts, cap effective risk distance at 80 pts
-        effective_risk_distance = stop_distance
-        if or_width is not None and or_width > instrument.max_orb_range:
-            effective_risk_distance = min(stop_distance, instrument.max_risk_cap)
+        # If enforce_max_risk_cap is True and stop exceeds instrument cap, reject trade
+        if enforce_max_risk_cap and instrument.max_risk_cap and stop_distance > instrument.max_risk_cap:
+            logger.warning(
+                f"Stop distance {stop_distance:.2f} exceeds instrument maximum risk cap "
+                f"{instrument.max_risk_cap:.2f}. Trade rejected."
+            )
+            return 0
 
-        raw_units = risk_budget / effective_risk_distance
+        # Position size MUST reflect the true economic risk of the actual stop
+        raw_units = risk_budget / stop_distance
 
         if instrument.instrument_type == InstrumentType.FUTURES:
             # Round down to nearest multiple of contract lot size
             lots = math.floor(raw_units / instrument.lot_size)
             if lots < 1:
-                # If 1% risk cannot even afford 1 lot, return 0 (or 1 lot if capital allows with strict warning)
-                logger.warning(
-                    f"Capital ₹{capital:,.2f} with 1% risk cannot cover 1 contract lot ({instrument.lot_size} units). "
-                    f"Required risk: ₹{effective_risk_distance * instrument.lot_size:,.2f} vs Budget: ₹{risk_budget:,.2f}."
+                logger.info(
+                    f"Risk budget ₹{risk_budget:,.2f} cannot afford 1 contract lot "
+                    f"({instrument.lot_size} units) at {stop_distance:.2f} stop distance."
                 )
-                # For realistic simulation, if risk budget is close or user wants minimum 1 lot:
                 return 0
             final_quantity = lots * instrument.lot_size
         else:
-            final_quantity = max(int(raw_units), 1)
+            final_quantity = int(math.floor(raw_units))
+            if final_quantity < 1:
+                return 0
 
         # Margin sanity check (assuming ~12% MIS intraday margin for index futures or 20% for equities)
         if available_margin is not None and self.risk_config.enforce_margin_check:

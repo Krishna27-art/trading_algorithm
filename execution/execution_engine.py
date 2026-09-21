@@ -29,18 +29,24 @@ class ExecutionEngine:
         instrument: InstrumentConfig,
         app_settings: AppSettings = settings,
         db: Optional[DatabaseManager] = None,
+        portfolio: Optional[PortfolioManager] = None,
+        risk_manager: Optional[RiskManager] = None,
+        order_manager: Optional[OrderManager] = None,
     ):
         self.broker = broker
         self.instrument = instrument
         self.settings = app_settings
         self.db = db or DatabaseManager(app_settings.db_path)
 
-        # Core Components
-        self.portfolio = PortfolioManager(initial_capital=app_settings.risk.initial_capital)
-        self.risk_manager = RiskManager(app_settings.risk)
+        # Core Components (shared across multi-instrument engines when provided)
+        self.portfolio = portfolio or PortfolioManager(initial_capital=app_settings.risk.initial_capital)
+        self.risk_manager = risk_manager or RiskManager(app_settings.risk)
         self.position_sizer = PositionSizer(app_settings.risk)
         self.cost_calculator = TransactionCostCalculator(app_settings.costs)
-        self.order_manager = OrderManager()
+        self.order_manager = order_manager or OrderManager()
+
+        if risk_manager is not None:
+            logger.info(f"[{instrument.symbol}] Linked to shared portfolio-wide RiskManager.")
 
         # Strategy & Aggregator
         self.strategy = IntradayORBStrategy(instrument=self.instrument, strategy_config=app_settings.strategy)
@@ -52,15 +58,146 @@ class ExecutionEngine:
 
         # Active trade state
         self.current_trade: Optional[TradeRecord] = None
+        self.is_reconciled: bool = False
+        self.reconciliation_error: Optional[str] = None
+
+    def reconcile_startup_state(self) -> Dict[str, Any]:
+        """
+        Reconciles broker positions and open orders with local state on startup.
+        Prevents starting with 'no position' when a position exists or placing duplicate orders.
+        """
+        logger.info(f"[{self.instrument.symbol}] Initiating startup reconciliation...")
+        report = {
+            "symbol": self.instrument.symbol,
+            "broker_position": 0,
+            "local_trade_found": False,
+            "action_taken": "NONE",
+            "status": "OK",
+        }
+
+        try:
+            # 1. Fetch broker positions
+            broker_pos_list = self.broker.get_positions()
+            broker_qty = 0
+            broker_buy_price = 0.0
+            for p in broker_pos_list:
+                sym = p.get("symbol") or p.get("tradingsymbol")
+                if sym == self.instrument.symbol:
+                    broker_qty = int(p.get("quantity", 0))
+                    broker_buy_price = float(p.get("buy_price") or p.get("average_price", 0.0))
+                    break
+            report["broker_position"] = broker_qty
+
+            # 2. Fetch broker open orders
+            broker_orders = self.broker.get_orders()
+            for o in broker_orders:
+                sym = o.get("symbol") or o.get("tradingsymbol")
+                if sym == self.instrument.symbol:
+                    status_str = o.get("status", "OPEN")
+                    if status_str in ("OPEN", "PENDING", "TRIGGER PENDING"):
+                        logger.warning(f"Found active broker order on startup: {o.get('order_id')}")
+
+            # 3. Fetch local open trade from database
+            open_trades = self.db.get_open_trades(self.instrument.symbol)
+            local_trade = open_trades[0] if open_trades else None
+            report["local_trade_found"] = local_trade is not None
+
+            # 4. Compare and reconcile
+            if broker_qty != 0 and local_trade:
+                logger.info(f"Reconciled existing open trade {local_trade['trade_id']} with broker position {broker_qty}.")
+                direction = OrderDirection(local_trade["direction"])
+                pos_mult = 1 if direction == OrderDirection.BUY else -1
+                self.strategy.register_trade_entry(
+                    entry_price=local_trade["entry_price"],
+                    position=pos_mult,
+                    stop_loss=local_trade["initial_stop"],
+                    target=local_trade["initial_target"],
+                    risk_dist=abs(local_trade["entry_price"] - local_trade["initial_stop"]),
+                )
+                self.portfolio.record_entry(
+                    self.instrument.symbol,
+                    local_trade["direction"],
+                    abs(broker_qty),
+                    local_trade["entry_price"],
+                )
+                self.current_trade = TradeRecord(**local_trade)
+                report["action_taken"] = "RESTORED_FROM_LOCAL_AND_BROKER"
+
+            elif broker_qty != 0 and not local_trade:
+                logger.warning(f"CRITICAL: Broker has open position {broker_qty} for {self.instrument.symbol} but no local trade found!")
+                direction = OrderDirection.BUY if broker_qty > 0 else OrderDirection.SELL
+                pos_mult = 1 if broker_qty > 0 else -1
+                trade_id = f"RECOVERED_{uuid.uuid4().hex[:8]}"
+                recovered_trade = TradeRecord(
+                    trade_id=trade_id,
+                    symbol=self.instrument.symbol,
+                    direction=direction,
+                    entry_time=datetime.now(),
+                    entry_price=broker_buy_price,
+                    quantity=abs(broker_qty),
+                    initial_stop=broker_buy_price * 0.99 if pos_mult > 0 else broker_buy_price * 1.01,
+                    initial_target=broker_buy_price * 1.02 if pos_mult > 0 else broker_buy_price * 0.98,
+                    is_paper=(self.broker.name == "PAPER_BROKER"),
+                    notes="Auto-recovered from broker position on restart",
+                )
+                self.db.record_trade_entry(recovered_trade)
+                self.current_trade = recovered_trade
+                self.strategy.register_trade_entry(
+                    entry_price=broker_buy_price,
+                    position=pos_mult,
+                    stop_loss=recovered_trade.initial_stop,
+                    target=recovered_trade.initial_target,
+                    risk_dist=abs(broker_buy_price - recovered_trade.initial_stop),
+                )
+                self.portfolio.record_entry(
+                    self.instrument.symbol,
+                    direction.value,
+                    abs(broker_qty),
+                    broker_buy_price,
+                )
+                report["action_taken"] = "RECOVERED_FROM_BROKER"
+
+            elif broker_qty == 0 and local_trade:
+                logger.warning(f"Local trade {local_trade['trade_id']} was open, but broker position is 0. Closing local trade.")
+                closed_trade = TradeRecord(**local_trade)
+                closed_trade.exit_time = datetime.now()
+                closed_trade.exit_price = local_trade["entry_price"]
+                closed_trade.exit_reason = ExitReason.MANUAL
+                closed_trade.notes = "Closed during startup reconciliation: broker position was zero"
+                self.db.record_trade_exit(closed_trade)
+                self.current_trade = None
+                self.strategy.position = 0
+                report["action_taken"] = "CLOSED_LOCAL_GHOST_TRADE"
+
+            else:
+                logger.info(f"Reconciliation clean: No open positions on broker or local DB for {self.instrument.symbol}.")
+                report["action_taken"] = "CLEAN"
+
+            self.is_reconciled = True
+            self.reconciliation_error = None
+            return report
+
+        except Exception as e:
+            logger.error(f"Startup reconciliation failed: {e}")
+            self.is_reconciled = False
+            self.reconciliation_error = str(e)
+            report["status"] = "ERROR"
+            report["error"] = str(e)
+            return report
 
     def start(self):
-        """Initializes broker connection and begins session."""
+        """Initializes broker connection and reconciles state."""
         logger.info(f"Starting Execution Engine in [{self.broker.name}] mode for {self.instrument.symbol}.")
         self.broker.connect()
-        self.risk_manager.reset_daily_state(datetime.now().date())
-        self.strategy.reset_session(datetime.now().date())
-        self.portfolio.reset_day()
+        today = datetime.now().date()
+        if self.risk_manager.current_trading_date != today:
+            self.risk_manager.reset_daily_state(today)
+            self.portfolio.reset_day()
+        self.strategy.reset_session(today)
         self.candle_aggregator.reset_daily_session()
+
+        # Reconcile Startup State
+        self.reconcile_startup_state()
 
     def stop(self):
         """Clean shutdown and square off any remaining positions."""
@@ -114,9 +251,21 @@ class ExecutionEngine:
         symbol = signal.symbol
         current_time = signal.timestamp.time()
 
-        # Check if already in flight
-        if self.order_manager.is_order_in_flight(symbol):
-            logger.warning("Order already in flight. Skipping duplicate entry.")
+        # Invariant 11: No order placed if broker state is uncertain or reconciliation failed
+        if not self.is_reconciled or self.reconciliation_error:
+            logger.error(
+                f"[{symbol}] Order blocked: Broker state uncertain or reconciliation failed: {self.reconciliation_error}"
+            )
+            return
+
+        # Invariant 4 & Invariant 10: Signal Idempotency & Order deduplication
+        if signal.signal_id and self.order_manager.is_duplicate_signal(signal.signal_id):
+            logger.warning(f"[{symbol}] Signal {signal.signal_id} already processed. Skipping duplicate entry.")
+            return
+
+        # Check if already in flight or position exists
+        if self.order_manager.is_order_in_flight(symbol) or self.strategy.position != 0:
+            logger.warning(f"[{symbol}] Order already in flight or position exists. Skipping entry.")
             return
 
         stop_dist = abs(signal.price - signal.stop_loss) if signal.stop_loss else 50.0
@@ -129,7 +278,7 @@ class ExecutionEngine:
             capital=self.portfolio.current_capital,
             stop_distance=stop_dist,
             instrument=self.instrument,
-            or_width=self.strategy.orb.width if self.strategy.orb else None,
+            or_width=getattr(getattr(self.strategy, "orb", None), "width", None),
             available_margin=avail_margin,
             estimated_price=signal.price,
         )
@@ -150,6 +299,7 @@ class ExecutionEngine:
         # Route Marketable Limit Order (1 tick aggressive to guarantee fill while bounding slippage)
         direction = OrderDirection.BUY if signal.action == SignalAction.BUY else OrderDirection.SELL
         order_price = signal.price + 0.05 if direction == OrderDirection.BUY else signal.price - 0.05
+        client_order_id = f"CLT_{signal.signal_id or uuid.uuid4().hex[:12]}"
 
         try:
             order_record = self.broker.place_order(
@@ -159,7 +309,10 @@ class ExecutionEngine:
                 quantity=qty,
                 price=order_price,
                 tag="ORB_ENTRY",
+                client_order_id=client_order_id,
             )
+            order_record.client_order_id = client_order_id
+            order_record.signal_id = signal.signal_id
             self.order_manager.register_order(order_record)
             self.db.save_order(order_record)
 
@@ -195,6 +348,27 @@ class ExecutionEngine:
 
         except Exception as e:
             logger.error(f"Failed to place entry order: {e}")
+            # Mark order status UNKNOWN and require manual/startup reconciliation
+            unknown_order = OrderRecord(
+                order_id=f"UNKNOWN_{uuid.uuid4().hex[:8]}",
+                client_order_id=client_order_id,
+                signal_id=signal.signal_id,
+                symbol=symbol,
+                direction=direction,
+                order_type=OrderType.LIMIT,
+                price=order_price,
+                quantity=qty,
+                status=OrderStatus.UNKNOWN,
+                reject_reason=str(e),
+            )
+            try:
+                self.order_manager.register_order(unknown_order)
+                self.db.save_order(unknown_order)
+            except Exception:
+                pass
+            self.is_reconciled = False
+            self.reconciliation_error = f"Order in UNKNOWN state: {e}"
+            raise
 
     def _execute_exit_signal(self, signal: StrategySignal):
         """Handles position closing and trade journaling."""
@@ -204,6 +378,7 @@ class ExecutionEngine:
         symbol = signal.symbol
         qty = self.current_trade.quantity
         exit_dir = OrderDirection.SELL if self.current_trade.direction == OrderDirection.BUY else OrderDirection.BUY
+        client_order_id = f"CLT_EXIT_{uuid.uuid4().hex[:8]}"
 
         try:
             order_record = self.broker.place_order(
@@ -213,7 +388,9 @@ class ExecutionEngine:
                 quantity=qty,
                 price=signal.price,
                 tag="ORB_EXIT",
+                client_order_id=client_order_id,
             )
+            order_record.client_order_id = client_order_id
             self.order_manager.register_order(order_record)
             self.db.save_order(order_record)
 

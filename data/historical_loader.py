@@ -186,12 +186,116 @@ class HistoricalDataLoader:
         df.sort_values("datetime", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
+        # Strict validation
+        is_valid, errors = HistoricalDataLoader.validate_candles(df)
+        if not is_valid:
+            raise ValueError(f"Historical market data validation failed: {'; '.join(errors)}")
+
         if cache_path is not None:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(cache_path, index=False)
-            logger.info(f"Cached {len(df)} bars to {cache_path}")
+            metadata = {
+                "symbol": cache_path.stem.split("_")[0] if cache_path else "UNKNOWN",
+                "instrument_token": instrument_token,
+                "interval": interval,
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+                "source": "Zerodha Kite Connect Historical API",
+                "downloaded_timestamp": datetime.now().isoformat(),
+                "candle_count": len(df),
+                "trading_days": int(df["datetime"].dt.date.nunique()),
+            }
+            HistoricalDataLoader.save_with_metadata(df, cache_path, metadata)
 
         return df
+
+    @staticmethod
+    def validate_candles(df: pd.DataFrame) -> Tuple[bool, List[str]]:
+        """
+        Validates OHLCV market candle integrity:
+        - Required columns present
+        - No NaN or null values
+        - Prices strictly positive, Volume >= 0
+        - High >= max(Open, Close, Low)
+        - Low <= min(Open, Close, High)
+        - Monotonically increasing timestamps (no out-of-order bars)
+        - Zero duplicate timestamps
+        """
+        errors: List[str] = []
+        required_cols = {"datetime", "open", "high", "low", "close", "volume"}
+        if not required_cols.issubset(df.columns):
+            missing = required_cols - set(df.columns)
+            errors.append(f"Missing required columns: {missing}")
+            return False, errors
+
+        if len(df) == 0:
+            errors.append("Dataset contains 0 candles.")
+            return False, errors
+
+        # Null check
+        if df[list(required_cols)].isna().any().any():
+            null_cols = df[list(required_cols)].columns[df[list(required_cols)].isna().any()].tolist()
+            errors.append(f"Null values detected in columns: {null_cols}")
+
+        # Price positivity & volume
+        if (df["open"] <= 0).any() or (df["high"] <= 0).any() or (df["low"] <= 0).any() or (df["close"] <= 0).any():
+            errors.append("Non-positive prices found in OHLC data.")
+
+        if (df["volume"] < 0).any():
+            errors.append("Negative volume found in dataset.")
+
+        # Geometric OHLC checks
+        invalid_high = (df["high"] < df["low"]) | (df["high"] < df["open"]) | (df["high"] < df["close"])
+        if invalid_high.any():
+            bad_count = invalid_high.sum()
+            errors.append(f"Found {bad_count} candles where High is lower than Open, Low, or Close.")
+
+        invalid_low = (df["low"] > df["high"]) | (df["low"] > df["open"]) | (df["low"] > df["close"])
+        if invalid_low.any():
+            bad_count = invalid_low.sum()
+            errors.append(f"Found {bad_count} candles where Low is higher than Open, High, or Close.")
+
+        # Timestamp order & duplicates
+        if not df["datetime"].is_monotonic_increasing:
+            errors.append("Timestamps are out of chronological order.")
+
+        dup_count = df["datetime"].duplicated().sum()
+        if dup_count > 0:
+            errors.append(f"Found {dup_count} duplicate timestamps.")
+
+        return len(errors) == 0, errors
+
+    @staticmethod
+    def save_with_metadata(df: pd.DataFrame, csv_path: Path, metadata: Dict[str, Any]):
+        """Saves validated candle dataset along with sidecar metadata JSON."""
+        import json
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(csv_path, index=False)
+        meta_path = csv_path.with_suffix(".meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Saved {len(df)} validated bars and metadata to {csv_path}")
+
+    @staticmethod
+    def load_cached_data_with_validation(csv_path: Path) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+        """Loads and validates a cached candle CSV, returning dataframe and metadata."""
+        import json
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Cache file {csv_path} does not exist.")
+
+        df = pd.read_csv(csv_path, parse_dates=["datetime"])
+        is_valid, errors = HistoricalDataLoader.validate_candles(df)
+        if not is_valid:
+            raise ValueError(f"Cached data validation failed for {csv_path}: {'; '.join(errors)}")
+
+        meta_path = csv_path.with_suffix(".meta.json")
+        meta = None
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not load metadata from {meta_path}: {e}")
+
+        return df, meta
 
     @staticmethod
     def generate_synthetic_nifty_data(

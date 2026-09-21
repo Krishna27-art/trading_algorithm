@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Callable, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from backtest.event_engine import EventDrivenBacktester
@@ -48,6 +49,7 @@ from config.settings import AppSettings, InstrumentConfig, settings
 from monitoring.logger import logger
 
 ParamSelector = Callable[[pd.DataFrame], InstrumentConfig]
+BacktesterFactory = Callable[[InstrumentConfig], object]  # must expose .generate_trades(df, initial_capital)
 
 
 @dataclass
@@ -63,17 +65,44 @@ class Fold:
 
 
 @dataclass
+class FoldStatistics:
+    median_profit_factor: float
+    best_fold_net_pnl: float
+    worst_fold_net_pnl: float
+    pct_profitable_folds: float
+    pnl_dispersion_std: float
+    median_sharpe: float
+
+
+@dataclass
 class RollingWalkForwardResult:
     folds: List[Fold]
     combined_out_of_sample_report: PerformanceReport
     final_capital: float
     all_out_of_sample_trades: List[dict] = field(default_factory=list)
+    fold_statistics: Optional[FoldStatistics] = None
 
 
 class RollingWalkForwardValidator:
-    def __init__(self, instrument: InstrumentConfig, app_settings: AppSettings = settings):
+    def __init__(
+        self,
+        instrument: InstrumentConfig,
+        app_settings: AppSettings = settings,
+        backtester_factory: Optional[BacktesterFactory] = None,
+    ):
+        """
+        backtester_factory: builds the backtester for a given fold's instrument
+        config. Defaults to the ORB+VWAP EventDrivenBacktester (unchanged
+        behavior for existing callers). Pass e.g.
+            lambda inst: StrategyBacktester(lambda: CPRRegimeBreakoutStrategy(inst), inst, app_settings)
+        to walk-forward test any other BaseStrategy through the same
+        no-look-ahead fold structure.
+        """
         self.instrument = instrument
         self.settings = app_settings
+        self.backtester_factory = backtester_factory or (
+            lambda inst: EventDrivenBacktester(inst, app_settings)
+        )
 
     def validate(
         self,
@@ -119,10 +148,11 @@ class RollingWalkForwardValidator:
                 try:
                     instrument_for_fold = param_selector(df_train)
                 except Exception as e:
-                    logger.error(f"param_selector failed on fold {fold_number}, "
-                                 f"falling back to base instrument config: {e}")
+                    logger.warning(
+                        f"Fold {fold_number}: param_selector failed ({e}), falling back to base config"
+                    )
 
-            backtester = EventDrivenBacktester(instrument_for_fold, self.settings)
+            backtester = self.backtester_factory(instrument_for_fold)
             starting_capital = running_capital
 
             logger.info(
@@ -153,9 +183,35 @@ class RollingWalkForwardValidator:
             all_oos_trades, initial_capital=initial_capital
         )
 
+        # Calculate fold aggregate robustness statistics
+        if folds:
+            pfs = [f.report.profit_factor for f in folds if f.report.profit_factor != float("inf") and f.report.profit_factor > 0]
+            net_pnls = [f.report.net_pnl for f in folds]
+            sharpes = [f.report.sharpe_ratio for f in folds]
+            profitable_count = sum(1 for pnl in net_pnls if pnl > 0)
+
+            med_pf = float(np.median(pfs)) if pfs else 0.0
+            med_sharpe = float(np.median(sharpes)) if sharpes else 0.0
+            best_pnl = float(max(net_pnls)) if net_pnls else 0.0
+            worst_pnl = float(min(net_pnls)) if net_pnls else 0.0
+            pct_prof = (profitable_count / len(folds)) * 100.0 if folds else 0.0
+            pnl_std = float(np.std(net_pnls)) if len(net_pnls) > 1 else 0.0
+
+            fold_stats = FoldStatistics(
+                median_profit_factor=round(med_pf, 2),
+                best_fold_net_pnl=round(best_pnl, 2),
+                worst_fold_net_pnl=round(worst_pnl, 2),
+                pct_profitable_folds=round(pct_prof, 2),
+                pnl_dispersion_std=round(pnl_std, 2),
+                median_sharpe=round(med_sharpe, 2),
+            )
+        else:
+            fold_stats = FoldStatistics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
         return RollingWalkForwardResult(
             folds=folds,
             combined_out_of_sample_report=combined_report,
             final_capital=running_capital,
             all_out_of_sample_trades=all_oos_trades,
+            fold_statistics=fold_stats,
         )

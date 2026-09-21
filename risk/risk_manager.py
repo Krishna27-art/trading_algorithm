@@ -13,8 +13,13 @@ from monitoring.logger import logger
 
 
 class RiskManager:
-    def __init__(self, risk_config: RiskConfig = settings.risk):
+    def __init__(
+        self,
+        risk_config: RiskConfig = settings.risk,
+        max_portfolio_daily_trades: int = 1,
+    ):
         self.config = risk_config
+        self.max_portfolio_daily_trades = max_portfolio_daily_trades
         self.daily_trades_count: Dict[str, int] = {}
         self.daily_realized_pnl: float = 0.0
         self.daily_unrealized_pnl: float = 0.0
@@ -32,8 +37,8 @@ class RiskManager:
 
     def update_pnl(self, realized_pnl_delta: float = 0.0, current_unrealized_pnl: float = 0.0, capital: float = 1000000.0) -> bool:
         """
-        Updates cumulative daily P&L and checks for circuit breaker.
-        Returns True if kill-switch is triggered.
+        Updates cumulative daily P&L across ALL open/closed positions and checks
+        for circuit breaker. Returns True if kill-switch is triggered.
         """
         self.daily_realized_pnl += realized_pnl_delta
         self.daily_unrealized_pnl = current_unrealized_pnl
@@ -44,8 +49,8 @@ class RiskManager:
         if total_daily_loss >= max_allowed_loss and not self.kill_switch_active:
             self.kill_switch_active = True
             logger.critical(
-                f"[CIRCUIT BREAKER ACTIVATED] Daily loss ₹{total_daily_loss:,.2f} reached/exceeded "
-                f"2.0% threshold (₹{max_allowed_loss:,.2f}). Engaging hard software kill-switch!"
+                f"[CIRCUIT BREAKER ACTIVATED] Cumulative portfolio daily loss ₹{total_daily_loss:,.2f} "
+                f"reached/exceeded 2.0% threshold (₹{max_allowed_loss:,.2f}). Engaging hard software kill-switch!"
             )
             return True
 
@@ -61,13 +66,22 @@ class RiskManager:
     ) -> Tuple[bool, Optional[str]]:
         """
         Executes strict pre-trade validation checks.
+        Enforces portfolio-wide 1-trade limit and 2% daily loss circuit breaker.
         Returns (is_approved, rejection_reason).
         """
-        # 1. Check Kill-Switch
+        # 1. Check Portfolio Kill-Switch
         if self.kill_switch_active:
             return False, "REJECTED: Daily portfolio kill-switch is active."
 
-        # 2. Check Daily Trade Limit (Max 1 trade per instrument per day)
+        # 2. Check Portfolio-Wide Daily Trade Limit (across ALL instruments combined)
+        total_trades_done = sum(self.daily_trades_count.values())
+        if total_trades_done >= self.max_portfolio_daily_trades:
+            return (
+                False,
+                f"REJECTED: Daily trade limit reached for portfolio ({total_trades_done}/{self.max_portfolio_daily_trades}).",
+            )
+
+        # 2b. Check Symbol-Specific Daily Trade Limit (Max 1 trade per instrument)
         trades_done = self.daily_trades_count.get(symbol, 0)
         if trades_done >= 1:
             return False, f"REJECTED: Daily trade limit reached for {symbol} ({trades_done}/1)."
@@ -88,4 +102,8 @@ class RiskManager:
 
     def record_trade_executed(self, symbol: str):
         self.daily_trades_count[symbol] = self.daily_trades_count.get(symbol, 0) + 1
-        logger.info(f"Trade registered for {symbol}. Total session trades: {self.daily_trades_count[symbol]}.")
+        total_trades = sum(self.daily_trades_count.values())
+        logger.info(
+            f"Trade registered for {symbol}. Symbol trades: {self.daily_trades_count[symbol]} | "
+            f"Total portfolio session trades: {total_trades}/{self.max_portfolio_daily_trades}."
+        )

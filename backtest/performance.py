@@ -4,7 +4,8 @@ Calculates CAGR, Sharpe, Drawdown, Profit Factor, Expectancy, R-metrics, and cos
 """
 
 from dataclasses import dataclass
-from typing import Dict, List
+from datetime import datetime
+from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
@@ -41,7 +42,10 @@ class PerformanceAnalyzer:
     def generate_report(
         trades: List[dict],
         initial_capital: float = 1000000.0,
-        risk_free_rate: float = 0.065, # 6.5% Indian 10-yr G-sec
+        risk_free_rate: float = 0.065,  # 6.5% Indian 10-yr G-sec
+        backtest_start_date: Optional[datetime] = None,
+        backtest_end_date: Optional[datetime] = None,
+        all_trading_dates: Optional[List] = None,
     ) -> PerformanceReport:
         if not trades:
             return PerformanceReport(
@@ -71,21 +75,26 @@ class PerformanceAnalyzer:
         gross_pnl = float(df["pnl_gross"].sum())
         net_pnl = float(df["pnl_net"].sum())
         total_costs = float(df["total_costs"].sum())
-        cost_drag = (total_costs / gross_pnl * 100.0) if gross_pnl > 0 else 0.0
+        cost_drag = (total_costs / gross_pnl * 100.0) if gross_pnl > 0 else (100.0 if total_costs > 0 else 0.0)
 
         gross_wins = float(winning_df["pnl_net"].sum()) if not winning_df.empty else 0.0
         gross_losses = abs(float(losing_df["pnl_net"].sum())) if not losing_df.empty else 0.0
-        profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else 99.0
+        if gross_losses > 0:
+            profit_factor = round(gross_wins / gross_losses, 2)
+        elif gross_wins > 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = 0.0
 
-        # Equity Curve and Drawdowns
+        # Equity Curve and Drawdowns (trade-by-trade realized equity)
         equity = initial_capital + df["pnl_net"].cumsum()
         peak = np.maximum.accumulate(equity)
         drawdown = (equity - peak) / peak
         max_drawdown_pct = abs(float(drawdown.min())) * 100.0
 
-        # Duration & CAGR
-        start_date = df["entry_time"].iloc[0]
-        end_date = df["entry_time"].iloc[-1]
+        # Duration & CAGR (using requested backtest duration if provided)
+        start_date = pd.to_datetime(backtest_start_date) if backtest_start_date is not None else df["entry_time"].iloc[0]
+        end_date = pd.to_datetime(backtest_end_date) if backtest_end_date is not None else df["entry_time"].iloc[-1]
         days = max((end_date - start_date).days, 1)
         years = days / 365.25
         ending_capital = initial_capital + net_pnl
@@ -95,9 +104,20 @@ class PerformanceAnalyzer:
             cagr = 0.0
 
         # Daily Returns & Sharpe Ratio
+        # Incorporates full trading days (including zero-return days) to prevent distortion
         df["date"] = df["entry_time"].dt.date
-        daily_pnl = df.groupby("date")["pnl_net"].sum()
-        daily_returns = daily_pnl / initial_capital
+        trade_daily_pnl = df.groupby("date")["pnl_net"].sum()
+
+        if all_trading_dates is not None and len(all_trading_dates) > 0:
+            # Full calendar/trading day series
+            daily_series = pd.Series(0.0, index=all_trading_dates)
+            for d, val in trade_daily_pnl.items():
+                if d in daily_series.index:
+                    daily_series[d] = val
+            daily_returns = daily_series / initial_capital
+        else:
+            daily_returns = trade_daily_pnl / initial_capital
+
         mean_ret = daily_returns.mean()
         std_ret = daily_returns.std()
         if std_ret > 0 and len(daily_returns) > 1:
@@ -121,7 +141,7 @@ class PerformanceAnalyzer:
         avg_r = float(df["r_multiple"].mean()) if "r_multiple" in df.columns else 0.0
         expectancy = net_pnl / total_trades if total_trades > 0 else 0.0
 
-        # Directional Asymmetry Breakdown (Research finding: Short side vs Long side)
+        # Directional Asymmetry Breakdown
         long_win_count = len(long_df[long_df["pnl_net"] > 0])
         long_win_rate = (long_win_count / len(long_df) * 100.0) if len(long_df) > 0 else 0.0
         long_net = float(long_df["pnl_net"].sum()) if not long_df.empty else 0.0

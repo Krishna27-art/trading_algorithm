@@ -1,9 +1,12 @@
 """
-Command Line Runner for NSE Intraday 30-Minute Volatility-Filtered ORB Strategy.
+Command Line Runner for NSE Intraday Strategy Engine.
+Supports ORB+VWAP, CPR Regime Breakout, and Buffered Dual-EMA strategies.
+
 Usage:
-    python run_algo.py --mode backtest      # single-pass event-driven backtest
-    python run_algo.py --mode walkforward   # one static 70/30 in-sample / out-of-sample split
-    python run_algo.py --mode rolling       # sequential day-by-day walk-forward, no look-ahead
+    python run_algo.py --mode backtest --strategy cpr
+    python run_algo.py --mode backtest --strategy dual_ema
+    python run_algo.py --mode rolling --strategy cpr
+    python run_algo.py --mode scan --top-n 5
     python run_algo.py --mode paper
     python run_algo.py --mode live --broker KITE
 """
@@ -13,6 +16,8 @@ import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import List, Optional, Tuple
+import pandas as pd
 from tabulate import tabulate
 
 from backtest.event_engine import EventDrivenBacktester
@@ -22,52 +27,123 @@ from config.settings import BrokerType, InstrumentConfig, InstrumentType, settin
 from data.historical_loader import HistoricalDataLoader
 from data.market_calendar import MarketCalendar
 from monitoring.logger import logger
-
-# NOTE: broker/* and execution/execution_engine imports are intentionally
-# deferred into run_paper_simulation()/main()'s live branch below, not
-# imported here at module level. execution_engine.py pulls in the live tick
-# pipeline (data.candle_aggregator, which doesn't exist yet in this repo),
-# so importing it unconditionally broke EVERY mode, including plain
-# `--mode backtest`, before a single line of backtest code could run.
-# Backtesting and paper/live trading are separate concerns; one being
-# broken or unfinished shouldn't block the other.
+from scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
 
 
-def load_history(days: int, start_date: datetime, base_price: float):
+def run_scanner(top_n: int = 5) -> Tuple[List[StockRankingMetrics], List[InstrumentConfig]]:
     """
-    Real NSE data when a Kite session + instrument_token are available;
-    otherwise falls back to the synthetic generator so the CLI still runs,
-    with a loud warning so nobody mistakes fake numbers for a real result.
+    Scans the NIFTY 50 universe using batched live quotes from Kite (if authenticated)
+    or synthetic market state, ranking all 50 by explainable breakout/momentum metrics.
     """
-    instrument = settings.instruments[0]
-    if instrument.instrument_token is not None:
+    print("\n" + "=" * 85)
+    print("  NIFTY 50 UNIVERSE SCANNER: EXPLAINABLE MOMENTUM & BREAKOUT RANKING")
+    print("=" * 85)
+
+    kite_app = None
+    try:
+        from kite_client import KiteApp
+        app = KiteApp()
+        if app.is_connected():
+            kite_app = app
+    except Exception:
+        pass
+
+    scanner = NiftyUniverseScanner()
+    ranked_metrics, data_source = scanner.scan_universe(kite_client=kite_app, top_n=top_n)
+
+    if data_source == "REAL":
+        print("[+] CONNECTED: Live Kite Connect Session — batched quotes & real NSE metrics.")
+    else:
+        print("[!] NOTICE: Kite session offline or unauthenticated. Running in SYNTHETIC DATA MODE.")
+        print("    (Run `python auth.py` with valid Kite credentials to scan live NSE market quotes)")
+
+    print("\nScoring Methodology (Transparent 100-pt formula, no black-box models):")
+    print("  • RVOL (30 pts max): Institutional volume participation vs 20-day baseline")
+    print("  • Gap % (25 pts max): Overnight momentum expansion from previous close")
+    print("  • ATR % (25 pts max): Volatility capacity (14-period ATR / close)")
+    print("  • VWAP Clearance (20 pts max): Directional expansion distance away from session VWAP")
+
+    table_data = [
+        [
+            m.rank,
+            m.symbol,
+            f"₹{m.ltp:,.2f}",
+            f"{m.gap_pct:+.2f}%",
+            f"{m.rvol:.2f}x",
+            f"₹{m.atr_14:.2f}",
+            f"{m.atr_pct:.2f}%",
+            f"₹{m.vwap:,.2f}",
+            f"{m.vwap_dist_pct:+.2f}%",
+            f"{m.total_score:.1f}/100",
+            m.direction_bias,
+        ]
+        for m in ranked_metrics
+    ]
+
+    headers = [
+        "Rank", "Symbol", "LTP", "Gap %", "RVOL", "ATR 14", "ATR %", "VWAP", "VWAP Dist %", "Score", "Bias"
+    ]
+    print("\n" + tabulate(table_data, headers=headers, tablefmt="fancy_grid"))
+
+    top_configs = scanner.get_top_instrument_configs(ranked_metrics)
+    return ranked_metrics, top_configs
+
+
+def load_history(
+    days: int,
+    start_date: datetime,
+    base_price: float = 24000.0,
+    instrument: Optional[InstrumentConfig] = None,
+    allow_synthetic: bool = True,
+) -> pd.DataFrame:
+    """
+    Loads historical market data:
+    1. Validated local CSV cache
+    2. Kite Historical API (if authenticated)
+    3. If real data is unavailable:
+       - If allow_synthetic=False: raises RuntimeError
+       - If allow_synthetic=True: generates synthetic data with clear disclaimer
+    """
+    target_inst = instrument or settings.instruments[0]
+    cache_file = Path("data/cache") / f"{target_inst.symbol}_15m_{start_date.date()}_{days}d.csv"
+
+    # 1. Try validated local cache first
+    if cache_file.exists():
         try:
-            from kite_client import KiteApp  # imported lazily: needs kiteconnect + a valid session
+            df, meta = HistoricalDataLoader.load_cached_data_with_validation(cache_file)
+            print(f"[+] Loaded {len(df)} validated REAL historical bars from {cache_file} "
+                  f"({df['datetime'].dt.date.min()} to {df['datetime'].dt.date.max()}).")
+            return df
+        except Exception as e:
+            logger.warning(f"Cache validation error for {cache_file}: {e}. Attempting live fetch.")
+
+    # 2. Try fetching from Kite Connect Historical API
+    if target_inst.instrument_token is not None:
+        try:
+            from kite_client import KiteApp
 
             kite_app = KiteApp()
             if kite_app.is_connected():
-                cache_file = Path("data/cache") / (
-                    f"{instrument.symbol}_15m_{start_date.date()}_{days}d.csv"
-                )
                 df = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite_app,
-                    instrument_token=instrument.instrument_token,
+                    instrument_token=target_inst.instrument_token,
                     start_date=start_date.date(),
-                    end_date=start_date.date() + timedelta(days=int(days * 1.5)),  # pad for weekends/holidays
+                    end_date=start_date.date() + timedelta(days=int(days * 1.5)),
                     interval="15minute",
                     cache_path=cache_file,
                 )
-                print(f"[+] Loaded {len(df)} REAL 15-minute bars from Kite Historical API "
-                      f"spanning {df['datetime'].dt.date.nunique()} trading sessions.")
+                print(f"[+] Downloaded and validated {len(df)} REAL bars from Kite Historical API.")
                 return df
             print("[!] Kite session not authenticated (run `python auth.py` first) — "
-                  "falling back to SYNTHETIC data.")
+                  "falling back to synthetic data.")
         except Exception as e:
-            print(f"[!] Real data fetch failed ({e}) — falling back to SYNTHETIC data.")
+            logger.warning(f"Live Kite historical fetch failed: {e}")
     else:
-        print("[!] No instrument_token set on settings.instruments[0] — "
-              "falling back to SYNTHETIC data. Set instrument_token in config/settings.py "
-              "to practice on real NSE history instead.")
+        print("[!] No instrument_token set on instrument — checking fallback options.")
+
+    # 3. If real data is not available, check allow_synthetic policy
+    if not allow_synthetic:
+        raise RuntimeError("REAL HISTORICAL DATA REQUIRED — BACKTEST NOT EXECUTED")
 
     df = HistoricalDataLoader.generate_synthetic_nifty_data(
         start_date=start_date, days=days, base_price=base_price
@@ -78,45 +154,79 @@ def load_history(days: int, start_date: datetime, base_price: float):
     return df
 
 
-def run_backtest():
+def build_backtester(strategy_name: str, instrument: InstrumentConfig):
+    """
+    Maps a --strategy name to a backtester instance.
+    'orb'      -> the hardcoded ORB+VWAP EventDrivenBacktester (unchanged).
+    'cpr'      -> CPRRegimeBreakoutStrategy through the generic StrategyBacktester.
+    'dual_ema' -> BufferedDualEMAStrategy through the generic StrategyBacktester.
+    """
+    if strategy_name == "orb":
+        return EventDrivenBacktester(instrument=instrument, app_settings=settings)
+    elif strategy_name == "cpr":
+        from backtest.strategy_backtester import StrategyBacktester
+        from strategy.cpr_strategy import CPRRegimeBreakoutStrategy
+        return StrategyBacktester(
+            strategy_factory=lambda: CPRRegimeBreakoutStrategy(instrument, settings.strategy),
+            instrument=instrument, app_settings=settings,
+        )
+    elif strategy_name == "dual_ema":
+        from backtest.strategy_backtester import StrategyBacktester
+        from strategy.dual_ema_strategy import BufferedDualEMAStrategy
+        return StrategyBacktester(
+            strategy_factory=lambda: BufferedDualEMAStrategy(instrument, settings.strategy),
+            instrument=instrument, app_settings=settings,
+        )
+    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema")
+
+
+def build_backtester_factory(strategy_name: str):
+    """Same mapping as build_backtester, but returns a factory of (instrument -> backtester)
+    for RollingWalkForwardValidator, which builds a fresh backtester per fold."""
+    return lambda instrument: build_backtester(strategy_name, instrument)
+
+
+def run_backtest(strategy_name: str = "orb", instruments: Optional[List[InstrumentConfig]] = None):
     print("\n" + "=" * 75)
-    print("  NSE 30-MINUTE VOLATILITY-FILTERED ORB: EVENT-DRIVEN BACKTEST")
+    print(f"  EVENT-DRIVEN BACKTEST — STRATEGY: {strategy_name.upper()}")
     print("=" * 75)
-    df = load_history(days=180, start_date=datetime(2025, 1, 1), base_price=24000.0)
 
-    instrument = settings.instruments[0]
-    backtester = EventDrivenBacktester(instrument=instrument, app_settings=settings)
-    print("[+] Executing realistic backtest with Oct 2024 SEBI statutory friction & slippage...")
-    report = backtester.run(df, initial_capital=settings.risk.initial_capital)
+    target_instruments = instruments or [settings.instruments[0]]
+    print(f"[+] Running {strategy_name.upper()} Backtester across {len(target_instruments)} instrument(s): "
+          f"{', '.join(inst.symbol for inst in target_instruments)}")
 
-    metrics_table = [
-        ["Total Trades", report.total_trades],
-        ["Long Trades", report.long_trades],
-        ["Short Trades", report.short_trades],
-        ["Winning Trades", f"{report.winning_trades} ({report.win_rate_pct:.1f}%)"],
-        ["Losing Trades", f"{report.losing_trades} ({100 - report.win_rate_pct:.1f}%)"],
-        ["Gross P&L", f"₹{report.gross_pnl:,.2f}"],
-        ["Total Frictions (STT, Brokerage, GST, Stamp, Slip)", f"₹{report.total_transaction_costs:,.2f}"],
-        ["Net P&L", f"₹{report.net_pnl:,.2f}"],
-        ["Profit Factor", report.profit_factor],
-        ["Sharpe Ratio", report.sharpe_ratio],
-        ["CAGR", f"{report.cagr_pct:.2f}%"],
-        ["Max Strategy Drawdown", f"-{report.max_drawdown_pct:.2f}%"],
-        ["Max Consecutive Losses", report.max_consecutive_losses],
-        ["Average R / Trade", f"{report.avg_r_multiple:.2f}R"],
-        ["Expectancy per Trade", f"₹{report.expectancy_rupees:,.2f}"],
-        ["Long Win Rate vs Short Win Rate", f"{report.long_win_rate:.1f}% vs {report.short_win_rate:.1f}%"],
-        ["Long Net P&L vs Short Net P&L", f"₹{report.long_net_pnl:,.2f} vs ₹{report.short_net_pnl:,.2f}"],
-    ]
+    for idx, instrument in enumerate(target_instruments, start=1):
+        print(f"\n--- [{idx}/{len(target_instruments)}] BACKTESTING CANDIDATE: {instrument.symbol} ---")
+        base_p = 24000.0 if instrument.symbol == "NIFTY" else 2000.0
+        df = load_history(days=180, start_date=datetime(2025, 1, 1), base_price=base_p, instrument=instrument)
 
-    print("\n" + tabulate(metrics_table, headers=["Performance Metric", "Value"], tablefmt="fancy_grid"))
+        backtester = build_backtester(strategy_name, instrument)
+        report = backtester.run(df, initial_capital=settings.risk.initial_capital)
 
-    if report.yearly_returns:
-        yearly_table = [[year, f"{ret:.2f}%"] for year, ret in report.yearly_returns.items()]
-        print("\nANNUAL RETURN BREAKDOWN:")
-        print(tabulate(yearly_table, headers=["Year", "Net Return (%)"], tablefmt="grid"))
+        metrics_table = [
+            ["Strategy", strategy_name.upper()],
+            ["Symbol", instrument.symbol],
+            ["Instrument Type", instrument.instrument_type.value],
+            ["Total Trades", report.total_trades],
+            ["Long Trades", report.long_trades],
+            ["Short Trades", report.short_trades],
+            ["Winning Trades", f"{report.winning_trades} ({report.win_rate_pct:.1f}%)"],
+            ["Losing Trades", f"{report.losing_trades} ({100 - report.win_rate_pct:.1f}%)"],
+            ["Gross P&L", f"₹{report.gross_pnl:,.2f}"],
+            ["Total Frictions (STT, Brokerage, GST, Stamp, Slip)", f"₹{report.total_transaction_costs:,.2f}"],
+            ["Net P&L", f"₹{report.net_pnl:,.2f}"],
+            ["Profit Factor", report.profit_factor],
+            ["Sharpe Ratio", report.sharpe_ratio],
+            ["CAGR", f"{report.cagr_pct:.2f}%"],
+            ["Max Strategy Drawdown", f"-{report.max_drawdown_pct:.2f}%"],
+            ["Max Consecutive Losses", report.max_consecutive_losses],
+            ["Average R / Trade", f"{report.avg_r_multiple:.2f}R"],
+            ["Expectancy per Trade", f"₹{report.expectancy_rupees:,.2f}"],
+        ]
 
-    print("\n[✓] Backtest Complete. Zero look-ahead bias, all trades evaluated strictly on completed candles.")
+        print("\n" + tabulate(metrics_table, headers=["Performance Metric", "Value"], tablefmt="fancy_grid"))
+
+    print(f"\n[✓] Backtest Complete for {strategy_name.upper()} across all evaluated instruments. Zero look-ahead bias.")
 
 
 def run_walk_forward():
@@ -147,15 +257,19 @@ def run_walk_forward():
     print(f"Status:                   {status_str}")
 
 
-def run_rolling_walk_forward():
+def run_rolling_walk_forward(strategy_name: str = "orb"):
     print("\n" + "=" * 75)
-    print("  ROLLING WALK-FORWARD SIMULATION (sequential, no look-ahead)")
+    print(f"  ROLLING WALK-FORWARD SIMULATION — STRATEGY: {strategy_name.upper()} (sequential, no look-ahead)")
     print("=" * 75)
     df = load_history(days=400, start_date=datetime(2023, 6, 1), base_price=23000.0)
     instrument = settings.instruments[0]
-    validator = RollingWalkForwardValidator(instrument=instrument, app_settings=settings)
+    validator = RollingWalkForwardValidator(
+        instrument=instrument,
+        app_settings=settings,
+        backtester_factory=build_backtester_factory(strategy_name),
+    )
 
-    print("[+] Walking forward in 20-trading-day blocks, each one only ever "
+    print(f"[+] Walking forward with {strategy_name.upper()} in 20-trading-day blocks, each one only ever "
           "seeing data from before it started (60 trading days minimum history "
           "before the first test block)...")
     result = validator.validate(
@@ -195,82 +309,135 @@ def run_rolling_walk_forward():
     ]
     print("\nCOMBINED OUT-OF-SAMPLE RESULT (this is the real answer):")
     print(tabulate(combined_table, headers=["Metric", "Value"], tablefmt="fancy_grid"))
+
+    if result.fold_statistics:
+        fs = result.fold_statistics
+        stats_table = [
+            ["Median Profit Factor", fs.median_profit_factor],
+            ["Median Sharpe Ratio", fs.median_sharpe],
+            ["Profitable Folds %", f"{fs.pct_profitable_folds:.1f}%"],
+            ["Best Fold Net P&L", f"₹{fs.best_fold_net_pnl:,.2f}"],
+            ["Worst Fold Net P&L", f"₹{fs.worst_fold_net_pnl:,.2f}"],
+            ["P&L Dispersion StdDev", f"₹{fs.pnl_dispersion_std:,.2f}"],
+        ]
+        print("\nFOLD AGGREGATE ROBUSTNESS STATISTICS:")
+        print(tabulate(stats_table, headers=["Robustness Metric", "Value"], tablefmt="fancy_grid"))
+
     print("\n[✓] Every fold's test block only used data strictly before it — "
           "no fold ever saw a future candle when deciding a trade.")
 
 
-def run_paper_simulation():
+def run_paper_simulation(instruments: Optional[List[InstrumentConfig]] = None):
     from broker.paper_broker import PaperBrokerAdapter
     from execution.execution_engine import ExecutionEngine
     from monitoring.cli_monitor import CLIMonitor
+    from portfolio.portfolio_manager import PortfolioManager
+    from risk.risk_manager import RiskManager
 
     print("\n" + "=" * 75)
-    print("  STARTING LIVE PAPER TRADING ENGINE (SIMULATION)")
+    print("  STARTING LIVE PAPER TRADING ENGINE (MULTI-INSTRUMENT SIMULATION)")
     print("=" * 75)
-    broker = PaperBrokerAdapter(initial_capital=settings.risk.initial_capital)
-    instrument = settings.instruments[0]
-    engine = ExecutionEngine(broker=broker, instrument=instrument, app_settings=settings)
-    engine.start()
 
-    print("[+] Generating simulated live trading day ticks (09:15 to 14:35 IST)...")
+    target_instruments = instruments or [settings.instruments[0]]
+    broker = PaperBrokerAdapter(initial_capital=settings.risk.initial_capital)
+
+    # PORTFOLIO-WIDE RISK GOVERNANCE:
+    # A single shared PortfolioManager and RiskManager governs all engines.
+    # Enforces 1-trade-per-day max across ALL symbols and 2% daily loss kill-switch.
+    shared_portfolio = PortfolioManager(initial_capital=settings.risk.initial_capital)
+    shared_risk_manager = RiskManager(
+        risk_config=settings.risk,
+        max_portfolio_daily_trades=1,
+    )
+
+    engines = [
+        ExecutionEngine(
+            broker=broker,
+            instrument=inst,
+            app_settings=settings,
+            portfolio=shared_portfolio,
+            risk_manager=shared_risk_manager,
+        )
+        for inst in target_instruments
+    ]
+
+    for engine in engines:
+        engine.start()
+
+    print(f"[+] Active candidate engines: {', '.join(e.instrument.symbol for e in engines)}")
+    print("[+] Shared portfolio-wide risk gate initialized (max 1 trade total across all instruments).")
+
     today = datetime.now().date()
     start_t = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     end_t = datetime.combine(today, datetime.min.time()).replace(hour=14, minute=35)
 
     cur_t = start_t
-    cur_price = 24150.0
+    # Primary instrument for CLI monitor focus
+    primary_engine = engines[0]
+    cur_price = 24150.0 if primary_engine.instrument.symbol == "NIFTY" else 1500.0
 
     while cur_t <= end_t:
-        # Generate simulated 1-minute tick update
         price_step = (cur_t - start_t).total_seconds() / 60
-        # Create a morning breakout pattern
-        if price_step < 30: # 09:15 to 09:45
+        if price_step < 30:  # 09:15 to 09:45
             cur_price += (1.5 if price_step % 2 == 0 else -1.2)
-        elif 30 <= price_step < 75: # Breakout upward
+        elif 30 <= price_step < 75:  # Breakout upward
             cur_price += 2.2
-        elif price_step >= 75: # Target reach
+        elif price_step >= 75:
             cur_price += 1.8
 
-        engine.process_tick(price=round(cur_price, 2), volume=1200, timestamp=cur_t)
+        # Process ticks across engines
+        for engine in engines:
+            tick_p = cur_price if engine == primary_engine else (cur_price * 0.98 + (hash(engine.instrument.symbol) % 50))
+            engine.process_tick(price=round(tick_p, 2), volume=1200, timestamp=cur_t)
 
         phase = MarketCalendar.get_session_phase(cur_t.time()).value
-        orb = engine.strategy.orb
+        orb = getattr(primary_engine.strategy, "orb", None)
+        total_session_trades = sum(shared_risk_manager.daily_trades_count.values())
+
         CLIMonitor.render_state(
-            symbol=instrument.symbol,
+            symbol=primary_engine.instrument.symbol,
             ist_time=cur_t,
             phase=phase,
             orb_high=orb.high if orb else 0.0,
             orb_low=orb.low if orb else 0.0,
             orb_width=orb.width if orb else 0.0,
             vol_filter_passed=orb.is_valid_volatility if orb else False,
-            vwap=engine.candle_aggregator.current_vwap,
+            vwap=primary_engine.candle_aggregator.current_vwap,
             ltp=cur_price,
-            position=engine.strategy.position,
-            entry_price=engine.strategy.entry_price,
-            stop_loss=engine.strategy.stop_loss,
-            target=engine.strategy.target,
-            trailing_active=engine.strategy.trailing_breakeven_active,
-            realized_pnl=engine.portfolio.realized_pnl_today,
-            unrealized_pnl=engine.portfolio.unrealized_pnl_today,
-            capital=engine.portfolio.current_capital,
-            trades_today=engine.strategy.trades_today,
-            kill_switch=engine.risk_manager.kill_switch_active,
+            position=primary_engine.strategy.position,
+            entry_price=primary_engine.strategy.entry_price,
+            stop_loss=primary_engine.strategy.stop_loss,
+            target=primary_engine.strategy.target,
+            trailing_active=primary_engine.strategy.trailing_breakeven_active,
+            realized_pnl=shared_portfolio.realized_pnl_today,
+            unrealized_pnl=shared_portfolio.unrealized_pnl_today,
+            capital=shared_portfolio.current_capital,
+            trades_today=total_session_trades,
+            kill_switch=shared_risk_manager.kill_switch_active,
         )
 
         cur_t += timedelta(minutes=5)
-        time.sleep(0.1) # Fast-forward simulation
+        time.sleep(0.08)
 
-    engine.stop()
-    print("\n[✓] Simulation completed. Trade logged in SQLite database.")
+    for engine in engines:
+        engine.stop()
+
+    print("\n[✓] Multi-instrument simulation completed.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NSE Intraday 30-Minute Volatility-Filtered ORB Strategy Engine")
+    parser = argparse.ArgumentParser(description="NSE Intraday Trading Algorithm Engine")
     parser.add_argument(
         "--mode",
-        choices=["backtest", "walkforward", "rolling", "paper", "live"],
+        choices=["backtest", "walkforward", "rolling", "paper", "live", "scan"],
         default="backtest",
         help="Operational mode (default: backtest)",
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=["orb", "cpr", "dual_ema"],
+        default="orb",
+        help="Trading strategy to run/backtest (default: orb)",
     )
     parser.add_argument(
         "--broker",
@@ -278,16 +445,53 @@ def main():
         default="PAPER",
         help="Broker adapter (default: PAPER)",
     )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=5,
+        help="Number of top-ranked universe candidates to display or trade (default: 5)",
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default=None,
+        help="Target a specific NSE symbol (e.g., RELIANCE) instead of default NIFTY",
+    )
+    parser.add_argument(
+        "--scan",
+        action="store_true",
+        help="Scan the NIFTY 50 universe to pick top candidates before running backtest / paper trading",
+    )
     args = parser.parse_args()
 
-    if args.mode == "backtest":
-        run_backtest()
+    if args.mode == "scan":
+        run_scanner(top_n=args.top_n)
+
+    elif args.mode == "backtest":
+        if args.symbol:
+            from config.universe import create_instrument_config_for_equity, resolve_universe_tokens
+            tokens = resolve_universe_tokens()
+            target_inst = create_instrument_config_for_equity(args.symbol, tokens.get(args.symbol))
+            run_backtest(strategy_name=args.strategy, instruments=[target_inst])
+        elif args.scan:
+            _, top_configs = run_scanner(top_n=args.top_n)
+            run_backtest(strategy_name=args.strategy, instruments=top_configs)
+        else:
+            run_backtest(strategy_name=args.strategy)
+
     elif args.mode == "walkforward":
         run_walk_forward()
+
     elif args.mode == "rolling":
-        run_rolling_walk_forward()
+        run_rolling_walk_forward(strategy_name=args.strategy)
+
     elif args.mode == "paper":
-        run_paper_simulation()
+        if args.scan:
+            _, top_configs = run_scanner(top_n=args.top_n)
+            run_paper_simulation(instruments=top_configs)
+        else:
+            run_paper_simulation()
+
     elif args.mode == "live":
         print("[!] SAFETY WARNING: Live trading mode requested.")
         if args.broker == "PAPER":

@@ -33,6 +33,7 @@ class BaseBrokerAdapter(ABC):
         quantity: int,
         price: Optional[float] = None,
         tag: Optional[str] = "algo",
+        client_order_id: Optional[str] = None,
     ) -> OrderRecord:
         """Dispatches an order to the broker and returns tracking record."""
         pass
@@ -50,6 +51,11 @@ class BaseBrokerAdapter(ABC):
     @abstractmethod
     def get_positions(self) -> List[Dict[str, Any]]:
         """Fetches active day positions."""
+        pass
+
+    @abstractmethod
+    def get_orders(self) -> List[Dict[str, Any]]:
+        """Fetches all orders placed with broker today."""
         pass
 
     @abstractmethod

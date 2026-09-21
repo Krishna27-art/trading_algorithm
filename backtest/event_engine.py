@@ -25,7 +25,19 @@ class EventDrivenBacktester:
 
     def run(self, df_15m: pd.DataFrame, initial_capital: float = 1000000.0) -> PerformanceReport:
         """
-        Runs event-driven backtest over 15-minute historical candles.
+        Runs event-driven backtest over 15-minute historical candles and
+        returns the aggregated performance report.
+        """
+        all_trades = self.generate_trades(df_15m, initial_capital=initial_capital)
+        return PerformanceAnalyzer.generate_report(all_trades, initial_capital=initial_capital)
+
+    def generate_trades(self, df_15m: pd.DataFrame, initial_capital: float = 1000000.0) -> List[dict]:
+        """
+        Same event-driven simulation as run(), but returns the raw trade log
+        instead of the aggregated report. Callers that need to concatenate
+        trades across multiple windows before computing one combined report
+        (e.g. RollingWalkForwardValidator) should call this directly instead
+        of re-running the backtest a second time just to get the trade list.
         """
         data = df_15m.copy()
         if "datetime" not in data.columns and isinstance(data.index, pd.DatetimeIndex):
@@ -246,7 +258,7 @@ class EventDrivenBacktester:
                 self._close_position(trade_record, last_bar["close"], last_bar["datetime"], "SESSION_CLOSE", all_trades)
                 current_capital += trade_record["pnl_net"]
 
-        return PerformanceAnalyzer.generate_report(all_trades, initial_capital=initial_capital)
+        return all_trades
 
     def _close_position(self, trade: dict, exit_price: float, exit_time: datetime, reason: str, all_trades: List[dict]):
         qty = trade["quantity"]

@@ -5,11 +5,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from kiteconnect import KiteConnect
 from pydantic import BaseModel, Field
 from dotenv import set_key
+from config.settings import settings
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -25,7 +26,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Configure CORS for local development with Vite
+# Configure CORS for local development with Vite (strictly permitted origins only)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -33,12 +34,23 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def verify_shared_secret(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
+    """Validates presence and correctness of shared secret token for sensitive actions."""
+    expected_secret = getattr(settings, "app_shared_secret", "trading-algo-dev-secret-key")
+    if not x_shared_secret or x_shared_secret != expected_secret:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Missing or invalid X-Shared-Secret header.",
+        )
+    return True
+
 
 # Global in-memory kite client cache for fast local responses
 _cached_kite: Optional[KiteConnect] = None
@@ -270,8 +282,9 @@ def get_user_margins():
 
 
 @app.post("/api/logout")
-def logout():
+def logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
     """Clears saved session on backend."""
+    verify_shared_secret(x_shared_secret)
     global _cached_kite
     _cached_kite = None
     if TOKEN_FILE.exists():
@@ -584,12 +597,60 @@ class PlaceOrderRequest(BaseModel):
 
 
 @app.post("/api/orders/place")
-def place_order(req: PlaceOrderRequest):
+def place_order(
+    req: PlaceOrderRequest,
+    x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret"),
+):
     """Places order in PAPER mode (simulator) or LIVE mode (Zerodha Kite)."""
+    verify_shared_secret(x_shared_secret)
     from broker.paper_broker import PaperBrokerAdapter
     from database.models import OrderDirection, OrderType
     from database.db import DatabaseManager
     from config.settings import settings
+    from risk.risk_manager import RiskManager
+    from datetime import datetime
+
+    db = DatabaseManager(settings.db_path)
+    trades = db.get_all_trades()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 1. Reconstruct current session risk state
+    risk_manager = RiskManager(settings.risk)
+    risk_manager.reset_daily_state(datetime.now().date())
+
+    trades_today = [
+        t for t in trades
+        if t.get("entry_time", "").startswith(today_str) and t.get("symbol") == req.symbol
+    ]
+    risk_manager.daily_trades_count[req.symbol] = len(trades_today)
+
+    realized_pnl_today = sum(
+        t.get("pnl_net", 0.0) for t in trades
+        if t.get("exit_time", "").startswith(today_str)
+    )
+    risk_manager.update_pnl(realized_pnl_delta=realized_pnl_today, capital=settings.risk.initial_capital)
+
+    open_trades = [t for t in trades if not t.get("exit_price") and t.get("symbol") == req.symbol]
+    has_same_direction_position = any(
+        (t.get("direction") == "BUY" and req.direction.upper() == "BUY") or
+        (t.get("direction") == "SELL" and req.direction.upper() == "SELL")
+        for t in open_trades
+    )
+
+    # 2. Strict Pre-Trade Risk Gate
+    approved, reason = risk_manager.validate_pre_trade(
+        symbol=req.symbol,
+        current_time=datetime.now().time(),
+        quantity=req.quantity,
+        capital=settings.risk.initial_capital,
+        has_open_position=has_same_direction_position,
+    )
+    if not approved:
+        logger.warning(f"Order rejected by pre-trade risk gate: {reason}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=reason,
+        )
 
     direction = OrderDirection.BUY if req.direction.upper() == "BUY" else OrderDirection.SELL
     order_type = OrderType.LIMIT if req.order_type.upper() == "LIMIT" else OrderType.MARKET
@@ -622,7 +683,7 @@ def place_order(req: PlaceOrderRequest):
             tag="ORB_PAPER",
         )
 
-    db = DatabaseManager(settings.db_path)
+    risk_manager.record_trade_executed(req.symbol)
     db.save_order(record)
 
     return {"success": True, "order": record.dict()}

@@ -1,8 +1,9 @@
 """
 Command Line Runner for NSE Intraday 30-Minute Volatility-Filtered ORB Strategy.
 Usage:
-    python run_algo.py --mode backtest
-    python run_algo.py --mode walkforward
+    python run_algo.py --mode backtest      # single-pass event-driven backtest
+    python run_algo.py --mode walkforward   # one static 70/30 in-sample / out-of-sample split
+    python run_algo.py --mode rolling       # sequential day-by-day walk-forward, no look-ahead
     python run_algo.py --mode paper
     python run_algo.py --mode live --broker KITE
 """
@@ -10,33 +11,78 @@ Usage:
 import argparse
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from tabulate import tabulate
 
 from backtest.event_engine import EventDrivenBacktester
 from backtest.walk_forward import WalkForwardValidator
-from broker.dhan_adapter import DhanBrokerAdapter
-from broker.kite_adapter import KiteBrokerAdapter
-from broker.paper_broker import PaperBrokerAdapter
+from backtest.rolling_walk_forward import RollingWalkForwardValidator
 from config.settings import BrokerType, InstrumentConfig, InstrumentType, settings
 from data.historical_loader import HistoricalDataLoader
 from data.market_calendar import MarketCalendar
-from execution.execution_engine import ExecutionEngine
-from monitoring.cli_monitor import CLIMonitor
 from monitoring.logger import logger
+
+# NOTE: broker/* and execution/execution_engine imports are intentionally
+# deferred into run_paper_simulation()/main()'s live branch below, not
+# imported here at module level. execution_engine.py pulls in the live tick
+# pipeline (data.candle_aggregator, which doesn't exist yet in this repo),
+# so importing it unconditionally broke EVERY mode, including plain
+# `--mode backtest`, before a single line of backtest code could run.
+# Backtesting and paper/live trading are separate concerns; one being
+# broken or unfinished shouldn't block the other.
+
+
+def load_history(days: int, start_date: datetime, base_price: float):
+    """
+    Real NSE data when a Kite session + instrument_token are available;
+    otherwise falls back to the synthetic generator so the CLI still runs,
+    with a loud warning so nobody mistakes fake numbers for a real result.
+    """
+    instrument = settings.instruments[0]
+    if instrument.instrument_token is not None:
+        try:
+            from kite_client import KiteApp  # imported lazily: needs kiteconnect + a valid session
+
+            kite_app = KiteApp()
+            if kite_app.is_connected():
+                cache_file = Path("data/cache") / (
+                    f"{instrument.symbol}_15m_{start_date.date()}_{days}d.csv"
+                )
+                df = HistoricalDataLoader.fetch_real_data(
+                    kite_client=kite_app,
+                    instrument_token=instrument.instrument_token,
+                    start_date=start_date.date(),
+                    end_date=start_date.date() + timedelta(days=int(days * 1.5)),  # pad for weekends/holidays
+                    interval="15minute",
+                    cache_path=cache_file,
+                )
+                print(f"[+] Loaded {len(df)} REAL 15-minute bars from Kite Historical API "
+                      f"spanning {df['datetime'].dt.date.nunique()} trading sessions.")
+                return df
+            print("[!] Kite session not authenticated (run `python auth.py` first) — "
+                  "falling back to SYNTHETIC data.")
+        except Exception as e:
+            print(f"[!] Real data fetch failed ({e}) — falling back to SYNTHETIC data.")
+    else:
+        print("[!] No instrument_token set on settings.instruments[0] — "
+              "falling back to SYNTHETIC data. Set instrument_token in config/settings.py "
+              "to practice on real NSE history instead.")
+
+    df = HistoricalDataLoader.generate_synthetic_nifty_data(
+        start_date=start_date, days=days, base_price=base_price
+    )
+    print(f"[!] Loaded {len(df)} SYNTHETIC 15-minute bars "
+          f"spanning {df['datetime'].dt.date.nunique()} trading sessions. "
+          f"These numbers describe a random walk, not real NIFTY behavior.")
+    return df
 
 
 def run_backtest():
     print("\n" + "=" * 75)
     print("  NSE 30-MINUTE VOLATILITY-FILTERED ORB: EVENT-DRIVEN BACKTEST")
     print("=" * 75)
-    print("[+] Generating high-fidelity multi-month 15-minute historical dataset...")
-    df = HistoricalDataLoader.generate_synthetic_nifty_data(
-        start_date=datetime(2025, 1, 1),
-        days=180,
-        base_price=24000.0,
-    )
-    print(f"[+] Loaded {len(df)} 15-minute bars spanning {df['datetime'].dt.date.nunique()} trading sessions.")
+    df = load_history(days=180, start_date=datetime(2025, 1, 1), base_price=24000.0)
 
     instrument = settings.instruments[0]
     backtester = EventDrivenBacktester(instrument=instrument, app_settings=settings)
@@ -77,11 +123,7 @@ def run_walk_forward():
     print("\n" + "=" * 75)
     print("  WALK-FORWARD OUT-OF-SAMPLE VALIDATION")
     print("=" * 75)
-    df = HistoricalDataLoader.generate_synthetic_nifty_data(
-        start_date=datetime(2024, 7, 1),
-        days=240,
-        base_price=23500.0,
-    )
+    df = load_history(days=240, start_date=datetime(2024, 7, 1), base_price=23500.0)
     instrument = settings.instruments[0]
     validator = WalkForwardValidator(instrument=instrument, app_settings=settings)
 
@@ -105,7 +147,63 @@ def run_walk_forward():
     print(f"Status:                   {status_str}")
 
 
+def run_rolling_walk_forward():
+    print("\n" + "=" * 75)
+    print("  ROLLING WALK-FORWARD SIMULATION (sequential, no look-ahead)")
+    print("=" * 75)
+    df = load_history(days=400, start_date=datetime(2023, 6, 1), base_price=23000.0)
+    instrument = settings.instruments[0]
+    validator = RollingWalkForwardValidator(instrument=instrument, app_settings=settings)
+
+    print("[+] Walking forward in 20-trading-day blocks, each one only ever "
+          "seeing data from before it started (60 trading days minimum history "
+          "before the first test block)...")
+    result = validator.validate(
+        df,
+        min_train_days=60,
+        test_block_days=20,
+        initial_capital=settings.risk.initial_capital,
+    )
+
+    fold_table = [
+        [
+            f.fold_number,
+            f"{f.test_start} → {f.test_end}",
+            f.report.total_trades,
+            f"{f.report.win_rate_pct:.1f}%",
+            f"₹{f.report.net_pnl:,.2f}",
+            f"₹{f.ending_capital:,.2f}",
+        ]
+        for f in result.folds
+    ]
+    print("\n" + tabulate(
+        fold_table,
+        headers=["Fold", "Test Window (unseen at decision time)", "Trades", "Win Rate", "Net P&L", "Capital After"],
+        tablefmt="fancy_grid",
+    ))
+
+    r = result.combined_out_of_sample_report
+    combined_table = [
+        ["Total Out-Of-Sample Trades", r.total_trades],
+        ["Combined Win Rate", f"{r.win_rate_pct:.1f}%"],
+        ["Combined Net P&L", f"₹{r.net_pnl:,.2f}"],
+        ["Profit Factor", r.profit_factor],
+        ["Sharpe Ratio", r.sharpe_ratio],
+        ["Max Drawdown (within OOS series)", f"-{r.max_drawdown_pct:.2f}%"],
+        ["Starting Capital", f"₹{settings.risk.initial_capital:,.2f}"],
+        ["Final Capital After All Folds", f"₹{result.final_capital:,.2f}"],
+    ]
+    print("\nCOMBINED OUT-OF-SAMPLE RESULT (this is the real answer):")
+    print(tabulate(combined_table, headers=["Metric", "Value"], tablefmt="fancy_grid"))
+    print("\n[✓] Every fold's test block only used data strictly before it — "
+          "no fold ever saw a future candle when deciding a trade.")
+
+
 def run_paper_simulation():
+    from broker.paper_broker import PaperBrokerAdapter
+    from execution.execution_engine import ExecutionEngine
+    from monitoring.cli_monitor import CLIMonitor
+
     print("\n" + "=" * 75)
     print("  STARTING LIVE PAPER TRADING ENGINE (SIMULATION)")
     print("=" * 75)
@@ -170,7 +268,7 @@ def main():
     parser = argparse.ArgumentParser(description="NSE Intraday 30-Minute Volatility-Filtered ORB Strategy Engine")
     parser.add_argument(
         "--mode",
-        choices=["backtest", "walkforward", "paper", "live"],
+        choices=["backtest", "walkforward", "rolling", "paper", "live"],
         default="backtest",
         help="Operational mode (default: backtest)",
     )
@@ -186,6 +284,8 @@ def main():
         run_backtest()
     elif args.mode == "walkforward":
         run_walk_forward()
+    elif args.mode == "rolling":
+        run_rolling_walk_forward()
     elif args.mode == "paper":
         run_paper_simulation()
     elif args.mode == "live":
@@ -196,10 +296,14 @@ def main():
         else:
             confirm = input(f"Are you sure you want to trade REAL money with {args.broker}? (type 'CONFIRM'): ")
             if confirm.strip() == "CONFIRM":
+                from execution.execution_engine import ExecutionEngine
+
                 print(f"[+] Starting live execution on {args.broker}...")
                 if args.broker == "KITE":
+                    from broker.kite_adapter import KiteBrokerAdapter
                     broker = KiteBrokerAdapter()
                 else:
+                    from broker.dhan_adapter import DhanBrokerAdapter
                     broker = DhanBrokerAdapter()
                 engine = ExecutionEngine(broker=broker, instrument=settings.instruments[0])
                 engine.start()

@@ -263,6 +263,9 @@ class ExecutionEngine:
             self.strategy.register_trade_exit()
             self.current_trade = None
 
+            # Update Risk Manager with realized PnL delta for daily circuit breaker
+            self.risk_manager.update_pnl(realized_pnl_delta=net_pnl, capital=self.portfolio.current_capital)
+
             logger.info(
                 f"[{symbol}] Trade Closed: Gross ₹{gross_pnl:,.2f} | Frictions ₹{costs.total_cost:,.2f} | "
                 f"Net PnL ₹{net_pnl:,.2f} ({r_mult}R) | Reason: {signal.reason}"

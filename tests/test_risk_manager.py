@@ -95,3 +95,44 @@ def test_max_one_trade_per_day():
     )
     assert approved2 is False
     assert "limit reached" in reason
+
+
+def test_execution_engine_realized_pnl_circuit_breaker():
+    from datetime import datetime
+    from broker.paper_broker import PaperBrokerAdapter
+    from config.settings import settings
+    from execution.execution_engine import ExecutionEngine
+    from strategy.base_strategy import SignalAction, StrategySignal
+
+    inst = settings.instruments[0]
+    broker = PaperBrokerAdapter(initial_capital=1000000.0)
+    engine = ExecutionEngine(broker=broker, instrument=inst, app_settings=settings)
+    engine.start()
+
+    # Simulate entering a trade
+    entry_sig = StrategySignal(
+        action=SignalAction.BUY,
+        symbol=inst.symbol,
+        timestamp=datetime(2026, 3, 2, 9, 45),
+        price=24000.0,
+        stop_loss=23900.0,
+        target=24200.0,
+        reason="ORB_BREAKOUT_LONG",
+    )
+    engine._execute_entry_signal(entry_sig)
+    assert engine.current_trade is not None
+
+    # Simulate exit with a large loss exceeding 2% (20k)
+    exit_sig = StrategySignal(
+        action=SignalAction.EXIT,
+        symbol=inst.symbol,
+        timestamp=datetime(2026, 3, 2, 10, 15),
+        price=23700.0, # -300 pts * qty
+        reason="STOP_LOSS",
+    )
+    engine._execute_exit_signal(exit_sig)
+
+    # Risk manager must have recorded the realized loss and triggered kill-switch
+    assert engine.risk_manager.daily_realized_pnl < -20000.0
+    assert engine.risk_manager.kill_switch_active is True
+

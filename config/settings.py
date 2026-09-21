@@ -31,6 +31,11 @@ class InstrumentConfig(BaseModel):
     min_orb_range: float = 40.0
     max_orb_range: float = 120.0
     max_risk_cap: float = 80.0
+    # Numeric Kite instrument_token for this contract — required by the
+    # Historical Data API (a trading symbol string is not accepted there).
+    # Resolve once with HistoricalDataLoader.resolve_instrument_token(...)
+    # and paste the result here; it changes every futures expiry.
+    instrument_token: Optional[int] = None
 
 
 class StrategyConfig(BaseModel):
@@ -114,6 +119,9 @@ class AppSettings(BaseSettings):
 
     dhan_client_id: Optional[str] = None
     dhan_access_token: Optional[str] = None
+
+    # Security
+    app_shared_secret: str = "trading-algo-dev-secret-key"
 
     model_config = SettingsConfigDict(
         env_file=".env",

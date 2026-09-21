@@ -27,7 +27,10 @@ export default function OrderExecutionPanel({ tradingMode, setTradingMode, onOrd
     try {
       const res = await fetch('/api/orders/place', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shared-Secret': 'trading-algo-dev-secret-key',
+        },
         body: JSON.stringify({
           symbol: 'NIFTY',
           direction: direction,

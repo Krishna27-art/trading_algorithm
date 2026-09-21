@@ -91,7 +91,10 @@ export default function Dashboard({ user, onLogout }) {
       try {
         await fetch('/api/orders/place', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shared-Secret': 'trading-algo-dev-secret-key',
+          },
           body: JSON.stringify({
             symbol: 'NIFTY',
             direction: telemetry?.active_trade?.direction === 'BUY' ? 'SELL' : 'BUY',

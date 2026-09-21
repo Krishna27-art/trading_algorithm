@@ -15,9 +15,10 @@ session_token.json
 
 # Logs & data
 *.log
-data/
+*.csv
+data/cache/
 downloads/
-database/
+database/*.db
 credentials.txt
 
 # Node

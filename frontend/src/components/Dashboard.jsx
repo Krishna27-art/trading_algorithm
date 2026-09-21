@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Sidebar from './terminal/Sidebar';
 import TopNavbar from './terminal/TopNavbar';
 import TopKpiBar from './terminal/TopKpiBar';
@@ -14,6 +14,7 @@ import SystemHealthBar from './terminal/SystemHealthBar';
 import SettingsModal from './terminal/SettingsModal';
 
 // Dedicated Subpages
+import ScannerPage from './terminal/ScannerPage';
 import PositionsPage from './terminal/PositionsPage';
 import OrdersPage from './terminal/OrdersPage';
 import PerformancePage from './terminal/PerformancePage';
@@ -23,23 +24,30 @@ import SystemPage from './terminal/SystemPage';
 
 export default function Dashboard({ user, onLogout }) {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [selectedStrategy, setSelectedStrategy] = useState('cpr'); // 'cpr' | 'dual_ema' | 'orb'
+  const [selectedSymbol, setSelectedSymbol] = useState('NIFTY');
+
   const [telemetry, setTelemetry] = useState(null);
+  const [scannerData, setScannerData] = useState(null);
   const [margins, setMargins] = useState(null);
+  const [positionsData, setPositionsData] = useState({ positions: [], count: 0, total_unrealised_pnl: 0, total_realised_pnl: 0, total_pnl: 0 });
   const [trades, setTrades] = useState([]);
   const [orders, setOrders] = useState([]);
   const [health, setHealth] = useState(null);
   const [backtestReport, setBacktestReport] = useState(null);
   const [loadingBacktest, setLoadingBacktest] = useState(false);
+  const [loadingScanner, setLoadingScanner] = useState(false);
   const [tradingMode, setTradingMode] = useState('PAPER'); // 'PAPER' | 'LIVE'
   const [showSettings, setShowSettings] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  // Polling data at a clean interval
-  const fetchData = async () => {
+  // Fetch telemetry, positions, and market updates
+  const fetchData = useCallback(async () => {
     try {
-      const [telRes, marRes, trdRes, ordRes, hltRes] = await Promise.all([
-        fetch('/api/strategy/telemetry'),
+      const [telRes, marRes, posRes, trdRes, ordRes, hltRes] = await Promise.all([
+        fetch(`/api/strategy/telemetry?symbol=${encodeURIComponent(selectedSymbol)}&strategy=${encodeURIComponent(selectedStrategy)}`),
         fetch('/api/margins'),
+        fetch('/api/portfolio/positions'),
         fetch('/api/strategy/trades'),
         fetch('/api/strategy/orders'),
         fetch('/api/system/health'),
@@ -47,6 +55,7 @@ export default function Dashboard({ user, onLogout }) {
 
       if (telRes.ok) setTelemetry(await telRes.json());
       if (marRes.ok) setMargins(await marRes.json());
+      if (posRes.ok) setPositionsData(await posRes.json());
       if (trdRes.ok) {
         const d = await trdRes.json();
         setTrades(d.trades || []);
@@ -57,53 +66,82 @@ export default function Dashboard({ user, onLogout }) {
       }
       if (hltRes.ok) setHealth(await hltRes.json());
     } catch (e) {
-      console.warn('Dashboard fetch telemetry warning:', e);
+      console.warn('Dashboard fetch error:', e);
     }
-  };
+  }, [selectedSymbol, selectedStrategy]);
+
+
+  // Fetch universe scan results
+  const fetchScanner = useCallback(async () => {
+    setLoadingScanner(true);
+    try {
+      const res = await fetch('/api/strategy/scanner?top_n=50');
+      if (res.ok) {
+        const data = await res.json();
+        setScannerData(data);
+      }
+    } catch (e) {
+      console.warn('Scanner fetch error:', e);
+    } finally {
+      setLoadingScanner(false);
+    }
+  }, []);
 
   useEffect(() => {
     fetchData();
+    fetchScanner();
     const interval = setInterval(fetchData, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchData, fetchScanner]);
 
-  const handleRunBacktest = async () => {
+  const handleRunBacktest = async (strat, sym) => {
     setLoadingBacktest(true);
+    const targetStrat = strat || selectedStrategy;
+    const targetSym = sym || selectedSymbol;
     try {
-      const res = await fetch('/api/strategy/backtest', { method: 'POST' });
+      const res = await fetch(
+        `/api/strategy/backtest?days=180&symbol=${encodeURIComponent(targetSym)}&strategy=${encodeURIComponent(targetStrat)}`,
+        { method: 'POST' }
+      );
       if (res.ok) {
         const data = await res.json();
         setBacktestReport(data.report);
+      } else {
+        const err = await res.json();
+        alert(`Backtest Notice: ${err.detail || 'Could not execute backtest on real data.'}`);
       }
     } catch (e) {
-      console.error(e);
+      alert(`Backtest error: ${e.message}`);
     } finally {
       setLoadingBacktest(false);
     }
   };
 
-  const handleQuickExecute = (sig) => {
+  const handleQuickExecute = () => {
     fetchData();
   };
 
   const handleSquareOff = async () => {
-    if (window.confirm('Are you sure you want to square off your open position immediately?')) {
+    if (window.confirm(`Are you sure you want to square off open position on ${selectedSymbol}?`)) {
       try {
-        await fetch('/api/orders/place', {
+        const res = await fetch('/api/orders/exit', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Shared-Secret': 'trading-algo-dev-secret-key',
+            'X-Shared-Secret': localStorage.getItem('app_shared_secret') || '',
           },
           body: JSON.stringify({
-            symbol: 'NIFTY',
-            direction: telemetry?.active_trade?.direction === 'BUY' ? 'SELL' : 'BUY',
-            order_type: 'MARKET',
-            quantity: telemetry?.active_trade?.quantity || 25,
+            symbol: selectedSymbol,
             mode: tradingMode,
           }),
         });
-        fetchData();
+        const data = await res.json();
+        if (data.success) {
+          alert(data.message || 'Position squared off successfully.');
+          fetchData();
+        } else {
+          alert(`Square-off failed: ${data.detail || 'Unknown error'}`);
+        }
       } catch (e) {
         alert('Error squaring off: ' + e.message);
       }
@@ -130,6 +168,10 @@ export default function Dashboard({ user, onLogout }) {
         <TopNavbar
           user={user}
           telemetry={telemetry}
+          selectedStrategy={selectedStrategy}
+          onSelectStrategy={setSelectedStrategy}
+          selectedSymbol={selectedSymbol}
+          onSelectSymbol={setSelectedSymbol}
           onLogout={onLogout}
           onOpenSettings={() => setShowSettings(true)}
           tradingMode={tradingMode}
@@ -172,6 +214,7 @@ export default function Dashboard({ user, onLogout }) {
                     setTradingMode={setTradingMode}
                     onOrderPlaced={fetchData}
                     ltp={telemetry?.current_price}
+                    symbol={selectedSymbol}
                   />
                   <RiskManagementPanel telemetry={telemetry} />
                 </div>
@@ -182,21 +225,41 @@ export default function Dashboard({ user, onLogout }) {
             </div>
           )}
 
+          {activeTab === 'scanner' && (
+            <div className="animate-fade-in">
+              <ScannerPage
+                scannerData={scannerData}
+                isLoading={loadingScanner}
+                onRefresh={fetchScanner}
+                onSelectStock={(sym) => {
+                  setSelectedSymbol(sym);
+                  setActiveTab('dashboard');
+                }}
+              />
+            </div>
+          )}
+
           {activeTab === 'strategy' && (
             <div className="animate-fade-in">
-              <StrategyPage telemetry={telemetry} />
+              <StrategyPage
+                telemetry={telemetry}
+                selectedStrategy={selectedStrategy}
+                onSelectStrategy={setSelectedStrategy}
+              />
             </div>
           )}
 
           {activeTab === 'positions' && (
             <div className="animate-fade-in">
               <PositionsPage
+                positionsData={positionsData}
                 trades={trades}
-                activeTrade={telemetry?.active_trade}
+                tradingMode={tradingMode}
                 onRefresh={fetchData}
               />
             </div>
           )}
+
 
           {activeTab === 'orders' && (
             <div className="animate-fade-in">
@@ -216,6 +279,9 @@ export default function Dashboard({ user, onLogout }) {
                 backtestReport={backtestReport}
                 onRunBacktest={handleRunBacktest}
                 isLoading={loadingBacktest}
+                selectedStrategy={selectedStrategy}
+                selectedSymbol={selectedSymbol}
+                onSelectStrategy={setSelectedStrategy}
               />
             </div>
           )}

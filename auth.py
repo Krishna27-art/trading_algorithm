@@ -7,12 +7,13 @@ Usage:
 """
 
 import json
+import os
 import webbrowser
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 from kiteconnect import KiteConnect
 
-import config
+from config.settings import settings
 
 
 def get_login_url(kite: KiteConnect) -> str:
@@ -31,14 +32,14 @@ def extract_request_token(input_str: str) -> str:
 
 
 def authenticate():
-    if not config.validate_api_credentials():
+    if not settings.validate_api_credentials():
         return None
 
-    if not config.API_SECRET:
+    if not settings.kite_api_secret:
         print("[!] ERROR: KITE_API_SECRET is missing in .env file.")
         return None
 
-    kite = KiteConnect(api_key=config.API_KEY)
+    kite = KiteConnect(api_key=settings.kite_api_key)
     login_url = get_login_url(kite)
 
     print("=" * 60)
@@ -65,14 +66,15 @@ def authenticate():
 
     print("\n[+] Exchanging request token for session access token...")
     try:
-        session_data = kite.generate_session(request_token=request_token, api_secret=config.API_SECRET)
+        session_data = kite.generate_session(request_token=request_token, api_secret=settings.kite_api_secret)
         access_token = session_data["access_token"]
         public_token = session_data.get("public_token", "")
         user_name = session_data.get("user_name", "Trader")
         user_id = session_data.get("user_id", "")
 
-        # Save session to session_token.json
+        # Save session to session_token.json — NEVER persist api_secret
         payload = {
+            "api_key": settings.kite_api_key,
             "user_id": user_id,
             "user_name": user_name,
             "access_token": access_token,
@@ -80,11 +82,12 @@ def authenticate():
             "login_time": datetime.now().isoformat(),
         }
 
-        with open(config.TOKEN_FILE, "w") as f:
+        with open(settings.token_file, "w") as f:
             json.dump(payload, f, indent=2)
+        os.chmod(settings.token_file, 0o600)
 
         print(f"\n[✓] Success! Authenticated as: {user_name} ({user_id})")
-        print(f"[✓] Access token saved to '{config.TOKEN_FILE.name}'")
+        print(f"[✓] Access token saved to '{settings.token_file.name}'")
         print("[✓] Valid for today's trading session.")
         return access_token
 

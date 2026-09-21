@@ -4,6 +4,10 @@ import { Settings, LogOut, Radio, User, Activity, Menu } from 'lucide-react';
 export default function TopNavbar({
   user,
   telemetry,
+  selectedStrategy = 'cpr',
+  onSelectStrategy,
+  selectedSymbol = 'NIFTY',
+  onSelectSymbol,
   onLogout,
   onOpenSettings,
   tradingMode,
@@ -30,14 +34,17 @@ export default function TopNavbar({
   }, []);
 
   const isMarketOpen = telemetry?.market_status === 'OPEN';
-  const ltp = telemetry?.current_price || 24150.0;
+  const ltp = telemetry?.current_price || 0.0;
   const changePts = telemetry?.price_change_pts || 0.0;
   const changePct = telemetry?.price_change_pct || 0.0;
-  const algoState = telemetry?.algorithm_state || 'RUNNING';
+  const activeStrat = (selectedStrategy || telemetry?.strategy || 'cpr').toUpperCase();
+  const algoState = telemetry?.algorithm_state || 'IDLE';
+  const isKiteConnected = Boolean(telemetry?.authenticated);
 
   return (
+
     <header className="h-14 bg-[#0d1322] border-b border-white/[0.08] px-4 lg:px-6 flex items-center justify-between select-none sticky top-0 z-40">
-      {/* LEFT: Brand & Algorithm Indicator */}
+      {/* LEFT: Brand & Strategy Selector */}
       <div className="flex items-center gap-3">
         {onToggleMobileSidebar && (
           <button
@@ -52,22 +59,56 @@ export default function TopNavbar({
           <div className="w-7 h-7 rounded-md bg-indigo-600 flex items-center justify-center font-black text-white text-xs tracking-wider shadow-sm">
             K
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="font-extrabold text-white text-sm sm:text-base tracking-tight">
+          <div className="flex items-center gap-2">
+            <span className="font-extrabold text-white text-sm sm:text-base tracking-tight hidden sm:inline">
               Kite Algo Hub
             </span>
-            <span className="hidden sm:inline-block text-[11px] font-mono font-semibold text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
-              ORB + VWAP
-            </span>
+
+            {/* Strategy Selector Buttons */}
+            <div className="flex items-center bg-black/40 p-0.5 rounded-lg border border-white/10 font-mono text-[11px] font-bold">
+              <button
+                onClick={() => onSelectStrategy && onSelectStrategy('cpr')}
+                className={`px-2.5 py-1 rounded transition-all ${
+                  selectedStrategy === 'cpr'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Central Pivot Range Regime Breakout (57.9% Win Rate)"
+              >
+                CPR REGIME
+              </button>
+              <button
+                onClick={() => onSelectStrategy && onSelectStrategy('dual_ema')}
+                className={`px-2.5 py-1 rounded transition-all ${
+                  selectedStrategy === 'dual_ema'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Adaptive Volatility-Buffered Dual-EMA Trend System"
+              >
+                DUAL-EMA
+              </button>
+              <button
+                onClick={() => onSelectStrategy && onSelectStrategy('orb')}
+                className={`px-2.5 py-1 rounded transition-all ${
+                  selectedStrategy === 'orb'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="30-Minute Volatility-Filtered Opening Range Breakout"
+              >
+                30M ORB
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* CENTER: NIFTY 50 LIVE PRICE & CHANGE */}
+      {/* CENTER: ACTIVE STOCK / INDEX LIVE PRICE & CHANGE */}
       <div className="flex items-center gap-3 sm:gap-4 bg-black/40 px-3 sm:px-4 py-1.5 rounded-lg border border-white/[0.08]">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs sm:text-sm font-extrabold text-white tracking-tight">NIFTY 50</span>
-          <span className="text-[10px] font-mono text-slate-400 hidden sm:inline">NFO FUT</span>
+        <div className="flex items-center gap-1.5 font-mono">
+          <span className="text-xs sm:text-sm font-extrabold text-white tracking-tight">{selectedSymbol}</span>
+          <span className="text-[10px] text-slate-400 hidden sm:inline">{selectedSymbol === 'NIFTY' ? 'NFO' : 'NSE'}</span>
         </div>
 
         <div className="h-4 w-[1px] bg-white/10" />
@@ -92,9 +133,12 @@ export default function TopNavbar({
       <div className="flex items-center gap-2 sm:gap-3">
         {/* Kite Connection Status */}
         <div className="hidden lg:flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded bg-white/[0.03] border border-white/5">
-          <span className="w-2 h-2 rounded-full bg-emerald-400" />
-          <span className="text-slate-300">KITE CONNECTED</span>
+          <span className={`w-2 h-2 rounded-full ${isKiteConnected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+          <span className="text-slate-300">
+            {isKiteConnected ? 'KITE CONNECTED' : 'KITE OFFLINE'}
+          </span>
         </div>
+
 
         {/* Market Status & Clock */}
         <div className="flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded bg-white/[0.03] border border-white/5">

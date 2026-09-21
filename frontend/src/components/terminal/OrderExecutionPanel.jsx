@@ -1,21 +1,22 @@
 import React, { useState } from 'react';
 import { AlertTriangle, ShieldCheck, Check, X, ShieldAlert, ArrowRight } from 'lucide-react';
 
-export default function OrderExecutionPanel({ tradingMode, setTradingMode, onOrderPlaced, ltp }) {
+export default function OrderExecutionPanel({ tradingMode, setTradingMode, onOrderPlaced, ltp, symbol = 'NIFTY' }) {
+  const defaultQty = symbol === 'NIFTY' ? 25 : 1;
   const [direction, setDirection] = useState('BUY');
-  const [quantity, setQuantity] = useState(25);
+  const [quantity, setQuantity] = useState(defaultQty);
   const [orderType, setOrderType] = useState('LIMIT');
-  const [limitPrice, setLimitPrice] = useState(ltp ? ltp.toFixed(2) : '24150.00');
+  const [limitPrice, setLimitPrice] = useState(ltp ? ltp.toFixed(2) : '');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isLive = tradingMode === 'LIVE';
 
   // Calculated estimates
-  const estPrice = parseFloat(limitPrice) || ltp || 24000;
-  const turnover = estPrice * quantity;
-  const estRisk = 50 * quantity; // assuming 50 pt stop
-  const estCharges = Math.round(40 + (turnover * 0.0002) + (turnover * 0.000019) + 8); // Brokerage + STT + Txn + GST
+  const estPrice = parseFloat(limitPrice) || ltp || 1000;
+  const turnover = estPrice * (quantity || 1);
+  const estRisk = Math.round(turnover * 0.01); // 1% estimated risk
+  const estCharges = Math.round(20 + (turnover * 0.00025) + (turnover * 0.0000325)); // Brokerage + STT + Txn
 
   const handleOpenConfirm = (e) => {
     e.preventDefault();
@@ -29,14 +30,14 @@ export default function OrderExecutionPanel({ tradingMode, setTradingMode, onOrd
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shared-Secret': 'trading-algo-dev-secret-key',
+          'X-Shared-Secret': localStorage.getItem('app_shared_secret') || '',
         },
         body: JSON.stringify({
-          symbol: 'NIFTY',
+          symbol: symbol,
           direction: direction,
           order_type: orderType,
-          price: parseFloat(limitPrice),
-          quantity: parseInt(quantity),
+          price: limitPrice ? parseFloat(limitPrice) : null,
+          quantity: parseInt(quantity) || defaultQty,
           mode: tradingMode,
         }),
       });

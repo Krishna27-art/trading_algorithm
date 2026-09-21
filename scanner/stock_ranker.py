@@ -125,6 +125,7 @@ class NiftyUniverseScanner:
         kite_client: Optional[Any] = None,
         top_n: int = 5,
         force_refresh_history: bool = False,
+        allow_synthetic: bool = True,
     ) -> Tuple[List[StockRankingMetrics], str]:
         """
         Executes the universe scan.
@@ -148,9 +149,18 @@ class NiftyUniverseScanner:
                 metrics = self._scan_real_kite(client, force_refresh_history)
                 return self._rank_and_truncate(metrics, top_n), "REAL"
             except Exception as e:
-                logger.error(f"Real Kite scan failed ({e}); falling back to synthetic generator.")
+                logger.error(f"Real Kite scan failed: {e}")
+                if not allow_synthetic:
+                    raise RuntimeError(f"Real Kite market quote scan failed: {e}")
 
-        # Fallback to synthetic universe data
+        if not allow_synthetic:
+            raise RuntimeError(
+                "Zerodha Kite Connect session is not authenticated or live quotes failed. "
+                "Live market scanning requires an active Kite Connect session. "
+                "Please run 'python auth.py' or log in via the dashboard."
+            )
+
+        # Fallback to synthetic universe data ONLY if explicitly allowed
         metrics = self._scan_synthetic(seed=42)
         return self._rank_and_truncate(metrics, top_n), "SYNTHETIC"
 

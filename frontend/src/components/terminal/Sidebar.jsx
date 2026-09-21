@@ -25,9 +25,11 @@ export default function Sidebar({
   tradingMode,
   setTradingMode,
 }) {
+  const currentStrat = (telemetry?.strategy || 'cpr').toUpperCase();
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'strategy', label: 'Strategy', icon: Compass, badge: 'ORB' },
+    { id: 'scanner', label: 'NIFTY 50 Scanner', icon: Compass, badge: 'LIVE' },
+    { id: 'strategy', label: 'Strategy Engine', icon: Layers, badge: currentStrat },
     { id: 'positions', label: 'Positions', icon: Layers, count: telemetry?.active_trade ? 1 : 0 },
     { id: 'orders', label: 'Orders', icon: FileText },
     { id: 'risk', label: 'Risk Gate', icon: ShieldCheck, badge: '2%' },

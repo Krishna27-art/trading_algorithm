@@ -2,149 +2,79 @@ import React from 'react';
 import { Cpu, Activity, Clock, Compass, ArrowUp, ArrowDown } from 'lucide-react';
 
 export default function StrategyStatusCard({ telemetry }) {
-  const algoState = telemetry?.algorithm_state || 'WAITING FOR BREAKOUT';
-  const orStatus = telemetry?.orb_status || 'COMPLETED';
-  const orbHigh = telemetry?.orb_high || 24132.0;
-  const orbLow = telemetry?.orb_low || 24031.0;
-  const orbWidth = telemetry?.orb_width || 101.0;
-  const vwap = telemetry?.vwap || 24095.0;
-  const ltp = telemetry?.current_price || 23980.0;
-
-  // Calculate live distances to breakout boundaries
-  const distToHigh = orbHigh - ltp;
-  const distToLow = ltp - orbLow;
+  const strategy = (telemetry?.strategy || 'cpr').toUpperCase();
+  const algoState = telemetry?.algorithm_state || 'SCANNING';
+  const levels = telemetry?.strategy_levels || {};
+  const ltp = telemetry?.current_price || 0.0;
+  const vwap = telemetry?.vwap || 0.0;
 
   const getStateBadgeColor = (state) => {
-    switch (state) {
-      case 'LONG SIGNAL':
-      case 'SHORT SIGNAL':
-      case 'TRADE ACTIVE':
-        return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30';
-      case 'BREAKEVEN':
-        return 'text-cyan-300 bg-cyan-500/10 border-cyan-500/30';
-      case 'TARGET HIT':
-        return 'text-indigo-300 bg-indigo-500/10 border-indigo-500/30';
-      case 'STOP LOSS':
-      case 'STOP LOSS HIT':
-      case 'DAILY LIMIT REACHED':
-        return 'text-rose-400 bg-rose-500/10 border-rose-500/30';
-      case 'BUILDING OR':
-      case 'WAITING':
-      case 'WAITING FOR BREAKOUT':
-        return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
-      default:
-        return 'text-slate-300 bg-white/5 border-white/10';
+    const s = (state || '').toUpperCase();
+    if (s.includes('LONG') || s.includes('BUY') || s.includes('BULLISH') || s.includes('ACTIVE') || s.includes('TARGET')) {
+      return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30';
     }
+    if (s.includes('SHORT') || s.includes('SELL') || s.includes('BEARISH') || s.includes('STOP') || s.includes('LOSS')) {
+      return 'text-rose-400 bg-rose-500/10 border-rose-500/30';
+    }
+    if (s.includes('NARROW') || s.includes('BREAKOUT')) {
+      return 'text-indigo-300 bg-indigo-500/10 border-indigo-500/30';
+    }
+    return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
   };
 
-  const getStateExplanation = (state) => {
-    switch (state) {
-      case 'INITIALIZING':
-        return 'Establishing broker websocket feed and fetching previous close anchors.';
-      case 'BUILDING OR':
-        return '09:15–09:45 price discovery window active. Establishing high & low boundaries.';
-      case 'WAITING':
-      case 'WAITING FOR BREAKOUT':
-        return 'Opening Range established. Scanning 15m candle closes outside OR levels with VWAP confirmation.';
-      case 'LONG SIGNAL':
-        return 'Bullish trigger: Completed 15m candle closed above OR High and above Session VWAP.';
-      case 'SHORT SIGNAL':
-        return 'Bearish trigger: Completed 15m candle closed below OR Low and below Session VWAP.';
-      case 'TRADE ACTIVE':
-        return 'Trade executed. Trailing stop armed with automatic +1R breakeven shift.';
-      case 'BREAKEVEN':
-        return 'Target +1R reached! Stop-loss moved to entry price (Zero downside risk).';
-      case 'TARGET HIT':
-        return '2.0R profit objective reached. Trade closed in profit.';
-      case 'STOP LOSS':
-      case 'STOP LOSS HIT':
-        return 'Protective stop-loss triggered. Trade concluded within 1% risk limit.';
-      case 'DAILY LIMIT REACHED':
-        return '2.0% daily risk kill-switch engaged. All trading halted for the day.';
-      case 'MARKET CLOSED':
-        return 'Market session concluded. All intraday positions squared off.';
-      default:
-        return 'Algorithmic state monitoring active.';
+  const getExplanation = () => {
+    if (strategy === 'CPR') {
+      const regime = levels.regime || 'NEUTRAL';
+      if (regime === 'NARROW') {
+        return `Narrow CPR regime detected (Width: ${levels.cpr_width_pct || '0'}%). High probability breakout day — confirming 15m candle close outside TC (${levels.top_central || '—'}) / BC (${levels.bottom_central || '—'}).`;
+      }
+      if (regime === 'WIDE') {
+        return `Wide CPR regime detected (Width: ${levels.cpr_width_pct || '0'}%). Range-bound conditions expected — evaluating mean-reversion fades toward Central Pivot P.`;
+      }
+      return `Neutral CPR width (${levels.cpr_width_pct || '0'}%). Evaluating directional trend confirmation against Session VWAP.`;
     }
+
+    if (strategy === 'DUAL_EMA') {
+      return `Dual EMA trend system tracking 9-EMA (${levels.ema_fast || '—'}) vs 21-EMA (${levels.ema_slow || '—'}). Trend bias: ${levels.trend || 'NEUTRAL'}.`;
+    }
+
+    return 'Evaluating 30-min Opening Range high/low boundaries with VWAP volume confirmation.';
   };
 
   return (
-    <div className="term-panel p-4 space-y-3.5">
+    <div className="term-panel p-3.5 space-y-3 font-mono">
       {/* Header */}
-      <div className="flex items-center justify-between pb-2.5 border-b border-white/[0.08]">
+      <div className="flex items-center justify-between pb-2 border-b border-white/[0.06]">
         <div className="flex items-center gap-2">
           <Cpu className="w-4 h-4 text-indigo-400" />
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider">Strategy Status</h3>
+          <h3 className="text-xs font-bold text-slate-100 uppercase tracking-wider">
+            {strategy} State Machine
+          </h3>
         </div>
-        <span className="text-xs font-mono text-slate-400">09:15 – 15:10 IST</span>
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase ${getStateBadgeColor(algoState)}`}>
+          {algoState}
+        </span>
       </div>
 
-      {/* Large Readable State Indicator */}
-      <div className={`p-3 rounded-lg border flex items-center justify-between ${getStateBadgeColor(algoState)}`}>
-        <div>
-          <span className="text-xs uppercase font-sans font-semibold text-slate-400 block">Current State</span>
-          <span className="text-xl sm:text-2xl font-black font-mono tracking-tight">
-            {algoState}
-          </span>
-        </div>
-        <Activity className="w-6 h-6 shrink-0 opacity-80" />
+      {/* State Explanation Box */}
+      <div className="p-2.5 rounded bg-black/40 border border-white/[0.06] text-xs text-slate-300 leading-relaxed font-sans">
+        <p>{getExplanation()}</p>
       </div>
 
-      {/* Grid of Strategy Metrics */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono text-xs">
-        <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase">Opening Range</span>
-          <span className="text-sm font-bold text-emerald-400 mt-1 block">{orStatus}</span>
-        </div>
-
-        <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase">OR High</span>
-          <span className="text-sm font-bold text-white mt-1 block">₹{orbHigh.toFixed(1)}</span>
-        </div>
-
-        <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase">OR Low</span>
-          <span className="text-sm font-bold text-white mt-1 block">₹{orbLow.toFixed(1)}</span>
-        </div>
-
-        <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase">OR Width</span>
-          <span className="text-sm font-bold text-indigo-300 mt-1 block">{orbWidth.toFixed(1)} pts</span>
-        </div>
-
-        <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase">Session VWAP</span>
-          <span className="text-sm font-bold text-cyan-300 mt-1 block">₹{vwap.toFixed(1)}</span>
-        </div>
-
-        <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase">Current LTP</span>
-          <span className="text-sm font-bold text-white mt-1 block">₹{ltp.toFixed(1)}</span>
-        </div>
-
-        <div className="p-2.5 rounded-lg bg-emerald-500/[0.03] border border-emerald-500/20">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase flex items-center gap-1">
-            <ArrowUp className="w-3 h-3 text-emerald-400" /> Dist to OR High
-          </span>
-          <span className="text-sm font-bold text-emerald-400 mt-1 block">
-            {distToHigh > 0 ? `+${distToHigh.toFixed(1)} pts` : 'BROKEN OUT'}
+      {/* Micro-metrics row */}
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <div className="p-2 rounded bg-white/[0.02] border border-white/5">
+          <span className="text-[10px] text-slate-400 block uppercase font-sans">Current LTP</span>
+          <span className="text-sm font-bold text-white mt-0.5 block">
+            {ltp ? `₹${Number(ltp).toFixed(2)}` : '—'}
           </span>
         </div>
-
-        <div className="p-2.5 rounded-lg bg-rose-500/[0.03] border border-rose-500/20">
-          <span className="text-[11px] text-slate-400 font-sans block uppercase flex items-center gap-1">
-            <ArrowDown className="w-3 h-3 text-rose-400" /> Dist to OR Low
-          </span>
-          <span className="text-sm font-bold text-rose-400 mt-1 block">
-            {distToLow > 0 ? `-${distToLow.toFixed(1)} pts` : 'BROKEN DOWN'}
+        <div className="p-2 rounded bg-white/[0.02] border border-white/5">
+          <span className="text-[10px] text-slate-400 block uppercase font-sans">Session VWAP</span>
+          <span className="text-sm font-bold text-purple-300 mt-0.5 block">
+            {vwap ? `₹${Number(vwap).toFixed(2)}` : '—'}
           </span>
         </div>
-      </div>
-
-      {/* Beginner Explanation */}
-      <div className="p-3 rounded-lg bg-black/40 border border-white/5 flex items-start gap-2.5 text-xs text-slate-300">
-        <Compass className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-        <p className="leading-relaxed">{getStateExplanation(algoState)}</p>
       </div>
     </div>
   );

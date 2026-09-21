@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { Key, Lock, Compass, ExternalLink, ShieldCheck, HelpCircle, ArrowRight, Loader2, AlertCircle, Play } from 'lucide-react';
 
 export default function LoginPage({ onLoginSuccess }) {
-  const [apiKey, setApiKey] = useState('sswg9s60swc2dizh');
-  const [apiSecret, setApiSecret] = useState('y15uelidzn42nxnmw9k7myz6kejhyvp3');
+  const [apiKey, setApiKey] = useState('');
+  const [apiSecret, setApiSecret] = useState('');
   const [requestToken, setRequestToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -67,10 +67,10 @@ export default function LoginPage({ onLoginSuccess }) {
 
   const handleEnterPaperTerminal = () => {
     onLoginSuccess({
-      user_id: 'RHN918',
-      user_name: 'Pandu (Paper Trader)',
+      user_id: 'PAPER',
+      user_name: 'Paper Trader',
       login_time: new Date().toISOString(),
-      api_key: apiKey.slice(0, 4) + '****',
+      api_key: 'PAPER',
     });
   };
 

@@ -103,6 +103,9 @@ class AppSettings(BaseSettings):
         )
     ]
 
+    # Active Strategy (Options: "cpr", "dual_ema", "orb")
+    active_strategy: str = "cpr"
+
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
@@ -111,17 +114,26 @@ class AppSettings(BaseSettings):
     base_dir: Path = Path(__file__).resolve().parent.parent
     db_path: Path = Path(__file__).resolve().parent.parent / "database" / "trading_system.db"
     log_dir: Path = Path(__file__).resolve().parent.parent / "logs"
+    token_file: Path = Path(__file__).resolve().parent.parent / "session_token.json"
 
-    # Broker API Keys
+    # Broker API Keys (read from .env)
     kite_api_key: Optional[str] = None
     kite_api_secret: Optional[str] = None
     kite_access_token: Optional[str] = None
+    kite_user_id: Optional[str] = None
+    kite_totp_key: Optional[str] = None
 
     dhan_client_id: Optional[str] = None
     dhan_access_token: Optional[str] = None
 
-    # Security
-    app_shared_secret: str = "trading-algo-dev-secret-key"
+    # Risk limits from .env (₹-denominated caps, separate from percentage-based kill-switch)
+    max_capital_per_trade: float = 10000.0
+    max_daily_loss_limit: float = 2000.0
+    semi_automated_confirmation: bool = True
+
+    # Security — NO DEFAULT: app refuses to start without this set in .env.
+    # Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+    app_shared_secret: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -129,5 +141,13 @@ class AppSettings(BaseSettings):
         extra="ignore",
     )
 
+    def validate_api_credentials(self) -> bool:
+        """Verify that Kite API Key is set."""
+        if not self.kite_api_key or self.kite_api_key == "your_api_key_here":
+            print("[!] ERROR: KITE_API_KEY is not set in .env file.")
+            return False
+        return True
+
 
 settings = AppSettings()
+

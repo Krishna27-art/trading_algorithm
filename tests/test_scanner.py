@@ -134,3 +134,10 @@ def test_fastapi_scanner_and_multi_symbol_endpoints():
     assert len(tel_res["chart_candles"]) > 0
 
 
+def test_scanner_fails_closed_without_kite():
+    scanner = NiftyUniverseScanner()
+    with pytest.raises(RuntimeError, match="not authenticated"):
+        scanner.scan_universe(kite_client=None, top_n=5, allow_synthetic=False)
+
+
+

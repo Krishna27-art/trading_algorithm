@@ -20,7 +20,11 @@ urllib3>=2.0.0
 fastapi>=0.110.0
 uvicorn>=0.28.0
 pydantic>=2.6.0
+pydantic-settings>=2.2.0
 
 # Optional Visualization / Dashboard support
 tabulate>=0.9.0
 matplotlib>=3.8.0
+
+# Broker SDKs
+dhanhq>=2.0.0

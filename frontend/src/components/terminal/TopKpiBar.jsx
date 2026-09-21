@@ -112,31 +112,35 @@ export default function TopKpiBar({ telemetry, margins }) {
         </div>
       </div>
 
-      {/* 6. WIN RATE */}
+      {/* 6. ACTIVE STRATEGY */}
       <div className="term-panel p-3.5 flex flex-col justify-between">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Win Rate</span>
-          <span className="text-[11px] font-mono text-indigo-300 font-semibold">PF 5.21</span>
+          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Active Strategy</span>
+          <span className="text-[11px] font-mono text-indigo-300 font-semibold uppercase">{telemetry?.data_source || 'REAL KITE'}</span>
         </div>
         <div className="mt-2">
-          <span className="text-xl sm:text-2xl font-bold font-mono text-emerald-400 tracking-tight">
-            77.2%
+          <span className="text-base sm:text-lg font-extrabold font-mono text-white tracking-tight uppercase">
+            {telemetry?.strategy || 'CPR'}
           </span>
-          <span className="text-xs text-slate-400 block font-mono mt-0.5">180D Backtest</span>
+          <span className="text-xs text-slate-400 block font-mono mt-0.5">
+            {telemetry?.strategy_levels?.regime ? `Regime: ${telemetry.strategy_levels.regime}` : 'Intraday Mode'}
+          </span>
         </div>
       </div>
 
-      {/* 7. ALGORITHM */}
+      {/* 7. ALGORITHM STATE */}
       <div className="term-panel p-3.5 flex flex-col justify-between col-span-2 sm:col-span-1">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Algorithm</span>
+          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Engine State</span>
           <Activity className="w-3.5 h-3.5 text-indigo-400" />
         </div>
         <div className="mt-2">
-          <span className={`text-sm sm:text-base font-bold font-mono px-2.5 py-1 rounded border inline-block ${getStatusColor(algoState)}`}>
+          <span className={`text-xs sm:text-sm font-bold font-mono px-2 py-1 rounded border inline-block ${getStatusColor(algoState)}`}>
             {algoState}
           </span>
-          <span className="text-xs text-slate-400 block font-mono mt-1">ORB + VWAP Mode</span>
+          <span className="text-xs text-slate-400 block font-mono mt-1">
+            {telemetry?.market_status === 'OPEN' ? 'Market Live' : 'Market Closed'}
+          </span>
         </div>
       </div>
     </div>

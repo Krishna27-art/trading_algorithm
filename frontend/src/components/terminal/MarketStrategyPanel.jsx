@@ -71,10 +71,10 @@ export default function MarketStrategyPanel({ telemetry }) {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <h2 className="text-base sm:text-lg font-extrabold text-white tracking-tight">
-              {symbol} 50 Intraday Chart
+              {symbol} Intraday Chart
             </h2>
-            <span className="text-xs font-mono font-bold text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
-              ORB + VWAP
+            <span className="text-xs font-mono font-bold text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 uppercase">
+              {(telemetry?.strategy || 'CPR')} + VWAP
             </span>
           </div>
 

@@ -65,3 +65,10 @@ def test_place_order_endpoint_auth():
     with pytest.raises(HTTPException) as exc_bad:
         place_order(req=req, x_shared_secret="bad-key")
     assert exc_bad.value.status_code == 401
+
+    from backend.main import exit_order, ExitOrderRequest
+    exit_req = ExitOrderRequest(symbol="NIFTY", mode="PAPER")
+    with pytest.raises(HTTPException) as exc_exit:
+        exit_order(req=exit_req, x_shared_secret=None)
+    assert exc_exit.value.status_code == 401
+

@@ -22,8 +22,10 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
         self.orders: Dict[str, OrderRecord] = {}
         self.positions: Dict[str, int] = {}
         self.position_entry_prices: Dict[str, float] = {}
+        self.realised_pnls: Dict[str, float] = {}
         self.last_ltp: Dict[str, float] = {}
         self.tick_callback: Optional[Callable[[float, int, datetime], None]] = None
+
 
     def connect(self) -> bool:
         self.is_connected = True
@@ -86,12 +88,28 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
 
         self.orders[order_id] = record
 
-        # Update position tracker
+        # Update position tracker and realized P&L
         current_pos = self.positions.get(symbol, 0)
+        entry_price = self.position_entry_prices.get(symbol, fill_price)
         pos_change = quantity if direction == OrderDirection.BUY else -quantity
         new_pos = current_pos + pos_change
+
+        # Calculate realized P&L if closing or reducing
+        if (current_pos > 0 and direction == OrderDirection.SELL) or (current_pos < 0 and direction == OrderDirection.BUY):
+            closed_qty = min(abs(current_pos), quantity)
+            if current_pos > 0:
+                pnl_delta = (fill_price - entry_price) * closed_qty
+            else:
+                pnl_delta = (entry_price - fill_price) * closed_qty
+            self.realised_pnls[symbol] = self.realised_pnls.get(symbol, 0.0) + pnl_delta
+
         self.positions[symbol] = new_pos
-        self.position_entry_prices[symbol] = fill_price
+        self.last_ltp[symbol] = fill_price
+        if new_pos != 0:
+            if current_pos == 0:
+                self.position_entry_prices[symbol] = fill_price
+        else:
+            self.position_entry_prices[symbol] = 0.0
 
         logger.info(
             f"[{self.name}] FILLED {direction.value} {quantity} {symbol} @ ₹{fill_price:.2f} "
@@ -118,6 +136,7 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
                 o.status = OrderStatus.CANCELLED
                 o.updated_at = datetime.now()
                 cancelled += 1
+
         logger.info(f"[{self.name}] Cancelled {cancelled} pending orders.")
         return cancelled
 
@@ -125,13 +144,26 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
         result = []
         for sym, qty in self.positions.items():
             if qty != 0:
+                avg_price = self.position_entry_prices.get(sym, 0.0)
+                ltp = self.last_ltp.get(sym, avg_price)
+                unrealised = (ltp - avg_price) * qty if qty > 0 else (avg_price - ltp) * abs(qty)
+                realised = self.realised_pnls.get(sym, 0.0)
                 result.append({
-                    "symbol": sym,
+                    "tradingsymbol": sym,
+                    "exchange": "NSE",
+                    "product": "MIS",
+                    "instrument_token": 0,
                     "quantity": qty,
-                    "buy_price": self.position_entry_prices.get(sym, 0.0),
-                    "current_price": self.last_ltp.get(sym, 0.0),
+                    "average_price": round(avg_price, 2),
+                    "last_price": round(ltp, 2),
+                    "pnl": round(unrealised + realised, 2),
+                    "unrealised": round(unrealised, 2),
+                    "realised": round(realised, 2),
+                    "buy_quantity": qty if qty > 0 else 0,
+                    "sell_quantity": abs(qty) if qty < 0 else 0,
                 })
         return result
+
 
     def get_orders(self) -> List[Dict[str, Any]]:
         return [o.model_dump() for o in self.orders.values()]

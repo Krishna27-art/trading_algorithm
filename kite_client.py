@@ -8,7 +8,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from kiteconnect import KiteConnect
 
-import config
+from config.settings import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,16 +20,16 @@ logger = logging.getLogger("kite_client")
 
 class KiteApp:
     def __init__(self):
-        self.api_key = config.API_KEY
-        self.api_secret = config.API_SECRET
+        self.api_key = settings.kite_api_key
+        self.api_secret = settings.kite_api_secret
         self.kite: Optional[KiteConnect] = None
         self._initialize_session()
 
     def _get_access_token(self) -> Optional[str]:
         # Priority 1: session_token.json
-        if config.TOKEN_FILE.exists():
+        if settings.token_file.exists():
             try:
-                with open(config.TOKEN_FILE, "r") as f:
+                with open(settings.token_file, "r") as f:
                     data = json.load(f)
                     token = data.get("access_token")
                     if token:
@@ -38,8 +38,8 @@ class KiteApp:
                 logger.warning(f"Could not read session_token.json: {e}")
 
         # Priority 2: .env file
-        if config.ACCESS_TOKEN:
-            return config.ACCESS_TOKEN
+        if settings.kite_access_token:
+            return settings.kite_access_token
 
         return None
 
@@ -155,7 +155,7 @@ class KiteApp:
         )
         print(order_summary)
 
-        if config.SEMI_AUTOMATED_CONFIRMATION:
+        if settings.semi_automated_confirmation:
             confirm = input("Confirm and place this order? (y/N): ").strip().lower()
             if confirm not in ("y", "yes"):
                 logger.info("Order cancelled by user.")

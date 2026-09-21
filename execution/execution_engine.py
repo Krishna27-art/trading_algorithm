@@ -5,7 +5,7 @@ Connects Market Data Ingestion -> Candle Aggregator -> Strategy -> Risk Gate -> 
 
 import uuid
 from datetime import datetime, time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from broker.base_broker import BaseBrokerAdapter
 from config.settings import AppSettings, InstrumentConfig, settings
@@ -18,7 +18,7 @@ from portfolio.portfolio_manager import PortfolioManager
 from risk.position_sizer import PositionSizer
 from risk.risk_manager import RiskManager
 from risk.transaction_costs import TransactionCostCalculator
-from strategy.base_strategy import SignalAction, StrategySignal
+from strategy.base_strategy import BaseStrategy, SignalAction, StrategySignal
 from strategy.orb_strategy import IntradayORBStrategy
 
 
@@ -28,6 +28,7 @@ class ExecutionEngine:
         broker: BaseBrokerAdapter,
         instrument: InstrumentConfig,
         app_settings: AppSettings = settings,
+        strategy: Optional[BaseStrategy] = None,
         db: Optional[DatabaseManager] = None,
         portfolio: Optional[PortfolioManager] = None,
         risk_manager: Optional[RiskManager] = None,
@@ -49,7 +50,19 @@ class ExecutionEngine:
             logger.info(f"[{instrument.symbol}] Linked to shared portfolio-wide RiskManager.")
 
         # Strategy & Aggregator
-        self.strategy = IntradayORBStrategy(instrument=self.instrument, strategy_config=app_settings.strategy)
+        if strategy is not None:
+            self.strategy = strategy
+        else:
+            strat_name = getattr(app_settings, "active_strategy", "cpr").lower()
+            if strat_name == "cpr":
+                from strategy.cpr_strategy import CPRRegimeBreakoutStrategy
+                self.strategy = CPRRegimeBreakoutStrategy(instrument=self.instrument, strategy_config=app_settings.strategy)
+            elif strat_name == "dual_ema":
+                from strategy.dual_ema_strategy import BufferedDualEMAStrategy
+                self.strategy = BufferedDualEMAStrategy(instrument=self.instrument, strategy_config=app_settings.strategy)
+            else:
+                self.strategy = IntradayORBStrategy(instrument=self.instrument, strategy_config=app_settings.strategy)
+
         self.candle_aggregator = CandleAggregator(
             symbol=instrument.symbol,
             timeframe_minutes=app_settings.strategy.candle_timeframe_minutes,
@@ -302,19 +315,29 @@ class ExecutionEngine:
         client_order_id = f"CLT_{signal.signal_id or uuid.uuid4().hex[:12]}"
 
         try:
+            strat_label = getattr(self.strategy, "name", "ENTRY")
+            tag = f"{symbol[:8]}_{strat_label[:8]}"
+
             order_record = self.broker.place_order(
                 symbol=symbol,
                 direction=direction,
                 order_type=OrderType.LIMIT,
                 quantity=qty,
                 price=order_price,
-                tag="ORB_ENTRY",
+                tag=tag,
                 client_order_id=client_order_id,
             )
             order_record.client_order_id = client_order_id
             order_record.signal_id = signal.signal_id
             self.order_manager.register_order(order_record)
             self.db.save_order(order_record)
+
+            # Invariant: If order is rejected by broker, do NOT create position
+            if order_record.status == OrderStatus.REJECTED:
+                logger.warning(
+                    f"[{symbol}] Entry order was REJECTED by broker: {order_record.reject_reason}. Position not registered."
+                )
+                return
 
             # Register Position in Strategy & Portfolio
             fill_price = order_record.average_fill_price or signal.price

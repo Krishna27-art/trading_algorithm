@@ -108,37 +108,38 @@ export default function TopNavbar({
       <div className="flex items-center gap-3 sm:gap-4 bg-black/40 px-3 sm:px-4 py-1.5 rounded-lg border border-white/[0.08]">
         <div className="flex items-center gap-1.5 font-mono">
           <span className="text-xs sm:text-sm font-extrabold text-white tracking-tight">{selectedSymbol}</span>
-          <span className="text-[10px] text-slate-400 hidden sm:inline">{selectedSymbol === 'NIFTY' ? 'NFO' : 'NSE'}</span>
+          <span className="text-[10px] text-slate-400 hidden sm:inline">{selectedSymbol === 'NIFTY' ? 'INDEX' : 'NSE'}</span>
         </div>
 
         <div className="h-4 w-[1px] bg-white/10" />
 
         <div className="flex items-baseline gap-2 font-mono">
           <span className="text-sm sm:text-base font-extrabold text-white tracking-tight">
-            ₹{ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            {ltp > 0 ? `₹${ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
           </span>
-          <span
-            className={`text-xs font-bold ${
-              changePts >= 0 ? 'text-emerald-400' : 'text-rose-400'
-            }`}
-          >
-            {changePts >= 0 ? '+' : ''}
-            {changePts.toFixed(2)} ({changePct >= 0 ? '+' : ''}
-            {changePct.toFixed(2)}%)
-          </span>
+          {ltp > 0 && (
+            <span
+              className={`text-xs font-bold ${
+                changePts >= 0 ? 'text-emerald-400' : 'text-rose-400'
+              }`}
+            >
+              {changePts >= 0 ? '+' : ''}
+              {changePts.toFixed(2)} ({changePct >= 0 ? '+' : ''}
+              {changePct.toFixed(2)}%)
+            </span>
+          )}
         </div>
       </div>
 
       {/* RIGHT: Status Pills & Actions */}
       <div className="flex items-center gap-2 sm:gap-3">
         {/* Kite Connection Status */}
-        <div className="hidden lg:flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded bg-white/[0.03] border border-white/5">
-          <span className={`w-2 h-2 rounded-full ${isKiteConnected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-          <span className="text-slate-300">
-            {isKiteConnected ? 'KITE CONNECTED' : 'KITE OFFLINE'}
+        <div className="flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded bg-white/[0.03] border border-white/5">
+          <span className={`w-2 h-2 rounded-full ${isKiteConnected ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+          <span className={`font-bold ${isKiteConnected ? 'text-emerald-300' : 'text-slate-400'}`}>
+            {isKiteConnected ? 'REAL KITE' : 'OFFLINE'}
           </span>
         </div>
-
 
         {/* Market Status & Clock */}
         <div className="flex items-center gap-1.5 text-xs font-mono px-2.5 py-1 rounded bg-white/[0.03] border border-white/5">

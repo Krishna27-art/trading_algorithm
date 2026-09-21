@@ -18,17 +18,17 @@ export default function ActiveTradeCard({ trade, onSquareOff }) {
   }
 
   const isLong = trade.direction === 'BUY';
-  const entry = trade.entry_price || 24100.0;
+  const entry = trade.entry_price;
   const ltp = trade.current_price || entry;
-  const sl = trade.stop_loss || 24000.0;
-  const target = trade.target || 24300.0;
+  const sl = trade.stop_loss;
+  const target = trade.target;
   const pnl = trade.unrealized_pnl || 0.0;
   const rMult = trade.r_multiple || 0.0;
 
   // Calculate percentage progress toward target vs SL
-  const totalSpan = Math.abs(target - sl) || 1;
-  const currentSpan = isLong ? (ltp - sl) : (sl - ltp);
-  const progressPct = Math.max(0, Math.min(100, (currentSpan / totalSpan) * 100));
+  const totalSpan = target && sl ? Math.abs(target - sl) || 1 : 1;
+  const currentSpan = isLong && ltp && sl ? (ltp - sl) : (sl && ltp ? sl - ltp : 0);
+  const progressPct = target && sl ? Math.max(0, Math.min(100, (currentSpan / totalSpan) * 100)) : 50;
 
   const formatINR = (val) => {
     const num = Math.round(val || 0);
@@ -86,19 +86,19 @@ export default function ActiveTradeCard({ trade, onSquareOff }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
         <div className="p-2 rounded bg-white/[0.02] border border-white/5">
           <span className="text-[10px] text-slate-400 block uppercase">Entry</span>
-          <span className="font-bold text-white text-sm">₹{entry.toFixed(1)}</span>
+          <span className="font-bold text-white text-sm">{entry ? `₹${entry.toFixed(1)}` : '—'}</span>
         </div>
         <div className="p-2 rounded bg-white/[0.02] border border-white/5">
           <span className="text-[10px] text-slate-400 block uppercase">Current LTP</span>
-          <span className="font-bold text-cyan-300 text-sm">₹{ltp.toFixed(1)}</span>
+          <span className="font-bold text-cyan-300 text-sm">{ltp ? `₹${ltp.toFixed(1)}` : '—'}</span>
         </div>
         <div className="p-2 rounded bg-rose-500/[0.04] border border-rose-500/20">
           <span className="text-[10px] text-slate-400 block uppercase">Stop Loss</span>
-          <span className="font-bold text-rose-400 text-sm">₹{sl.toFixed(1)}</span>
+          <span className="font-bold text-rose-400 text-sm">{sl ? `₹${sl.toFixed(1)}` : '—'}</span>
         </div>
         <div className="p-2 rounded bg-emerald-500/[0.04] border border-emerald-500/20">
           <span className="text-[10px] text-slate-400 block uppercase">Target</span>
-          <span className="font-bold text-emerald-400 text-sm">₹{target.toFixed(1)}</span>
+          <span className="font-bold text-emerald-400 text-sm">{target ? `₹${target.toFixed(1)}` : '—'}</span>
         </div>
       </div>
 

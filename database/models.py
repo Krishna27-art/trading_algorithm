@@ -85,3 +85,5 @@ class OrderRecord(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.now)
     reject_reason: Optional[str] = None
     tag: Optional[str] = None
+    product: Optional[str] = "MIS"
+    exchange: Optional[str] = "NSE"

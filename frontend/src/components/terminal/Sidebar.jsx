@@ -13,6 +13,7 @@ import {
   User,
   LogOut,
   TrendingUp,
+  Activity,
 } from 'lucide-react';
 
 export default function Sidebar({
@@ -27,15 +28,14 @@ export default function Sidebar({
 }) {
   const currentStrat = (telemetry?.strategy || 'cpr').toUpperCase();
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'scanner', label: 'NIFTY 50 Scanner', icon: Compass, badge: 'LIVE' },
-    { id: 'strategy', label: 'Strategy Engine', icon: Layers, badge: currentStrat },
-    { id: 'positions', label: 'Positions', icon: Layers, count: telemetry?.active_trade ? 1 : 0 },
-    { id: 'orders', label: 'Orders', icon: FileText },
-    { id: 'risk', label: 'Risk Gate', icon: ShieldCheck, badge: '2%' },
-    { id: 'performance', label: 'Performance', icon: BarChart3 },
+    { id: 'dashboard', label: 'Predictions Hub', icon: LayoutDashboard, badge: 'RESEARCH' },
+    { id: 'terminal', label: 'Workstation Terminal', icon: Activity },
+    { id: 'positions', label: 'Broker Positions', icon: Layers, count: telemetry?.active_trade ? 1 : 0 },
+    { id: 'orders', label: 'Order History', icon: FileText },
+    { id: 'performance', label: 'Backtest Analytics', icon: BarChart3 },
+    { id: 'strategy', label: 'Strategy Specs', icon: Layers, badge: currentStrat },
+    { id: 'risk', label: 'Risk Parameters', icon: ShieldCheck, badge: '2%' },
     { id: 'system', label: 'System Health', icon: Server },
-    { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   const isMarketOpen = telemetry?.market_status === 'OPEN';
@@ -142,7 +142,9 @@ export default function Sidebar({
             <span className={`status-dot ${isMarketOpen ? 'status-dot-emerald' : 'status-dot-rose'}`} />
             <span className="text-slate-300 font-semibold">{isMarketOpen ? 'NSE OPEN' : 'NSE CLOSED'}</span>
           </div>
-          <span className="text-[11px] text-emerald-400 font-semibold">Kite Connected</span>
+          <span className={`text-[11px] font-semibold ${telemetry?.authenticated ? 'text-emerald-400' : 'text-slate-400'}`}>
+            {telemetry?.authenticated ? 'Kite Connected' : 'Kite Offline'}
+          </span>
         </div>
 
         {/* User Card */}

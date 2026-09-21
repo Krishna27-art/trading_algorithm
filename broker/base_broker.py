@@ -34,6 +34,8 @@ class BaseBrokerAdapter(ABC):
         price: Optional[float] = None,
         tag: Optional[str] = "algo",
         client_order_id: Optional[str] = None,
+        product: Optional[str] = "MIS",
+        exchange: Optional[str] = None,
     ) -> OrderRecord:
         """Dispatches an order to the broker and returns tracking record."""
         pass

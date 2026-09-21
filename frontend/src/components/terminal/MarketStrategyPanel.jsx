@@ -6,14 +6,15 @@ export default function MarketStrategyPanel({ telemetry }) {
   const [hoveredBar, setHoveredBar] = useState(null);
 
   const symbol = telemetry?.symbol || 'NIFTY';
-  const ltp = telemetry?.current_price || 24150.0;
+  const ltp = telemetry?.current_price;
   const changePts = telemetry?.price_change_pts || 0.0;
   const changePct = telemetry?.price_change_pct || 0.0;
-  const vwap = telemetry?.vwap || 24120.0;
-  const orbHigh = telemetry?.orb_high || 24180.0;
-  const orbLow = telemetry?.orb_low || 24095.0;
-  const orbWidth = telemetry?.orb_width || (orbHigh - orbLow);
-  const volFilterPassed = telemetry?.volatility_filter_passed ?? true;
+  const vwap = telemetry?.vwap;
+  const orbLevels = telemetry?.strategy_levels || {};
+  const orbHigh = orbLevels.orb_high || telemetry?.orb_high;
+  const orbLow = orbLevels.orb_low || telemetry?.orb_low;
+  const orbWidth = orbLevels.orb_width || (orbHigh && orbLow ? orbHigh - orbLow : null);
+  const volFilterPassed = orbLevels.is_valid_volatility ?? (telemetry?.volatility_filter_passed ?? true);
   const candles = telemetry?.chart_candles || [];
 
   const activeSignal = telemetry?.active_signal;

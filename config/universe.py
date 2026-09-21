@@ -15,6 +15,7 @@ essential for predictable, production-grade algorithmic execution.
 
 from __future__ import annotations
 
+from datetime import date
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,6 +76,92 @@ NIFTY_50_CONSTITUENTS: List[str] = [
     "ULTRACEMCO",
     "WIPRO",
 ]
+
+# Official NSE Tradingsymbols for current NIFTY 100 constituents (Alphabetical, 100 names)
+NIFTY_100_CONSTITUENTS: List[str] = sorted(list(set(NIFTY_50_CONSTITUENTS + [
+    "ABB",
+    "ADANIENSOL",
+    "ADANIGREEN",
+    "ADANIPOWER",
+    "AMBUJACEM",
+    "ATGL",
+    "BAJAJHLDNG",
+    "BANKBARODA",
+    "BHEL",
+    "BOSCHLTD",
+    "CANBK",
+    "CHOLAFIN",
+    "COFORGE",
+    "COLPAL",
+    "DABUR",
+    "DIVISLAB",
+    "DLF",
+    "GAIL",
+    "GODREJCP",
+    "HAL",
+    "HAVELLS",
+    "ICICIGI",
+    "ICICIPRULI",
+    "INDIANB",
+    "INDHOTEL",
+    "INDIGO",
+    "IOC",
+    "IRCTC",
+    "IRFC",
+    "JIOFIN",
+    "JSWENERGY",
+    "JSWINFRA",
+    "LICI",
+    "LTIM",
+    "MAXHEALTH",
+    "MOTHERSON",
+    "NAUKRI",
+    "NHPC",
+    "PFC",
+    "PIDILITIND",
+    "PNB",
+    "RECLTD",
+    "SIEMENS",
+    "TVSMOTOR",
+    "TATAPOWER",
+    "TORNTPHARM",
+    "VBL",
+    "VEDL",
+    "ZOMATO",
+    "ZYDUSLIFE",
+])))
+
+
+def get_universe(
+    as_of: Optional[date] = None,
+    membership_csv: Optional[Path] = None,
+) -> List[str]:
+    """
+    Point-in-time accessor for NIFTY 100 constituents.
+    If membership_csv is provided or exists at data/cache/nifty100_membership.csv (format: date,symbol),
+    it reads the point-in-time constituent list for as_of.
+    Otherwise, falls back to the static list with an explicit survivorship warning.
+    """
+    csv_path = membership_csv or (settings.base_dir / "data" / "cache" / "nifty100_membership.csv")
+
+    if csv_path.exists() and as_of is not None:
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path, parse_dates=["date"])
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            # Filter for latest date <= as_of
+            valid_dates = df[df["date"] <= as_of]["date"]
+            if not valid_dates.empty:
+                target_date = valid_dates.max()
+                symbols = df[df["date"] == target_date]["symbol"].dropna().unique().tolist()
+                if symbols:
+                    return sorted(symbols)
+        except Exception as e:
+            logger.warning(f"Failed to read membership history from {csv_path}: {e}")
+
+    logger.warning("Using static NIFTY 100 universe; results carry survivorship bias.")
+    return list(NIFTY_100_CONSTITUENTS)
+
 
 # Static reference tokens for offline / fallback execution without live Kite instruments dump
 _FALLBACK_NSE_TOKENS: Dict[str, int] = {

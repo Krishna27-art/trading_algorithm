@@ -22,6 +22,8 @@ CANONICAL_INDEX_TOKENS = {
     "NIFTY BANK": 260105,
     "FINNIFTY": 257801,       # NSE:NIFTY FIN SERVICE
     "MIDCPNIFTY": 288009,     # NSE:NIFTY MID SELECT
+    "INDIA VIX": 264969,      # NSE:INDIA VIX
+    "INDIAVIX": 264969,
 }
 
 
@@ -132,6 +134,40 @@ class InstrumentResolver:
                 return int(fut_candidates[0]["instrument_token"])
 
         return None
+
+    def resolve_lot_size(
+        self,
+        symbol: str = "NIFTY",
+        exchange: str = "NFO",
+        instrument_type: str = "FUT",
+        kite_client: Optional[Any] = None,
+        fallback: int = 25,
+    ) -> int:
+        """
+        Resolves dynamic contract lot size from Kite's instrument master.
+        For NIFTY futures or options, queries exchange="NFO" where name matches symbol.
+        Caches per session; falls back to config default if Kite is unavailable.
+        """
+        sym_clean = symbol.strip().upper()
+        cache_key = f"lotsize_{exchange}_{sym_clean}_{instrument_type}"
+        if hasattr(self, "_lot_size_cache") and cache_key in self._lot_size_cache:
+            return self._lot_size_cache[cache_key]
+        if not hasattr(self, "_lot_size_cache"):
+            self._lot_size_cache: Dict[str, int] = {}
+
+        instruments = self.get_instruments(kite_client, exchange=exchange)
+        for inst in instruments:
+            name = (inst.get("name") or "").strip().upper()
+            inst_type = (inst.get("instrument_type") or "").strip().upper()
+            if name == sym_clean or inst.get("tradingsymbol") == sym_clean:
+                if not instrument_type or inst_type == instrument_type or (instrument_type in ("CE", "PE") and inst_type in ("CE", "PE")):
+                    lot = inst.get("lot_size")
+                    if lot and int(lot) > 0:
+                        lot_val = int(lot)
+                        self._lot_size_cache[cache_key] = lot_val
+                        return lot_val
+
+        return fallback
 
 
 # Global singleton instance

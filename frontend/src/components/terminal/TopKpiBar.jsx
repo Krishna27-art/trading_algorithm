@@ -3,22 +3,23 @@ import { TrendingUp, TrendingDown, Shield, Activity, Percent, Layers, Wallet } f
 
 export default function TopKpiBar({ telemetry, margins }) {
   const risk = telemetry?.risk_summary || {};
-  const capital = risk.capital || 1000000;
-  const availableMargin = margins?.equity?.available?.live_balance || (capital * 0.95);
+  const capital = risk.capital;
+  const availableMargin = margins?.equity?.available?.live_balance;
   const pnl = telemetry?.active_trade?.unrealized_pnl || 0.0;
-  const pnlPct = (pnl / capital) * 100.0;
+  const pnlPct = capital ? (pnl / capital) * 100.0 : 0.0;
   const tradesTaken = risk.trades_taken || 0;
   const maxTrades = risk.max_trades || 1;
   const riskUsed = risk.daily_risk_used || 0;
-  const riskLimit = risk.daily_risk_limit || (capital * 0.02);
+  const riskLimit = risk.daily_risk_limit || (capital ? capital * 0.02 : null);
   const algoState = telemetry?.algorithm_state || 'RUNNING';
 
   const formatINR = (val) => {
+    if (val === null || val === undefined) return '—';
     return new Intl.NumberFormat('en-IN', {
       style: 'currency',
       currency: 'INR',
       maximumFractionDigits: 0,
-    }).format(val || 0);
+    }).format(val);
   };
 
   const getStatusColor = (state) => {

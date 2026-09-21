@@ -48,6 +48,8 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
         price: Optional[float] = None,
         tag: Optional[str] = "algo",
         client_order_id: Optional[str] = None,
+        product: Optional[str] = "MIS",
+        exchange: Optional[str] = None,
     ) -> OrderRecord:
         # Check duplicate client_order_id
         if client_order_id:
@@ -68,6 +70,8 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
         else:
             fill_price = ref_price - self.slippage_points
 
+        target_exchange = exchange or ("NFO" if "NIFTY" in symbol and ("CE" in symbol or "PE" in symbol or "FUT" in symbol) else "NSE")
+
         # Fill order immediately in paper mode
         record = OrderRecord(
             order_id=order_id,
@@ -84,6 +88,8 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
             created_at=created_at,
             updated_at=created_at,
             tag=tag,
+            product=product or "MIS",
+            exchange=target_exchange,
         )
 
         self.orders[order_id] = record

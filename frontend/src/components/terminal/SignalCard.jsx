@@ -66,7 +66,7 @@ export default function SignalCard({ signal, onQuickExecute, isLiveMode }) {
         </div>
 
         <span className={`term-badge ${isLong ? 'term-badge-emerald' : 'term-badge-rose'} text-xs font-mono font-bold`}>
-          {signal.confidence || 85}% Confidence
+          {signal.confidence ? `${signal.confidence}% Confidence` : 'Signal Active'}
         </span>
       </div>
 
@@ -79,7 +79,7 @@ export default function SignalCard({ signal, onQuickExecute, isLiveMode }) {
         </span>
         <p className="text-xs text-slate-300 mt-1 font-sans">
           <strong className="text-white">Reason: </strong>
-          {signal.trigger || (isLong ? '15m close above OR High and above VWAP' : '15m close below OR Low and below VWAP')}
+          {signal.trigger || (isLong ? 'Breakout above level with VWAP alignment' : 'Breakdown below level with VWAP alignment')}
         </p>
       </div>
 
@@ -88,21 +88,21 @@ export default function SignalCard({ signal, onQuickExecute, isLiveMode }) {
         <div className="p-2.5 rounded-lg bg-white/[0.03] border border-white/5">
           <span className="text-[11px] text-slate-400 block uppercase font-sans font-semibold">Entry</span>
           <span className="text-lg sm:text-xl font-bold text-white mt-0.5 block">
-            ₹{signal.entry?.toFixed(1)}
+            {signal.entry ? `₹${signal.entry.toFixed(1)}` : '—'}
           </span>
         </div>
 
         <div className="p-2.5 rounded-lg bg-rose-500/[0.05] border border-rose-500/20">
           <span className="text-[11px] text-slate-400 block uppercase font-sans font-semibold">Stop Loss</span>
           <span className="text-lg sm:text-xl font-bold text-rose-400 mt-0.5 block">
-            ₹{signal.stop_loss?.toFixed(1)}
+            {signal.stop_loss ? `₹${signal.stop_loss.toFixed(1)}` : '—'}
           </span>
         </div>
 
         <div className="p-2.5 rounded-lg bg-emerald-500/[0.05] border border-emerald-500/20">
           <span className="text-[11px] text-slate-400 block uppercase font-sans font-semibold">Target (2R)</span>
           <span className="text-lg sm:text-xl font-bold text-emerald-400 mt-0.5 block">
-            ₹{signal.target?.toFixed(1)}
+            {signal.target ? `₹${signal.target.toFixed(1)}` : '—'}
           </span>
         </div>
 
@@ -117,18 +117,30 @@ export default function SignalCard({ signal, onQuickExecute, isLiveMode }) {
       {/* Risk / Reward Metrics Row */}
       <div className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-white/5 text-xs font-mono">
         <div>
-          <span className="text-slate-400 block text-[11px] font-sans">Risk (1% Cap)</span>
-          <span className="text-sm font-bold text-rose-400">{formatINR(signal.risk_amount || 10000)}</span>
+          <span className="text-slate-400 block text-[11px] font-sans">Risk Distance</span>
+          <span className="text-sm font-bold text-rose-400">
+            {signal.entry && signal.stop_loss
+              ? formatINR(Math.abs(signal.entry - signal.stop_loss) * qty)
+              : '—'}
+          </span>
         </div>
         <div className="h-6 w-[1px] bg-white/10" />
         <div>
-          <span className="text-slate-400 block text-[11px] font-sans">Reward (2R)</span>
-          <span className="text-sm font-bold text-emerald-400">{formatINR(signal.reward_amount || 20000)}</span>
+          <span className="text-slate-400 block text-[11px] font-sans">Target Reward</span>
+          <span className="text-sm font-bold text-emerald-400">
+            {signal.entry && signal.target
+              ? formatINR(Math.abs(signal.target - signal.entry) * qty)
+              : '—'}
+          </span>
         </div>
         <div className="h-6 w-[1px] bg-white/10" />
         <div>
           <span className="text-slate-400 block text-[11px] font-sans">Risk / Reward</span>
-          <span className="text-sm font-bold text-indigo-300">{signal.risk_reward || '1 : 2.0'}</span>
+          <span className="text-sm font-bold text-indigo-300">
+            {signal.entry && signal.stop_loss && signal.target && Math.abs(signal.entry - signal.stop_loss) > 0
+              ? `1 : ${(Math.abs(signal.target - signal.entry) / Math.abs(signal.entry - signal.stop_loss)).toFixed(1)}`
+              : '1 : 2.0'}
+          </span>
         </div>
       </div>
 

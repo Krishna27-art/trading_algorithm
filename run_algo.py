@@ -177,7 +177,14 @@ def build_backtester(strategy_name: str, instrument: InstrumentConfig):
             strategy_factory=lambda: BufferedDualEMAStrategy(instrument, settings.strategy),
             instrument=instrument, app_settings=settings,
         )
-    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema")
+    elif strategy_name == "rm100":
+        from backtest.rm100_backtest import RM100Backtester
+        from strategy.residual_momentum import ResidualMomentumStrategy
+        return RM100Backtester(
+            strategy=ResidualMomentumStrategy(settings.rm100),
+            initial_capital=settings.risk.initial_capital,
+        )
+    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema, rm100, vrp")
 
 
 def build_backtester_factory(strategy_name: str):
@@ -435,7 +442,7 @@ def main():
     )
     parser.add_argument(
         "--strategy",
-        choices=["orb", "cpr", "dual_ema"],
+        choices=["orb", "cpr", "dual_ema", "rm100", "vrp"],
         default="orb",
         help="Trading strategy to run/backtest (default: orb)",
     )
@@ -462,7 +469,34 @@ def main():
         action="store_true",
         help="Scan the NIFTY 50 universe to pick top candidates before running backtest / paper trading",
     )
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=None,
+        help="Path to portfolio data directory for rm100/vrp (default: data/daily)",
+    )
+    parser.add_argument(
+        "--expiry",
+        type=str,
+        default=None,
+        help="Target option expiry date YYYY-MM-DD for vrp",
+    )
     args = parser.parse_args()
+
+    # Portfolio-level strategy dispatch
+    if args.strategy in ("rm100", "vrp"):
+        from run_portfolio import run_rm100, run_vrp
+        data_dir = args.data or (settings.base_dir / "data" / "daily" if args.strategy == "rm100" else settings.base_dir / "data" / "vrp")
+        if args.strategy == "rm100":
+            run_rm100(
+                data_dir=data_dir,
+                mode="backtest" if args.mode in ("backtest", "rolling", "walkforward") else "plan",
+                capital=settings.risk.initial_capital,
+                rf=6.5,
+            )
+        else:
+            run_vrp(data_dir=data_dir, expiry=args.expiry)
+        return
 
     if args.mode == "scan":
         run_scanner(top_n=args.top_n)

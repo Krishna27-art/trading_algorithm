@@ -74,9 +74,10 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
         order_type: OrderType,
         quantity: int,
         price: Optional[float] = None,
-        exchange: Optional[str] = None,
         tag: Optional[str] = "algo",
         client_order_id: Optional[str] = None,
+        product: Optional[str] = "MIS",
+        exchange: Optional[str] = None,
     ) -> OrderRecord:
         if not self.kite:
             raise RuntimeError("Kite adapter is not connected.")
@@ -84,6 +85,14 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
         txn_type = self.kite.TRANSACTION_TYPE_BUY if direction == OrderDirection.BUY else self.kite.TRANSACTION_TYPE_SELL
         ord_type = self.kite.ORDER_TYPE_LIMIT if order_type == OrderType.LIMIT else self.kite.ORDER_TYPE_MARKET
         target_exchange = exchange or (self.kite.EXCHANGE_NFO if getattr(self, "default_exchange", "NSE") == "NFO" else self.kite.EXCHANGE_NSE)
+
+        prod_upper = (product or "MIS").upper()
+        if prod_upper == "CNC":
+            target_product = self.kite.PRODUCT_CNC
+        elif prod_upper == "NRML":
+            target_product = self.kite.PRODUCT_NRML
+        else:
+            target_product = self.kite.PRODUCT_MIS
 
         # Kite tag field has an 8-character or 20-character limit depending on API version; use tag or slice client_order_id
         order_tag = tag or (client_order_id[:8] if client_order_id else "algo")
@@ -95,7 +104,7 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
                 tradingsymbol=symbol,
                 transaction_type=txn_type,
                 quantity=quantity,
-                product=self.kite.PRODUCT_MIS,
+                product=target_product,
                 order_type=ord_type,
                 price=price,
                 tag=order_tag,
@@ -114,6 +123,8 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
                 created_at=datetime.now(),
                 updated_at=datetime.now(),
                 tag=order_tag,
+                product=prod_upper,
+                exchange=target_exchange,
             )
         except Exception as e:
             logger.error(f"[{self.name}] Order placement failed: {e}")

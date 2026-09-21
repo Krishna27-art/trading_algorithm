@@ -59,6 +59,17 @@ HOLIDAYS_BY_YEAR = {
 }
 
 
+# Union Budget days (Feb 1 annually, or interim budgets) and General Election counting days
+BLACKOUT_DATES: Set[date] = {
+    date(2019, 5, 23),  # 2019 General Election Results
+    date(2024, 2, 1),   # 2024 Interim Budget
+    date(2024, 6, 4),   # 2024 General Election Results
+    date(2024, 7, 23),  # 2024 Full Union Budget
+    date(2025, 2, 1),   # 2025 Union Budget
+    date(2026, 2, 1),   # 2026 Union Budget
+}
+
+
 class MarketCalendar:
     @staticmethod
     def _all_holidays() -> Set[date]:
@@ -79,6 +90,14 @@ class MarketCalendar:
         return True
 
     @staticmethod
+    def is_blackout_date(d: date) -> bool:
+        """Returns True if the date falls on Union Budget or Election Results day."""
+        # Check explicit set or Feb 1 annual budget day
+        if d in BLACKOUT_DATES or (d.month == 2 and d.day == 1):
+            return True
+        return False
+
+    @staticmethod
     def get_session_phase(t: time) -> SessionPhase:
         if t < time(9, 15):
             return SessionPhase.PRE_MARKET
@@ -91,3 +110,4 @@ class MarketCalendar:
         if t < time(15, 30):
             return SessionPhase.SQUARE_OFF
         return SessionPhase.CLOSED
+

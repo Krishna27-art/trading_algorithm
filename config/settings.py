@@ -86,6 +86,109 @@ class TransactionCostConfig(BaseModel):
     equity_slippage_pct: float = 0.0002          # 0.02% or 1 tick
 
 
+class DeliveryCostConfig(BaseModel):
+    brokerage_per_order: float = 0.0        # Zerodha CNC delivery is free
+    stt_buy_pct: float = 0.0010             # 0.10% on buy turnover
+    stt_sell_pct: float = 0.0010            # 0.10% on sell turnover
+    exchange_txn_pct: float = 0.0000297     # 0.00297% on aggregate turnover
+    sebi_charges_pct: float = 0.0000010     # Rs 10 per crore
+    stamp_duty_buy_pct: float = 0.00015     # 0.015% on buy turnover
+    gst_pct: float = 0.18
+    slippage_pct: float = 0.0005            # 5 bps per execution leg
+    dp_charges_per_sell_scrip: float = 15.34  # CDSL + broker, per scrip per day
+
+
+class IndexOptionsCostConfig(BaseModel):
+    brokerage_per_order: float = 20.0       # flat, per leg
+    stt_sell_premium_pct: float = 0.0010    # 0.10% of premium, sell side only
+    exchange_txn_premium_pct: float = 0.0003503   # 0.03503% of premium
+    sebi_charges_pct: float = 0.0000010
+    stamp_duty_buy_pct: float = 0.00003     # 0.003% on buy premium turnover
+    gst_pct: float = 0.18
+    slippage_premium_pct: float = 0.0075    # 0.75% of premium per leg
+
+
+class ResidualMomentumConfig(BaseModel):
+    # Estimation windows (trading days)
+    regression_window: int = 252        # M: rolling OLS calibration
+    momentum_window: int = 126          # K: residual accumulation lookback
+    lag_buffer: int = 10                # L: recent sessions excluded
+    vol_window: int = 20                # sizing volatility lookback
+    adtv_window: int = 20
+
+    # Universe / liquidity gates
+    min_adtv_rupees: float = 50 * 1e7
+    min_valid_universe: int = 70        # below this, skip the whole cycle
+
+    # Selection
+    portfolio_size: int = 10            # J
+    top_decile_pct: float = 0.10
+    exit_percentile: float = 0.75       # rescored holdings below P75 are cut
+
+    # Sizing
+    max_weight: float = 0.15
+    min_weight: float = 0.04
+    max_sector_weight: float = 0.30
+
+    # Regime
+    regime_sma: int = 200
+    bullish_gross_exposure: float = 1.00
+    defensive_gross_exposure: float = 0.40
+    trend_filter_sma: int = 50
+
+    # Exits
+    stop_atr_multiple: float = 2.5
+    atr_window: int = 14
+    trail_trigger_gain: float = 0.15    # +15% unrealised arms the EMA20 trail
+    trail_ema: int = 20
+
+    # Risk gate
+    max_drawdown_gate: float = 0.12     # -12% from high-water mark
+    drawdown_exposure_cut: float = 0.50
+
+    # Hedge
+    nifty_lot_size: int = 25
+
+    # Schedule
+    entry_time: time = time(15, 0)
+    order_deadline: time = time(15, 10)
+    rebalance_weekday: int = 4          # Friday
+    rebalance_parity_weeks: int = 2     # every alternate Friday
+
+    # Slippage assumption used for reference pricing only
+    slippage_pct: float = 0.0005
+
+
+class VRPConfig(BaseModel):
+    # Signal
+    rv_ema_span: int = 20
+    vrp_zscore_window: int = 60
+    min_vrp_zscore: float = 0.50
+
+    # Absolute regime band on India VIX
+    vix_floor: float = 12.0
+    vix_ceiling: float = 23.0
+
+    # Structure deltas
+    short_delta: float = 0.15
+    long_delta: float = 0.05
+    lots: int = 1
+    lot_size: int = 75            # NIFTY options lot size -- verify each cycle
+
+    # Exits
+    profit_target_pct: float = 0.65     # of initial net credit
+    stop_loss_multiple: float = 1.50    # of initial net credit
+    expiry_exit_time: time = time(14, 30)
+
+    # Schedule
+    entry_weekday: int = 3              # Thursday
+    entry_time: time = time(15, 10)
+
+    # Costs / execution
+    premium_slippage_pct: float = 0.0075   # 0.75% of premium per leg
+    risk_free_rate: float = 0.065
+
+
 class AppSettings(BaseSettings):
     # Active broker mode (DEFAULT: PAPER for safety)
     active_broker: BrokerType = BrokerType.PAPER
@@ -103,12 +206,18 @@ class AppSettings(BaseSettings):
         )
     ]
 
-    # Active Strategy (Options: "cpr", "dual_ema", "orb")
+    # Active Strategy (Options: "cpr", "dual_ema", "orb", "rm100", "vrp")
     active_strategy: str = "cpr"
 
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
+
+    # Portfolio-level strategies and cost schedules
+    rm100: ResidualMomentumConfig = Field(default_factory=ResidualMomentumConfig)
+    vrp: VRPConfig = Field(default_factory=VRPConfig)
+    delivery_costs: DeliveryCostConfig = Field(default_factory=DeliveryCostConfig)
+    options_costs: IndexOptionsCostConfig = Field(default_factory=IndexOptionsCostConfig)
 
     # Storage paths
     base_dir: Path = Path(__file__).resolve().parent.parent

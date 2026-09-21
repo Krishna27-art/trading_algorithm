@@ -35,6 +35,7 @@ export default function Dashboard({ user, onLogout }) {
   const [orders, setOrders] = useState([]);
   const [health, setHealth] = useState(null);
   const [backtestReport, setBacktestReport] = useState(null);
+  const [backtestError, setBacktestError] = useState(null);
   const [loadingBacktest, setLoadingBacktest] = useState(false);
   const [loadingScanner, setLoadingScanner] = useState(false);
   const [tradingMode, setTradingMode] = useState('PAPER'); // 'PAPER' | 'LIVE'
@@ -70,7 +71,6 @@ export default function Dashboard({ user, onLogout }) {
     }
   }, [selectedSymbol, selectedStrategy]);
 
-
   // Fetch universe scan results
   const fetchScanner = useCallback(async () => {
     setLoadingScanner(true);
@@ -96,6 +96,7 @@ export default function Dashboard({ user, onLogout }) {
 
   const handleRunBacktest = async (strat, sym) => {
     setLoadingBacktest(true);
+    setBacktestError(null);
     const targetStrat = strat || selectedStrategy;
     const targetSym = sym || selectedSymbol;
     try {
@@ -106,16 +107,19 @@ export default function Dashboard({ user, onLogout }) {
       if (res.ok) {
         const data = await res.json();
         setBacktestReport(data.report);
+        setBacktestError(null);
       } else {
         const err = await res.json();
-        alert(`Backtest Notice: ${err.detail || 'Could not execute backtest on real data.'}`);
+        const msg = err.detail || 'Could not execute backtest on real data.';
+        setBacktestError(msg);
       }
     } catch (e) {
-      alert(`Backtest error: ${e.message}`);
+      setBacktestError(`Network error executing backtest: ${e.message}`);
     } finally {
       setLoadingBacktest(false);
     }
   };
+
 
   const handleQuickExecute = () => {
     fetchData();
@@ -277,6 +281,7 @@ export default function Dashboard({ user, onLogout }) {
             <div className="animate-fade-in">
               <PerformancePage
                 backtestReport={backtestReport}
+                backtestError={backtestError}
                 onRunBacktest={handleRunBacktest}
                 isLoading={loadingBacktest}
                 selectedStrategy={selectedStrategy}
@@ -285,6 +290,7 @@ export default function Dashboard({ user, onLogout }) {
               />
             </div>
           )}
+
 
           {activeTab === 'system' && (
             <div className="animate-fade-in">

@@ -73,61 +73,108 @@ class LoginUrlRequest(BaseModel):
 
 
 def get_saved_session() -> Optional[Dict[str, Any]]:
-    if not TOKEN_FILE.exists():
-        return None
-    try:
-        with open(TOKEN_FILE, "r") as f:
-            data = json.load(f)
-            if data.get("access_token") and data.get("api_key"):
-                return data
-    except Exception as e:
-        logger.warning(f"Failed to read session file: {e}")
+    """Retrieves saved Kite session token with multi-source fallback."""
+    from config.settings import settings
+    # 1. Primary path: settings.token_file (session_token.json)
+    token_candidates = [settings.token_file, TOKEN_FILE]
+    for p in token_candidates:
+        if p and p.exists():
+            try:
+                with open(p, "r") as f:
+                    data = json.load(f)
+                    if data.get("access_token") and data.get("api_key"):
+                        return data
+            except Exception as e:
+                logger.warning(f"Failed to read session file {p}: {e}")
+
+    # 2. Environment fallback
+    if settings.kite_api_key and settings.kite_access_token:
+        if settings.kite_api_key != "your_api_key_here":
+            return {
+                "api_key": settings.kite_api_key,
+                "access_token": settings.kite_access_token,
+                "user_id": settings.kite_user_id or "",
+                "user_name": "Trader",
+                "login_time": datetime.now().isoformat(),
+            }
+
     return None
 
 
-def get_active_kite() -> Optional[KiteConnect]:
+def get_active_kite_with_diagnostics(force_validate: bool = False) -> Tuple[Optional[KiteConnect], Optional[str]]:
+    """
+    Returns an authenticated KiteConnect instance and diagnostic error message.
+    If force_validate is True, calls kite.profile() to verify live validity.
+    """
     global _cached_kite
-    if _cached_kite:
-        return _cached_kite
+    from config.settings import settings
 
     session = get_saved_session()
     if not session:
-        return None
+        _cached_kite = None
+        return None, "No saved Kite session found. Please log in with Kite Connect."
+
+    api_key = session.get("api_key")
+    access_token = session.get("access_token")
+    if not api_key or not access_token:
+        _cached_kite = None
+        return None, "Session file exists but is missing api_key or access_token."
+
+    # Return cached if valid and not explicitly asked to re-verify live
+    if _cached_kite is not None and not force_validate:
+        return _cached_kite, None
 
     try:
-        kite = KiteConnect(api_key=session["api_key"])
-        kite.set_access_token(session["access_token"])
-        # Quick validation check with profile
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
+        # Verify profile against live Zerodha API
         profile = kite.profile()
         if profile and "user_id" in profile:
             _cached_kite = kite
-            return kite
+            return kite, None
+        _cached_kite = None
+        return None, "Kite profile check returned empty profile."
     except Exception as e:
-        logger.warning(f"Saved session token is invalid or expired: {e}")
-        # Clear invalid session
-        if TOKEN_FILE.exists():
-            try:
-                TOKEN_FILE.unlink()
-            except Exception:
-                pass
+        err_type = type(e).__name__
+        err_msg = str(e)
+        logger.warning(f"Kite session validation failed ({err_type}): {err_msg}")
         _cached_kite = None
 
-    return None
+        # Clean up stale token if definitely invalid/expired
+        if "TokenException" in err_type or "403" in err_msg or "expired" in err_msg.lower():
+            for p in [settings.token_file, TOKEN_FILE]:
+                if p and p.exists():
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+        return None, f"Kite session error ({err_type}): {err_msg}"
+
+
+def get_active_kite() -> Optional[KiteConnect]:
+    """Convenience getter returning active Kite client or None."""
+    kite, _ = get_active_kite_with_diagnostics(force_validate=False)
+    return kite
 
 
 @app.get("/api/status")
 def check_status():
-    """Checks if there is an active, valid session on the backend."""
+    """Live validation of Zerodha Kite session state."""
     session = get_saved_session()
     if not session:
-        return {"authenticated": False}
+        return {"authenticated": False, "status": "DISCONNECTED", "message": "No active Kite session found."}
 
-    kite = get_active_kite()
+    kite, err = get_active_kite_with_diagnostics(force_validate=True)
     if not kite:
-        return {"authenticated": False, "message": "Session expired or invalid"}
+        return {
+            "authenticated": False,
+            "status": "DISCONNECTED",
+            "message": err or "Kite session is invalid or expired. Please re-authenticate.",
+        }
 
     return {
         "authenticated": True,
+        "status": "CONNECTED",
         "user": {
             "user_id": session.get("user_id", ""),
             "user_name": session.get("user_name", "Trader"),
@@ -135,6 +182,7 @@ def check_status():
             "api_key": session.get("api_key", "")[:4] + "****" if session.get("api_key") else "",
         },
     }
+
 
 
 @app.post("/api/login-url")
@@ -197,12 +245,18 @@ def login(req: LoginRequest):
             "login_time": datetime.now().isoformat(),
         }
 
-        with open(TOKEN_FILE, "w") as f:
+        with open(settings.token_file, "w") as f:
             json.dump(payload, f, indent=2)
-        os.chmod(TOKEN_FILE, 0o600)
+        os.chmod(settings.token_file, 0o600)
+
+        if TOKEN_FILE != settings.token_file:
+            with open(TOKEN_FILE, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.chmod(TOKEN_FILE, 0o600)
 
         # Update cached client
         _cached_kite = kite
+
 
         # Update .env if exists
         try:
@@ -444,51 +498,65 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
     from config.settings import settings
     from config.universe import create_instrument_config_for_equity, resolve_universe_tokens
     from data.historical_loader import HistoricalDataLoader
+    from data.instrument_resolver import instrument_resolver
     from datetime import datetime, timedelta
 
     strat_name = strategy.lower()
-    tokens = resolve_universe_tokens()
 
+    # 1. Validate Kite session
+    kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
+
+    # 2. Resolve authoritative instrument token
     if symbol and symbol != "NIFTY":
-        token = tokens.get(symbol)
-        inst = create_instrument_config_for_equity(symbol, token)
+        token = instrument_resolver.resolve_token(symbol, exchange="NSE", kite_client=kite)
+        if not token:
+            tokens = resolve_universe_tokens()
+            token = tokens.get(symbol, 0)
+        inst = create_instrument_config_for_equity(symbol, token or 0)
         base_p = 2000.0
     else:
         inst = settings.instruments[0]
-        token = inst.instrument_token
+        token = instrument_resolver.resolve_token("NIFTY", exchange="NSE", kite_client=kite) or 256265
+        inst.instrument_token = token
         base_p = 24000.0
 
-    # Check for real data
-    kite = get_active_kite()
     cache_path = settings.base_dir / "data" / "cache" / f"{inst.symbol}_15m_{days}d.csv"
     df = None
     data_source = "REAL_KITE"
+    fetch_error: Optional[str] = None
 
-    # 1. Try reading cached real data
+    # 3. Try reading cached real data
     if cache_path.exists():
         try:
             df, _ = HistoricalDataLoader.load_cached_data_with_validation(cache_path)
-        except Exception:
-            df = None
-
-    # 2. Try fetching from live Kite Connect Historical API
-    if df is None and kite and token:
-        try:
-            today = datetime.now().date()
-            start_d = today - timedelta(days=int(days * 1.5))
-            df = HistoricalDataLoader.fetch_real_data(
-                kite_client=kite,
-                instrument_token=token,
-                start_date=start_d,
-                end_date=today,
-                interval="15minute",
-                cache_path=cache_path,
-            )
         except Exception as e:
-            logger.warning(f"Kite historical fetch failed for {inst.symbol}: {e}")
+            logger.info(f"Cached data invalid or unreadable: {e}")
             df = None
 
-    # 3. Handle fallback in test or raise error
+    # 4. Try fetching from live Kite Connect Historical API
+    if df is None:
+        if not kite:
+            fetch_error = auth_err or "Zerodha Kite Connect session is not active. Please authenticate via Kite login."
+        elif not token:
+            fetch_error = f"Unable to resolve numerical instrument_token for {inst.symbol} from Kite instrument master."
+        else:
+            try:
+                today = datetime.now().date()
+                start_d = today - timedelta(days=int(days * 1.5))
+                df = HistoricalDataLoader.fetch_real_data(
+                    kite_client=kite,
+                    instrument_token=token,
+                    start_date=start_d,
+                    end_date=today,
+                    interval="15minute",
+                    cache_path=cache_path,
+                )
+            except Exception as e:
+                fetch_error = str(e)
+                logger.error(f"Kite historical fetch failed for {inst.symbol} (token={token}): {e}")
+                df = None
+
+    # 5. Handle fallback in test or raise error
     is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     if df is None:
         if is_test:
@@ -501,8 +569,9 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Real historical data for {inst.symbol} is unavailable. Please authenticate with Zerodha Kite Connect to fetch real historical bars.",
+                detail=f"Historical data unavailable for {inst.symbol} (Token: {token}): {fetch_error or 'Kite returned zero candles.'}",
             )
+
 
     # 4. Instantiate strategy backtester
     if strat_name == "cpr":

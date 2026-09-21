@@ -3,6 +3,7 @@ import { BarChart3, TrendingUp, RefreshCw, ShieldCheck, DollarSign, Activity, Al
 
 export default function PerformancePage({
   backtestReport,
+  backtestError,
   onRunBacktest,
   isLoading,
   selectedStrategy = 'cpr',
@@ -37,10 +38,30 @@ export default function PerformancePage({
             className="term-btn-primary py-2 px-4 text-xs font-mono font-bold"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-            <span>{isLoading ? 'Simulating Real Data...' : `Run ${selectedStrategy.toUpperCase()} Backtest`}</span>
+            <span>{isLoading ? 'Fetching Real Candles...' : `Run ${selectedStrategy.toUpperCase()} Backtest`}</span>
           </button>
         </div>
       </div>
+
+      {/* Real-time Error Diagnostics Banner */}
+      {backtestError && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-start gap-3 shadow-lg">
+          <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="font-extrabold text-rose-200 uppercase tracking-wider text-[11px]">
+              Kite Historical Data Request Notice
+            </div>
+            <div className="text-slate-300 font-sans text-xs leading-relaxed">
+              {backtestError}
+            </div>
+            <div className="text-[11px] text-slate-400 pt-1">
+              • Ensure your Zerodha developer app has the paid <span className="text-white font-bold">Historical Data</span> add-on enabled.<br />
+              • Check that your daily session is active via the <span className="text-white font-bold">Kite Login</span> page.
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* When no backtest has been run */}
       {!report ? (

@@ -155,12 +155,35 @@ class HistoricalDataLoader:
 
             logger.info(f"Fetching {interval} candles for token {instrument_token}: "
                         f"{chunk_start} -> {chunk_end}")
-            candles = kite_client.get_historical_candles(
-                instrument_token=instrument_token,
-                from_date=chunk_start.strftime("%Y-%m-%d"),
-                to_date=chunk_end.strftime("%Y-%m-%d"),
-                interval=interval,
-            )
+            try:
+                if hasattr(kite_client, "get_historical_candles"):
+                    candles = kite_client.get_historical_candles(
+                        instrument_token=instrument_token,
+                        from_date=chunk_start.strftime("%Y-%m-%d"),
+                        to_date=chunk_end.strftime("%Y-%m-%d"),
+                        interval=interval,
+                    )
+                elif hasattr(kite_client, "historical_data"):
+                    candles = kite_client.historical_data(
+                        instrument_token=instrument_token,
+                        from_date=chunk_start.strftime("%Y-%m-%d"),
+                        to_date=chunk_end.strftime("%Y-%m-%d"),
+                        interval=interval,
+                    )
+                else:
+                    raise TypeError(f"Client {type(kite_client)} does not support historical data retrieval.")
+            except Exception as e:
+                err_type = type(e).__name__
+                err_msg = str(e)
+                logger.error(
+                    f"Kite Historical API call failed: {err_type}: {err_msg} | "
+                    f"token={instrument_token}, interval={interval}, from={chunk_start}, to={chunk_end}"
+                )
+                raise RuntimeError(
+                    f"Kite Historical API ({err_type}): {err_msg} "
+                    f"[token={instrument_token}, interval={interval}, dates={chunk_start} to {chunk_end}]"
+                ) from e
+
             if candles:
                 all_rows.extend(candles)
             else:
@@ -172,11 +195,11 @@ class HistoricalDataLoader:
 
         if not all_rows:
             raise RuntimeError(
-                "Zero candles returned across the whole requested range. Check: "
-                "(1) instrument_token is correct, (2) your Kite account has the "
-                "paid Historical Data subscription enabled, (3) access_token is "
-                "still valid (run auth.py again if it's expired)."
+                f"Zero candles returned across {start_date} to {end_date} for token {instrument_token}. Check: "
+                "(1) instrument_token is correct, (2) Kite account has the paid Historical Data "
+                "API subscription active, (3) access token is valid."
             )
+
 
         df = pd.DataFrame(all_rows)
         df.rename(columns={"date": "datetime"}, inplace=True)

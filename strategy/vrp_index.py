@@ -186,6 +186,13 @@ class VRPHarvestStrategy(PortfolioStrategy):
         if "delta" in side.columns and side["delta"].notna().all():
             deltas = side["delta"].astype(float)
         else:
+            # Sanity-bound IV before feeding it into Black-Scholes: a bad tick
+            # (0, negative, or an absurd triple-digit IV) would otherwise
+            # produce a garbage delta that still gets picked as "nearest".
+            valid_iv = side["iv"].astype(float).between(0.01, 5.0)
+            side = side[valid_iv]
+            if side.empty:
+                return None
             deltas = side.apply(
                 lambda r: bs_delta(
                     spot, float(r["strike"]), tau, float(r["iv"]),
@@ -202,12 +209,15 @@ class VRPHarvestStrategy(PortfolioStrategy):
         return side.loc[idx]
 
     @staticmethod
-    def _price_of(row: pd.Series) -> float:
-        """Prefer the mid of bid/ask; fall back to last traded price."""
+    def _price_of(row: pd.Series) -> Optional[float]:
+        """Mid of a live two-sided bid/ask quote. Returns None — never a
+        fallback to last_price — when there is no tradable quote: a stale
+        LTP is not an executable price, and this strategy's max-loss math
+        depends on the premium actually being achievable."""
         bid, ask = row.get("bid"), row.get("ask")
         if bid is not None and ask is not None and float(bid) > 0 and float(ask) > 0:
             return (float(bid) + float(ask)) / 2.0
-        return float(row.get("last_price", 0.0))
+        return None
 
     def generate_plan(
         self,
@@ -269,6 +279,12 @@ class VRPHarvestStrategy(PortfolioStrategy):
         ):
             row = picks[key]
             premium = self._price_of(row)
+            if premium is None:
+                logger.warning(
+                    f"[{self.strategy_code}] no live two-sided quote for {row.get('tradingsymbol')} "
+                    f"({key}) on {as_of}; refusing to price off a stale last_price — structure skipped"
+                )
+                return None
             # Slip against ourselves on both sides: sells fill lower, buys higher.
             adj = 1.0 - cfg.premium_slippage_pct if side == OrderSide.SELL else 1.0 + cfg.premium_slippage_pct
             legs.append(

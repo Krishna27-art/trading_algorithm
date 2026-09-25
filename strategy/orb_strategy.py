@@ -128,7 +128,11 @@ class IntradayORBStrategy(BaseStrategy):
                 initial_stop = self.orb.low
                 raw_risk = close - initial_stop
 
-                # Cap effective risk distance if OR_width > 120
+                # Cap effective risk distance if OR_width > 120. The cap must
+                # also tighten the actual stop used for the trade — capping
+                # only the target-side "effective_risk" while leaving the
+                # real stop at the (uncapped) ORB low means the real monetary
+                # risk on the trade can still exceed max_risk_cap.
                 if self.orb.width > self.instrument.max_orb_range:
                     effective_risk = min(raw_risk, self.instrument.max_risk_cap)
                 else:

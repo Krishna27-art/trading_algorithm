@@ -60,6 +60,7 @@ class BufferedDualEMAStrategy(BaseStrategy):
         target_atr_multiple: float = 2.0,
         session_start: time = time(9, 30),
         session_end: time = time(15, 0),
+        min_warmup_bars: int = 50,
     ):
         super().__init__(instrument.symbol)
         self.instrument = instrument
@@ -69,6 +70,13 @@ class BufferedDualEMAStrategy(BaseStrategy):
         self.target_atr_multiple = target_atr_multiple
         self.session_start = session_start
         self.session_end = session_end
+        # SMA200 (the binding constraint — EMA9/EMA21/ATR14 all settle well
+        # before this) is computed with min_periods=1, so with fewer bars
+        # than this it is just an average of what's there, not a real
+        # SMA200, and the trend filter it gates is unreliable. Refuse to
+        # generate entries until there's enough history for it to mean
+        # what its name says.
+        self.min_warmup_bars = min_warmup_bars
 
         self.current_date: Optional[date] = None
         self.warm_history: pd.DataFrame = pd.DataFrame(columns=["datetime", "high", "low", "close"])
@@ -105,7 +113,7 @@ class BufferedDualEMAStrategy(BaseStrategy):
             "close": up_to_candle["close"],
         })
         combined = pd.concat([self.warm_history, pd.DataFrame(self.today_bars)], ignore_index=True)
-        if len(combined) < 2:
+        if len(combined) < self.min_warmup_bars:
             return None
         indicators = _compute_indicators(combined)
         return indicators.iloc[-1]

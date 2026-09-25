@@ -16,16 +16,17 @@ from .portfolio_base import (
 )
 from .residual_momentum import ResidualMomentumConfig, ResidualMomentumStrategy
 from .vrp_index import VRPConfig, VRPHarvestStrategy
+from .apex_engine import ApexAivemEngine, EngineConfig, CatalystScorer, RegimeDecision, MockKite
 
 __all__ = [
-    # intraday, single-instrument
+    # intraday, single-instrument (Algos 1, 2, 3)
     "BaseStrategy",
     "IntradayORBStrategy",
     "CPRRegimeBreakoutStrategy",
     "BufferedDualEMAStrategy",
     "SignalAction",
     "StrategySignal",
-    # portfolio-level / multi-leg
+    # portfolio-level & harvest (Algos 4, 5)
     "PortfolioStrategy",
     "MarketRegime",
     "OrderSide",
@@ -40,4 +41,10 @@ __all__ = [
     "ResidualMomentumConfig",
     "VRPHarvestStrategy",
     "VRPConfig",
+    # auction & catalyst engine (Algo 6)
+    "ApexAivemEngine",
+    "EngineConfig",
+    "CatalystScorer",
+    "RegimeDecision",
+    "MockKite",
 ]

@@ -7,8 +7,30 @@ Usage:
     python run_algo.py --mode backtest --strategy dual_ema
     python run_algo.py --mode rolling --strategy cpr
     python run_algo.py --mode scan --top-n 5
+    python run_algo.py --mode predict --top-n 5
     python run_algo.py --mode paper
     python run_algo.py --mode live --broker KITE
+
+CHANGES vs. the original run_algo.py + run_all_algorithms.py:
+  - run_all_algorithms.py is gone. Its algo 1/2/3 (ORB, CPR, Dual-EMA "what
+    would each strategy say right now" tables) are merged in here as a
+    single --mode predict, one combined table instead of three near-
+    identical ones — prediction_service.evaluate_symbol() already returns
+    all 3 strategies' predictions in one call, so three separate loops
+    over the same symbol list were pure duplication.
+  - Its algo 4/5/6 (RM-100, VRP-Index, APEX) are gone. Those are
+    portfolio-level/research-stage strategies, not part of this repo's
+    scope (ORB/CPR/Dual-EMA intraday only); still runnable independently
+    via strategy/residual_momentum.py, strategy/vrp_index.py,
+    strategy/apex_engine.py if/when that scope changes.
+  - --strategy no longer accepts rm100/vrp (they had no working backtester
+    here anyway: build_backtester()'s old "rm100" branch imported
+    backtest.rm100_backtest, a module that doesn't exist in this repo).
+  - --mode paper / --mode live --broker KITE used to import
+    execution.execution_engine.ExecutionEngine and
+    monitoring.cli_monitor.CLIMonitor — neither file exists in this repo,
+    so both modes crashed with an ImportError as soon as they were
+    invoked. They now fail with one clear message up front instead.
 """
 
 import argparse
@@ -17,6 +39,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
+
 import pandas as pd
 from tabulate import tabulate
 
@@ -30,6 +53,18 @@ from monitoring.logger import logger
 from scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
 
 
+def get_kite_session():
+    """Helper to initialize KiteApp connection. Returns (app, kite) or (None, None)."""
+    try:
+        from kite_client import KiteApp
+        app = KiteApp()
+        if app.is_connected():
+            return app, app.kite
+    except Exception:
+        pass
+    return None, None
+
+
 def run_scanner(top_n: int = 5) -> Tuple[List[StockRankingMetrics], List[InstrumentConfig]]:
     """
     Scans the NIFTY 50 universe using batched live quotes from Kite (if authenticated)
@@ -39,14 +74,7 @@ def run_scanner(top_n: int = 5) -> Tuple[List[StockRankingMetrics], List[Instrum
     print("  NIFTY 50 UNIVERSE SCANNER: EXPLAINABLE MOMENTUM & BREAKOUT RANKING")
     print("=" * 85)
 
-    kite_app = None
-    try:
-        from kite_client import KiteApp
-        app = KiteApp()
-        if app.is_connected():
-            kite_app = app
-    except Exception:
-        pass
+    kite_app, _ = get_kite_session()
 
     scanner = NiftyUniverseScanner()
     ranked_metrics, data_source = scanner.scan_universe(kite_client=kite_app, top_n=top_n)
@@ -87,6 +115,80 @@ def run_scanner(top_n: int = 5) -> Tuple[List[StockRankingMetrics], List[Instrum
 
     top_configs = scanner.get_top_instrument_configs(ranked_metrics)
     return ranked_metrics, top_configs
+
+
+def run_predict(top_n: int = 5):
+    """
+    Scans the universe for top candidates, then runs ORB, CPR, and Dual-EMA
+    live via PredictionService for NIFTY + each candidate, printing one
+    combined table. Replaces run_all_algorithms.py's algo 1/2/3.
+    """
+    from data.instrument_resolver import instrument_resolver
+    from config.universe import resolve_universe_tokens
+    from strategy.prediction_service import prediction_service
+
+    print("\n" + "=" * 90)
+    print("  LIVE PREDICTIONS: ORB / CPR / DUAL-EMA")
+    print("=" * 90)
+
+    kite_app, kite = get_kite_session()
+    if kite:
+        try:
+            profile = kite.profile()
+            print(f"[+] LIVE SESSION CONNECTED: {profile.get('user_name')} ({profile.get('user_id')})")
+        except Exception:
+            print("[+] LIVE SESSION CONNECTED.")
+    else:
+        print("[!] NOTICE: No active Kite Connect session. Running in offline/simulated data mode.")
+
+    ranked_metrics, _ = NiftyUniverseScanner().scan_universe(kite_client=kite_app, top_n=top_n)
+    target_symbols = ["NIFTY"] + [m.symbol for m in ranked_metrics]
+
+    today = date.today()
+    start_d = today - timedelta(days=10)
+    tokens = resolve_universe_tokens(kite_client=kite, force_refresh=False) if kite else {}
+
+    rows = []
+    for sym in target_symbols:
+        if sym == "NIFTY":
+            token = 256265
+            ltp = float(kite.quote(["NSE:NIFTY 50"]).get("NSE:NIFTY 50", {}).get("last_price", 24000.0)) if kite else 24000.0
+        else:
+            token = tokens.get(sym) or (instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite) if kite else 0) or 0
+            ltp = float(kite.quote([f"NSE:{sym}"]).get(f"NSE:{sym}", {}).get("last_price", 2000.0)) if kite else 2000.0
+
+        cache_file = settings.base_dir / "data" / "cache" / f"{sym}_15m.csv"
+        df_15m = pd.DataFrame()
+        if kite_app:
+            try:
+                df_15m = HistoricalDataLoader.fetch_real_data(
+                    kite_client=kite_app,
+                    instrument_token=token,
+                    start_date=start_d,
+                    end_date=today,
+                    interval="15minute",
+                    cache_path=cache_file,
+                    force_refresh=False,
+                )
+            except Exception:
+                df_15m = pd.DataFrame()
+
+        if df_15m.empty:
+            df_15m = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=hash(sym) % 1000, base_price=ltp)
+
+        preds, consensus = prediction_service.evaluate_symbol(symbol=sym, df_15m=df_15m, current_ltp=ltp, token=token)
+        orb, cpr, ema = preds["orb"], preds["cpr"], preds["dual_ema"]
+
+        rows.append({
+            "Symbol": sym,
+            "LTP": f"₹{ltp:,.2f}",
+            "ORB": f"{orb.direction or 'NONE'} ({orb.status})",
+            "CPR": f"{cpr.direction or 'NONE'} ({cpr.status})",
+            "Dual-EMA": f"{ema.direction or 'NONE'} ({ema.status})",
+            "Consensus": consensus["label"],
+        })
+
+    print("\n" + tabulate(rows, headers="keys", tablefmt="fancy_grid"))
 
 
 def load_history(
@@ -177,14 +279,7 @@ def build_backtester(strategy_name: str, instrument: InstrumentConfig):
             strategy_factory=lambda: BufferedDualEMAStrategy(instrument, settings.strategy),
             instrument=instrument, app_settings=settings,
         )
-    elif strategy_name == "rm100":
-        from backtest.rm100_backtest import RM100Backtester
-        from strategy.residual_momentum import ResidualMomentumStrategy
-        return RM100Backtester(
-            strategy=ResidualMomentumStrategy(settings.rm100),
-            initial_capital=settings.risk.initial_capital,
-        )
-    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema, rm100, vrp")
+    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema")
 
 
 def build_backtester_factory(strategy_name: str):
@@ -335,9 +430,20 @@ def run_rolling_walk_forward(strategy_name: str = "orb"):
 
 
 def run_paper_simulation(instruments: Optional[List[InstrumentConfig]] = None):
+    # execution/execution_engine.py and monitoring/cli_monitor.py do not
+    # exist in this repository — this mode previously crashed with a raw
+    # ImportError partway through setup. Fail once, clearly, up front.
+    try:
+        from execution.execution_engine import ExecutionEngine
+        from monitoring.cli_monitor import CLIMonitor
+    except ImportError as e:
+        print("\n[!] --mode paper is unavailable: required modules are missing "
+              f"({e}).\n    execution/execution_engine.py and monitoring/cli_monitor.py "
+              "have not been implemented in this repository yet.\n"
+              "    Use --mode backtest / --mode rolling / --mode scan / --mode predict instead.")
+        return
+
     from broker.paper_broker import PaperBrokerAdapter
-    from execution.execution_engine import ExecutionEngine
-    from monitoring.cli_monitor import CLIMonitor
     from portfolio.portfolio_manager import PortfolioManager
     from risk.risk_manager import RiskManager
 
@@ -436,13 +542,13 @@ def main():
     parser = argparse.ArgumentParser(description="NSE Intraday Trading Algorithm Engine")
     parser.add_argument(
         "--mode",
-        choices=["backtest", "walkforward", "rolling", "paper", "live", "scan"],
+        choices=["backtest", "walkforward", "rolling", "paper", "live", "scan", "predict"],
         default="backtest",
         help="Operational mode (default: backtest)",
     )
     parser.add_argument(
         "--strategy",
-        choices=["orb", "cpr", "dual_ema", "rm100", "vrp"],
+        choices=["orb", "cpr", "dual_ema"],
         default="orb",
         help="Trading strategy to run/backtest (default: orb)",
     )
@@ -469,37 +575,13 @@ def main():
         action="store_true",
         help="Scan the NIFTY 50 universe to pick top candidates before running backtest / paper trading",
     )
-    parser.add_argument(
-        "--data",
-        type=Path,
-        default=None,
-        help="Path to portfolio data directory for rm100/vrp (default: data/daily)",
-    )
-    parser.add_argument(
-        "--expiry",
-        type=str,
-        default=None,
-        help="Target option expiry date YYYY-MM-DD for vrp",
-    )
     args = parser.parse_args()
-
-    # Portfolio-level strategy dispatch
-    if args.strategy in ("rm100", "vrp"):
-        from run_portfolio import run_rm100, run_vrp
-        data_dir = args.data or (settings.base_dir / "data" / "daily" if args.strategy == "rm100" else settings.base_dir / "data" / "vrp")
-        if args.strategy == "rm100":
-            run_rm100(
-                data_dir=data_dir,
-                mode="backtest" if args.mode in ("backtest", "rolling", "walkforward") else "plan",
-                capital=settings.risk.initial_capital,
-                rf=6.5,
-            )
-        else:
-            run_vrp(data_dir=data_dir, expiry=args.expiry)
-        return
 
     if args.mode == "scan":
         run_scanner(top_n=args.top_n)
+
+    elif args.mode == "predict":
+        run_predict(top_n=args.top_n)
 
     elif args.mode == "backtest":
         if args.symbol:
@@ -534,7 +616,12 @@ def main():
         else:
             confirm = input(f"Are you sure you want to trade REAL money with {args.broker}? (type 'CONFIRM'): ")
             if confirm.strip() == "CONFIRM":
-                from execution.execution_engine import ExecutionEngine
+                try:
+                    from execution.execution_engine import ExecutionEngine
+                except ImportError as e:
+                    print(f"\n[!] Live execution is unavailable: {e}\n"
+                          "    execution/execution_engine.py has not been implemented in this repository yet.")
+                    return
 
                 print(f"[+] Starting live execution on {args.broker}...")
                 if args.broker == "KITE":

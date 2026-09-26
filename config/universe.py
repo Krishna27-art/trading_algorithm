@@ -3,11 +3,24 @@
 
 Maintains the single source of truth for the 300-stock scanning universe
 (100 Large Cap, 100 Mid Cap, 100 Small Cap) loaded from data/universe/300_stocks.json.
+
+REMOVED vs. the original: the hardcoded NIFTY_50_CONSTITUENTS and
+NIFTY_100_CONSTITUENTS lists. They were dead weight — the file's own
+comments called them "kept for historical reference/testing", and the only
+non-test reference was get_universe()'s fallback below. data/universe/300_stocks.json
+(loaded by StockUniverse) is the actual, validated single source of truth
+for the scanning universe; these hardcoded lists duplicated a subset of it
+and could silently drift out of sync.
+
+Note: tests/test_scanner.py asserts against NIFTY_50_CONSTITUENTS directly
+and will need its own update (inline the ~3 symbols it checks, or assert
+against StockUniverse().large_cap_100 instead) — that file is outside the
+scope of this change.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date
 import json
 from pathlib import Path
@@ -16,121 +29,16 @@ from typing import Any, Dict, List, Optional
 from config.settings import InstrumentConfig, InstrumentType, settings
 from monitoring.logger import logger
 
-# Official NSE Tradingsymbols for current NIFTY 50 constituents (Kept for historical reference/testing)
-NIFTY_50_CONSTITUENTS: List[str] = [
-    "ADANIENT",
-    "ADANIPORTS",
-    "APOLLOHOSP",
-    "ASIANPAINT",
-    "AXISBANK",
-    "BAJAJ-AUTO",
-    "BAJFINANCE",
-    "BAJAJFINSV",
-    "BEL",
-    "BPCL",
-    "BHARTIARTL",
-    "BRITANNIA",
-    "CIPLA",
-    "COALINDIA",
-    "DRREDDY",
-    "EICHERMOT",
-    "GRASIM",
-    "HCLTECH",
-    "HDFCBANK",
-    "HDFCLIFE",
-    "HEROMOTOCO",
-    "HINDALCO",
-    "HINDUNILVR",
-    "ICICIBANK",
-    "ITC",
-    "INDUSINDBK",
-    "INFY",
-    "JSWSTEEL",
-    "KOTAKBANK",
-    "LT",
-    "M&M",
-    "MARUTI",
-    "NESTLEIND",
-    "NTPC",
-    "ONGC",
-    "POWERGRID",
-    "RELIANCE",
-    "SBILIFE",
-    "SHRIRAMFIN",
-    "SBIN",
-    "SUNPHARMA",
-    "TCS",
-    "TATACONSUM",
-    "TATAMOTORS",
-    "TATASTEEL",
-    "TECHM",
-    "TITAN",
-    "TRENT",
-    "ULTRACEMCO",
-    "WIPRO",
-]
-
-# Official NSE Tradingsymbols for current NIFTY 100 constituents (Kept for historical reference/testing)
-NIFTY_100_CONSTITUENTS: List[str] = sorted(list(set(NIFTY_50_CONSTITUENTS + [
-    "ABB",
-    "ADANIENSOL",
-    "ADANIGREEN",
-    "ADANIPOWER",
-    "AMBUJACEM",
-    "ATGL",
-    "BAJAJHLDNG",
-    "BANKBARODA",
-    "BHEL",
-    "BOSCHLTD",
-    "CANBK",
-    "CHOLAFIN",
-    "COFORGE",
-    "COLPAL",
-    "DABUR",
-    "DIVISLAB",
-    "DLF",
-    "GAIL",
-    "GODREJCP",
-    "HAL",
-    "HAVELLS",
-    "ICICIGI",
-    "ICICIPRULI",
-    "INDIANB",
-    "INDHOTEL",
-    "INDIGO",
-    "IOC",
-    "IRCTC",
-    "IRFC",
-    "JIOFIN",
-    "JSWENERGY",
-    "JSWINFRA",
-    "LICI",
-    "LTIM",
-    "MAXHEALTH",
-    "MOTHERSON",
-    "NAUKRI",
-    "NHPC",
-    "PFC",
-    "PIDILITIND",
-    "PNB",
-    "RECLTD",
-    "SIEMENS",
-    "TVSMOTOR",
-    "TATAPOWER",
-    "TORNTPHARM",
-    "VBL",
-    "VEDL",
-    "ZOMATO",
-    "ZYDUSLIFE",
-])))
-
 
 def get_universe(
     as_of: Optional[date] = None,
     membership_csv: Optional[Path] = None,
 ) -> List[str]:
     """
-    Point-in-time accessor for NIFTY 100 constituents (kept for historical index analysis).
+    Point-in-time accessor for a ~100-stock reference universe (kept for
+    historical index analysis). Prefers a dated membership CSV when one is
+    supplied; otherwise falls back to the large-cap 100 slice of the
+    validated 300-stock master universe (data/universe/300_stocks.json).
     """
     csv_path = membership_csv or (settings.base_dir / "data" / "cache" / "nifty100_membership.csv")
 
@@ -148,7 +56,8 @@ def get_universe(
         except Exception as e:
             logger.warning(f"Failed to read membership history from {csv_path}: {e}")
 
-    return list(NIFTY_100_CONSTITUENTS)
+    fallback = sorted(r.symbol for r in StockUniverse().large_cap_100)
+    return fallback
 
 
 # Static reference tokens for offline fallback

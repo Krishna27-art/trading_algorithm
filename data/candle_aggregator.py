@@ -3,7 +3,7 @@ Real-time tick-to-candle aggregator with VWAP calculation for WebSocket data fee
 """
 
 from datetime import datetime, time, timedelta
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 

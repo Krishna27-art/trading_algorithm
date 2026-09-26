@@ -43,7 +43,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from backtest.event_engine import EventDrivenBacktester
+from backtest.strategy_backtester import StrategyBacktester as EventDrivenBacktester
 from backtest.performance import PerformanceAnalyzer, PerformanceReport
 from config.settings import AppSettings, InstrumentConfig, settings
 from monitoring.logger import logger

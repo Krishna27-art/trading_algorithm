@@ -55,17 +55,22 @@ export default function SystemStatusPage() {
           <div className="space-y-2">
             <Row
               label="Authentication"
-              value={auth.data.authenticated ? 'CONNECTED' : 'DISCONNECTED'}
-              tone={auth.data.authenticated ? 'positive' : 'negative'}
+              value={auth.data.connected || auth.data.authenticated ? 'CONNECTED' : 'DISCONNECTED'}
+              tone={auth.data.connected || auth.data.authenticated ? 'positive' : 'negative'}
             />
-            {auth.data.user && (
+            {(auth.data.user_id || auth.data.user) && (
               <>
-                <Row label="User" value={`${auth.data.user.user_name} (${auth.data.user.user_id})`} plain />
-                <Row label="API key" value={auth.data.user.api_key} plain />
-                <Row label="Login time" value={auth.data.user.login_time} plain />
+                <Row label="User ID" value={auth.data.user_id || auth.data.user?.user_id} plain />
+                <Row label="User Name" value={auth.data.user_name || auth.data.user?.user_name} plain />
+                {auth.data.products?.length > 0 && (
+                  <Row label="Products" value={auth.data.products.join(', ')} plain />
+                )}
+                {auth.data.exchanges?.length > 0 && (
+                  <Row label="Exchanges" value={auth.data.exchanges.join(', ')} plain />
+                )}
               </>
             )}
-            {!auth.data.authenticated && auth.data.message && (
+            {!(auth.data.connected || auth.data.authenticated) && auth.data.message && (
               <p className="text-xs text-[var(--text-dim)] mt-1">{auth.data.message}</p>
             )}
           </div>

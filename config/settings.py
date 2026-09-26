@@ -14,7 +14,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class BrokerType(str, Enum):
     PAPER = "PAPER"
     KITE = "KITE"
-    DHAN = "DHAN"
 
 
 class InstrumentType(str, Enum):
@@ -53,6 +52,15 @@ class StrategyConfig(BaseModel):
     risk_reward_ratio: float = 2.0
     breakeven_r_multiple: float = 1.0
     max_trades_per_instrument_day: int = 1
+
+
+class LiquidityFilterConfig(BaseModel):
+    """Configurable threshold parameters for the universe liquidity filter layer."""
+    min_stock_price: float = 20.0           # Minimum stock price in INR
+    min_avg_volume: int = 25000             # Minimum 20-day average volume
+    min_avg_traded_value: float = 1000000.0 # Minimum average daily traded value (ADTV in INR, 10L)
+    max_spread_pct: float = 1.5             # Maximum acceptable bid-ask spread %
+    reject_circuits: bool = True            # Filter out upper/lower circuit locked stocks
 
 
 class RiskConfig(BaseModel):
@@ -211,6 +219,7 @@ class AppSettings(BaseSettings):
 
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    liquidity_filter: LiquidityFilterConfig = Field(default_factory=LiquidityFilterConfig)
     costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
 
     # Portfolio-level strategies and cost schedules
@@ -231,9 +240,6 @@ class AppSettings(BaseSettings):
     kite_access_token: Optional[str] = None
     kite_user_id: Optional[str] = None
     kite_totp_key: Optional[str] = None
-
-    dhan_client_id: Optional[str] = None
-    dhan_access_token: Optional[str] = None
 
     # Risk limits from .env (₹-denominated caps, separate from percentage-based kill-switch)
     max_capital_per_trade: float = 10000.0

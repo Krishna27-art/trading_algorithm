@@ -1,11 +1,14 @@
-from .event_engine import EventDrivenBacktester
 from .performance import PerformanceAnalyzer, PerformanceReport
-from .walk_forward import WalkForwardResult, WalkForwardValidator
+from .rolling_walk_forward import RollingWalkForwardValidator
+from .strategy_backtester import StrategyBacktester
+
+# Alias for backward compatibility
+EventDrivenBacktester = StrategyBacktester
 
 __all__ = [
+    "StrategyBacktester",
     "EventDrivenBacktester",
     "PerformanceAnalyzer",
     "PerformanceReport",
-    "WalkForwardResult",
-    "WalkForwardValidator",
+    "RollingWalkForwardValidator",
 ]

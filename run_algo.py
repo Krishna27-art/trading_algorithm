@@ -20,8 +20,8 @@ from typing import List, Optional, Tuple
 import pandas as pd
 from tabulate import tabulate
 
-from backtest.event_engine import EventDrivenBacktester
-from backtest.walk_forward import WalkForwardValidator
+from backtest.strategy_backtester import StrategyBacktester as EventDrivenBacktester
+from backtest.rolling_walk_forward import RollingWalkForwardValidator as WalkForwardValidator
 from backtest.rolling_walk_forward import RollingWalkForwardValidator
 from config.settings import BrokerType, InstrumentConfig, InstrumentType, settings
 from data.historical_loader import HistoricalDataLoader
@@ -448,7 +448,7 @@ def main():
     )
     parser.add_argument(
         "--broker",
-        choices=["PAPER", "KITE", "DHAN"],
+        choices=["PAPER", "KITE"],
         default="PAPER",
         help="Broker adapter (default: PAPER)",
     )
@@ -541,8 +541,8 @@ def main():
                     from broker.kite_adapter import KiteBrokerAdapter
                     broker = KiteBrokerAdapter()
                 else:
-                    from broker.dhan_adapter import DhanBrokerAdapter
-                    broker = DhanBrokerAdapter()
+                    print("[!] Broker not supported.")
+                    return
                 engine = ExecutionEngine(broker=broker, instrument=settings.instruments[0])
                 engine.start()
             else:

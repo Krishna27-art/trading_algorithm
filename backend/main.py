@@ -7,8 +7,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pandas as pd
 
-from fastapi import FastAPI, Header, HTTPException, status
+from urllib.parse import quote
+
+from fastapi import FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel, Field
 from dotenv import set_key
@@ -165,87 +168,67 @@ def get_active_kite() -> Optional[KiteConnect]:
     return kite
 
 
-@app.get("/api/status")
-def check_status():
-    """Live validation of Zerodha Kite session state."""
-    session = get_saved_session()
-    if not session:
-        return {"authenticated": False, "status": "DISCONNECTED", "message": "No active Kite session found."}
+# =========================================================================
+# Automatic Kite Connect OAuth Redirect Endpoints
+# =========================================================================
 
-    kite, err = get_active_kite_with_diagnostics(force_validate=True)
-    if not kite:
-        return {
-            "authenticated": False,
-            "status": "DISCONNECTED",
-            "message": err or "Kite session is invalid or expired. Please re-authenticate.",
-        }
-
-    return {
-        "authenticated": True,
-        "status": "CONNECTED",
-        "user": {
-            "user_id": session.get("user_id", ""),
-            "user_name": session.get("user_name", "Trader"),
-            "login_time": session.get("login_time", ""),
-            "api_key": session.get("api_key", "")[:4] + "****" if session.get("api_key") else "",
-        },
-    }
-
-
-
-@app.post("/api/login-url")
-def generate_login_url(req: LoginUrlRequest):
-    """Generates the Zerodha OAuth login URL for the given API Key."""
-    api_key = req.api_key
-    if not api_key:
-        session = get_saved_session()
-        if session and session.get("api_key"):
-            api_key = session.get("api_key")
-        elif os.getenv("KITE_API_KEY"):
-            api_key = os.getenv("KITE_API_KEY")
-
+@app.get("/kite/login")
+def kite_login():
+    """Returns official Kite login URL using server environment API key."""
+    api_key = settings.kite_api_key or os.getenv("KITE_API_KEY")
     if not api_key or api_key == "your_api_key_here":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="API Key is required to generate the login URL.",
+            detail="KITE_API_KEY is not configured in environment variables.",
         )
-
     kite = KiteConnect(api_key=api_key.strip())
     return {"login_url": kite.login_url()}
 
 
-@app.post("/api/login")
-def login(req: LoginRequest):
+@app.get("/kite/callback")
+def kite_callback(
+    request_token: Optional[str] = Query(None),
+    action: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+):
     """
-    Exchanges the request token for an access token.
-    Saves token securely on the backend only.
-    Never exposes raw access_token to the client.
+    Automatic Zerodha OAuth redirect callback endpoint.
+    Exchanges request_token for access_token, persists session token,
+    updates active Kite client, and redirects user back to the frontend.
     """
-    global _cached_kite
-    api_key = req.api_key.strip()
-    api_secret = req.api_secret.strip()
-    request_token = req.request_token.strip()
+    frontend_url = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
 
-    # Extract request_token if user pasted the entire redirect URL
-    if "request_token=" in request_token:
-        from urllib.parse import parse_qs, urlparse
-        parsed = urlparse(request_token)
-        params = parse_qs(parsed.query)
-        if "request_token" in params:
-            request_token = params["request_token"][0]
+    if status != "success" or not request_token:
+        logger.error(f"Kite callback rejected: status={status}, request_token={request_token}")
+        return RedirectResponse(
+            url=f"{frontend_url}?auth_error=Kite+login+was+cancelled+or+failed.",
+            status_code=307,
+        )
+
+    api_key = settings.kite_api_key or os.getenv("KITE_API_KEY")
+    api_secret = settings.kite_api_secret or os.getenv("KITE_API_SECRET")
+
+    if not api_key or not api_secret or api_key == "your_api_key_here":
+        logger.error("Missing KITE_API_KEY or KITE_API_SECRET in environment.")
+        return RedirectResponse(
+            url=f"{frontend_url}?auth_error=Backend+missing+KITE_API_KEY+or+KITE_API_SECRET.",
+            status_code=307,
+        )
 
     try:
-        kite = KiteConnect(api_key=api_key)
-        session_data = kite.generate_session(request_token=request_token, api_secret=api_secret)
+        kite = KiteConnect(api_key=api_key.strip())
+        session_data = kite.generate_session(
+            request_token=request_token.strip(),
+            api_secret=api_secret.strip(),
+        )
 
         access_token = session_data["access_token"]
         public_token = session_data.get("public_token", "")
         user_name = session_data.get("user_name", "Trader")
         user_id = session_data.get("user_id", "")
 
-        # Save to session_token.json on backend — NEVER persist api_secret
         payload = {
-            "api_key": api_key,
+            "api_key": api_key.strip(),
             "user_id": user_id,
             "user_name": user_name,
             "access_token": access_token,
@@ -262,44 +245,105 @@ def login(req: LoginRequest):
                 json.dump(payload, f, indent=2)
             os.chmod(TOKEN_FILE, 0o600)
 
-        # Update cached client
+        global _cached_kite
+        kite.set_access_token(access_token)
         _cached_kite = kite
 
-
-        # Update .env if exists
-        try:
-            if ENV_FILE.exists():
-                set_key(str(ENV_FILE), "KITE_API_KEY", api_key)
-                set_key(str(ENV_FILE), "KITE_API_SECRET", api_secret)
-                set_key(str(ENV_FILE), "KITE_USER_ID", user_id)
-        except Exception as e:
-            logger.warning(f"Could not update .env: {e}")
-
-        logger.info(f"User {user_id} ({user_name}) successfully authenticated.")
-
-        # Sanitized response (NO access token sent to frontend)
-        return {
-            "success": True,
-            "message": "Authentication successful",
-            "user": {
-                "user_id": user_id,
-                "user_name": user_name,
-                "login_time": payload["login_time"],
-                "api_key": api_key[:4] + "****",
-            },
-        }
+        logger.info(f"Successfully authenticated Kite session for user {user_id} ({user_name}).")
+        return RedirectResponse(url=frontend_url, status_code=307)
 
     except Exception as e:
-        logger.error(f"Login failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Authentication failed: {str(e)}",
+        logger.error(f"Failed to generate Kite session token: {e}")
+        err_msg = quote(str(e))
+        return RedirectResponse(
+            url=f"{frontend_url}?auth_error=Authentication+failed:+{err_msg}",
+            status_code=307,
         )
+
+
+@app.get("/kite/status")
+def kite_status():
+    """Returns Kite authentication state and user details for the frontend."""
+    session = get_saved_session()
+    if not session:
+        return {"connected": False, "message": "Kite Not Connected"}
+
+    kite, err = get_active_kite_with_diagnostics(force_validate=True)
+    if not kite:
+        return {
+            "connected": False,
+            "message": err or "Kite session invalid or expired. Please connect Kite.",
+        }
+
+    profile = None
+    try:
+        profile = kite.profile()
+    except Exception:
+        pass
+
+    user_id = profile.get("user_id") if profile else session.get("user_id", "")
+    user_name = profile.get("user_name") if profile else session.get("user_name", "Trader")
+    products = profile.get("products", ["CNC", "NRML", "MIS", "BO", "CO"]) if profile else []
+    exchanges = profile.get("exchanges", ["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]) if profile else []
+
+    return {
+        "connected": True,
+        "user_id": user_id,
+        "user_name": user_name,
+        "products": products,
+        "exchanges": exchanges,
+    }
+
+
+@app.post("/kite/logout")
+def kite_logout():
+    """Clears local access token and session state."""
+    global _cached_kite
+    _cached_kite = None
+    for p in [settings.token_file, TOKEN_FILE]:
+        if p and p.exists():
+            try:
+                p.unlink()
+            except Exception as e:
+                logger.warning(f"Error deleting token file {p}: {e}")
+    return {"success": True, "message": "Logged out successfully"}
+
+
+@app.get("/api/status")
+def check_status():
+    """Legacy/compatibility wrapper for status check."""
+    st = kite_status()
+    if st.get("connected"):
+        return {
+            "authenticated": True,
+            "status": "CONNECTED",
+            "user": {
+                "user_id": st.get("user_id", ""),
+                "user_name": st.get("user_name", "Trader"),
+                "products": st.get("products", []),
+                "exchanges": st.get("exchanges", []),
+            },
+        }
+    return {
+        "authenticated": False,
+        "status": "DISCONNECTED",
+        "message": st.get("message", "Kite Not Connected"),
+    }
+
+
+@app.post("/api/login-url")
+def generate_login_url(req: LoginUrlRequest):
+    return kite_login()
+
+
+@app.post("/api/login")
+def login(req: LoginRequest):
+    return kite_login()
 
 
 @app.get("/api/profile")
 def get_user_profile():
-    """Fetches user profile details: User Name, User ID, Products, Exchanges, Email, Broker, etc."""
+    """Fetches user profile details."""
     kite = get_active_kite()
     if not kite:
         raise HTTPException(
@@ -351,17 +395,7 @@ def get_user_margins():
 
 @app.post("/api/logout")
 def logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
-    """Clears saved session on backend."""
-    verify_shared_secret(x_shared_secret)
-    global _cached_kite
-    _cached_kite = None
-    if TOKEN_FILE.exists():
-        try:
-            TOKEN_FILE.unlink()
-        except Exception as e:
-            logger.warning(f"Error removing token file: {e}")
-
-    return {"success": True, "message": "Logged out successfully"}
+    return kite_logout()
 
 
 # =========================================================================
@@ -485,12 +519,19 @@ def get_universe_scan(
             force_refresh_history=refresh,
             allow_synthetic=permit_synthetic,
         )
+        summary = getattr(scanner, "last_pipeline_summary", {})
         return {
             "status": "success",
             "data_source": data_source,
             "timestamp": datetime.now().isoformat(),
             "count": len(ranked),
             "top_n": top_n,
+            "pipeline_summary": {
+                "universe_count": summary.get("universe_count", 300),
+                "tradable_count": summary.get("tradable_count", len(ranked)),
+                "setup_count": summary.get("setup_count", len(ranked)),
+                "strong_signal_count": summary.get("strong_signal_count", 0),
+            },
             "scoring_weights": {
                 "rvol_weight": 30,
                 "gap_weight": 25,

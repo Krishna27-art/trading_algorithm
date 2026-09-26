@@ -72,7 +72,8 @@ def test_scanner_synthetic_execution_and_ranking():
     for i, candidate in enumerate(top_5, start=1):
         assert candidate.rank == i
         assert isinstance(candidate, StockRankingMetrics)
-        assert candidate.symbol in NIFTY_50_CONSTITUENTS
+        all_syms = [r.symbol for r in scanner.universe.all_stocks]
+        assert candidate.symbol in all_syms
         assert candidate.ltp > 0
         assert candidate.rvol > 0
         assert candidate.atr_14 > 0
@@ -138,6 +139,70 @@ def test_scanner_fails_closed_without_kite():
     scanner = NiftyUniverseScanner()
     with pytest.raises(RuntimeError, match="not authenticated"):
         scanner.scan_universe(kite_client=None, top_n=5, allow_synthetic=False)
+
+
+def test_300_stock_universe_abstraction():
+    from config.universe import StockUniverse
+
+    universe = StockUniverse()
+    assert len(universe.large_cap_100) == 100
+    assert len(universe.mid_cap_100) == 100
+    assert len(universe.small_cap_100) == 100
+    assert len(universe.all_stocks) == 300
+
+    rec = universe.all_stocks[0]
+    assert hasattr(rec, "symbol")
+    assert hasattr(rec, "name")
+    assert hasattr(rec, "market_cap_rank")
+    assert hasattr(rec, "category")
+    assert rec.category in ["large", "mid", "small"]
+
+
+def test_liquidity_filter_layer():
+    from scanner.liquidity_filter import LiquidityFilter, LiquidityStatus
+
+    lfilter = LiquidityFilter()
+
+    # Pass case
+    good_stock = {
+        "symbol": "RELIANCE",
+        "ltp": 2950.0,
+        "volume": 2000000,
+        "avg_volume_20d": 1800000,
+    }
+    res_pass = lfilter.evaluate_stock(good_stock)
+    assert res_pass.status == LiquidityStatus.PASS
+    assert res_pass.is_tradable is True
+
+    # Low price fail case
+    penny_stock = {
+        "symbol": "PENNY",
+        "ltp": 5.0,  # Below min 20.0
+        "volume": 500000,
+        "avg_volume_20d": 500000,
+    }
+    res_fail = lfilter.evaluate_stock(penny_stock)
+    assert res_fail.status == LiquidityStatus.FAIL
+    assert res_fail.is_tradable is False
+    assert any("LTP" in r for r in res_fail.rejection_reasons)
+
+    # Unavailable data case
+    missing_stock = {"symbol": "BAD_DATA", "is_data_unavailable": True}
+    res_unavail = lfilter.evaluate_stock(missing_stock)
+    assert res_unavail.status == LiquidityStatus.DATA_UNAVAILABLE
+    assert res_unavail.is_tradable is False
+
+
+def test_scanning_pipeline_summary_counters():
+    scanner = NiftyUniverseScanner()
+    candidates, data_source = scanner.scan_universe(kite_client=None, top_n=10)
+
+    summary = scanner.last_pipeline_summary
+    assert summary["universe_count"] == 300
+    assert summary["tradable_count"] > 0
+    assert summary["setup_count"] == summary["tradable_count"]
+    assert "strong_signal_count" in summary
+
 
 
 

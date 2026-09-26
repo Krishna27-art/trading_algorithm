@@ -124,8 +124,7 @@ trading algorithm/
 ├── broker/
 │   ├── base_broker.py           # Abstract broker gateway
 │   ├── paper_broker.py          # Simulated broker engine with order book tracking
-│   ├── kite_adapter.py          # Zerodha Kite Connect v3 adapter
-│   └── dhan_adapter.py          # DhanHQ API v2 adapter
+│   └── kite_adapter.py          # Zerodha Kite Connect v3 adapter
 ├── execution/
 │   ├── order_manager.py         # Order state machine & idempotency deduplication
 │   └── execution_engine.py      # Real-time orchestrator & startup reconciliation

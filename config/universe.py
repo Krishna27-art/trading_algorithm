@@ -15,6 +15,7 @@ essential for predictable, production-grade algorithmic execution.
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from datetime import date
 import json
 from pathlib import Path
@@ -319,3 +320,166 @@ def create_instrument_config_for_equity(
         max_risk_cap=max_risk,
         instrument_token=token,
     )
+
+
+@dataclass
+class StockRecord:
+    symbol: str
+    name: str
+    market_cap_rank: int
+    category: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "name": self.name,
+            "market_cap_rank": self.market_cap_rank,
+            "category": self.category,
+        }
+
+
+DEFAULT_300_CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "cache" / "universe_300_tokens.json"
+
+
+class StockUniverse:
+    """
+    Custom 300-stock scanning universe (100 Large Cap, 100 Mid Cap, 100 Small Cap).
+    Classification is sourced from a maintained local dataset at data/universe/300_stocks.json.
+    """
+
+    def __init__(self, json_path: Optional[Path] = None):
+        self.json_path = json_path or (
+            Path(__file__).resolve().parent.parent / "data" / "universe" / "300_stocks.json"
+        )
+        self._records: List[StockRecord] = []
+        self._load()
+
+    def _load(self) -> None:
+        if not self.json_path.exists():
+            raise FileNotFoundError(f"Universe data dataset file not found: {self.json_path}")
+        with open(self.json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self._records = [
+            StockRecord(
+                symbol=item["symbol"],
+                name=item["name"],
+                market_cap_rank=int(item["market_cap_rank"]),
+                category=str(item["category"]).lower(),
+            )
+            for item in data
+        ]
+
+    @property
+    def large_cap_100(self) -> List[StockRecord]:
+        return [r for r in self._records if r.category == "large"]
+
+    @property
+    def mid_cap_100(self) -> List[StockRecord]:
+        return [r for r in self._records if r.category == "mid"]
+
+    @property
+    def small_cap_100(self) -> List[StockRecord]:
+        return [r for r in self._records if r.category == "small"]
+
+    @property
+    def all_stocks(self) -> List[StockRecord]:
+        return list(self._records)
+
+    def print_startup_summary(self, token_map: Dict[str, int]) -> Dict[str, Any]:
+        """
+        Prints startup validation counts for Large/Mid/Small cap categories
+        and instrument token resolution state.
+        """
+        large_cnt = len(self.large_cap_100)
+        mid_cnt = len(self.mid_cap_100)
+        small_cnt = len(self.small_cap_100)
+        total_cnt = len(self.all_stocks)
+
+        resolved_syms = [
+            r.symbol for r in self.all_stocks if r.symbol in token_map and token_map[r.symbol] is not None
+        ]
+        missing_syms = [
+            r.symbol for r in self.all_stocks if r.symbol not in token_map or token_map[r.symbol] is None
+        ]
+        resolved_count = len(resolved_syms)
+        missing_count = len(missing_syms)
+
+        startup_str = (
+            f"\nUniverse:\n"
+            f"Large Cap: {large_cnt}\n"
+            f"Mid Cap: {mid_cnt}\n"
+            f"Small Cap: {small_cnt}\n"
+            f"Total: {total_cnt}\n\n"
+            f"Resolved: {resolved_count}/{total_cnt}\n"
+            f"Missing: {missing_count}"
+        )
+        print(startup_str)
+        logger.info(startup_str)
+
+        if missing_count > 0:
+            logger.warning(f"Unresolved universe symbols ({missing_count}): {missing_syms}")
+
+        return {
+            "large_cap_count": large_cnt,
+            "mid_cap_count": mid_cnt,
+            "small_cap_count": small_cnt,
+            "total_count": total_cnt,
+            "resolved_count": resolved_count,
+            "missing_count": missing_count,
+            "missing_symbols": missing_syms,
+        }
+
+
+def resolve_300_universe_tokens(
+    kite_client: Optional[Any] = None,
+    cache_path: Optional[Path] = None,
+    force_refresh: bool = False,
+) -> Dict[str, int]:
+    """
+    Resolves Kite instrument tokens for all 300 stocks in the scanning universe.
+    1. Reads local JSON cache if available.
+    2. Downloads NSE instrument dump via kite.instruments("NSE") once if missing/forced.
+    3. Caches result to data/cache/universe_300_tokens.json.
+    """
+    target_cache = cache_path or DEFAULT_300_CACHE_FILE
+    universe = StockUniverse()
+    target_symbols = [r.symbol for r in universe.all_stocks]
+
+    # 1. Read from cache if valid
+    if target_cache.exists() and not force_refresh:
+        try:
+            with open(target_cache, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if any(sym in data for sym in target_symbols):
+                logger.info(f"Loaded {len(data)} instrument tokens from cache: {target_cache}")
+                return data
+        except Exception as e:
+            logger.warning(f"Error reading token cache from {target_cache}: {e}")
+
+    # 2. Resolve via live Kite dump
+    resolved: Dict[str, int] = {}
+    if kite_client is not None:
+        try:
+            client = getattr(kite_client, "kite", kite_client)
+            if hasattr(client, "instruments"):
+                logger.info("Resolving 300-stock universe instrument tokens via kite.instruments('NSE')...")
+                all_nse = client.instruments("NSE")
+                target_set = set(target_symbols)
+                for inst in all_nse:
+                    sym = inst.get("tradingsymbol")
+                    if sym in target_set:
+                        resolved[sym] = int(inst["instrument_token"])
+
+                target_cache.parent.mkdir(parents=True, exist_ok=True)
+                with open(target_cache, "w", encoding="utf-8") as f:
+                    json.dump(resolved, f, indent=2)
+                logger.info(f"Resolved and cached {len(resolved)}/300 tokens to {target_cache}")
+                return resolved
+        except Exception as e:
+            logger.warning(f"Failed to fetch live instrument dump from Kite: {e}")
+
+    # 3. Merge with fallback offline tokens
+    merged = dict(_FALLBACK_NSE_TOKENS)
+    merged.update(resolved)
+    return merged
+

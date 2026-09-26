@@ -9,22 +9,32 @@ import LiveSignalsPage from './pages/LiveSignalsPage'
 import PositionsPage from './pages/PositionsPage'
 import BacktestPage from './pages/BacktestPage'
 import SystemStatusPage from './pages/SystemStatusPage'
-import { getStatus, logout as apiLogout } from './api/auth'
+import { getKiteStatus, kiteLogout } from './api/auth'
 
 export default function App() {
   const [authState, setAuthState] = useState('checking') // checking | authenticated | guest | unauthenticated
   const [user, setUser] = useState(null)
+  const [authError, setAuthError] = useState('')
   const [activeTab, setActiveTab] = useState('dashboard')
   const [showSettings, setShowSettings] = useState(false)
   const [tradingMode, setTradingMode] = useState('PAPER')
 
   useEffect(() => {
     let cancelled = false
-    getStatus()
+
+    // Check for auth_error in query parameters if redirected from backend callback
+    const urlParams = new URLSearchParams(window.location.search)
+    const errParam = urlParams.get('auth_error')
+    if (errParam) {
+      setAuthError(errParam)
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+
+    getKiteStatus()
       .then((data) => {
         if (cancelled) return
-        if (data.authenticated) {
-          setUser(data.user)
+        if (data && data.connected) {
+          setUser(data)
           setAuthState('authenticated')
         } else {
           setAuthState('unauthenticated')
@@ -38,11 +48,6 @@ export default function App() {
     }
   }, [])
 
-  const handleLoginSuccess = (u) => {
-    setUser(u)
-    setAuthState('authenticated')
-  }
-
   const handleContinuePaper = () => {
     setUser(null)
     setAuthState('guest')
@@ -50,10 +55,9 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await apiLogout()
+      await kiteLogout()
     } catch {
-      // Backend rejects logout without the shared secret, or may be
-      // unreachable — either way, drop the local session regardless.
+      // Drop session locally
     }
     setUser(null)
     setAuthState('unauthenticated')
@@ -65,10 +69,10 @@ export default function App() {
       {authState === 'checking' ? (
         <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-[var(--bg)] text-[var(--text-dim)]">
           <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
-          <p className="text-sm">Checking backend session…</p>
+          <p className="text-sm">Checking Kite session status…</p>
         </div>
       ) : authState === 'unauthenticated' ? (
-        <LoginPage onLoginSuccess={handleLoginSuccess} onContinuePaper={handleContinuePaper} />
+        <LoginPage onContinuePaper={handleContinuePaper} authError={authError} />
       ) : (
         <AppShell
           active={activeTab}

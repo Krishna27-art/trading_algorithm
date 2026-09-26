@@ -1,21 +1,18 @@
 import { apiGet, apiPost } from './client'
 
-// GET /api/status -> { authenticated, status, user?, message? }
-export const getStatus = () => apiGet('/api/status')
+// GET /kite/status -> { connected, user_id, user_name, products, exchanges, message? }
+export const getKiteStatus = () => apiGet('/kite/status')
 
-// POST /api/login-url { api_key? } -> { login_url }
-export const getLoginUrl = (apiKey) => apiPost('/api/login-url', { api_key: apiKey || null })
+// GET /kite/login -> { login_url }
+export const getKiteLoginUrl = () => apiGet('/kite/login')
 
-// POST /api/login { api_key, api_secret, request_token } -> { success, user }
-export const login = (apiKey, apiSecret, requestToken) =>
-  apiPost('/api/login', {
-    api_key: apiKey,
-    api_secret: apiSecret,
-    request_token: requestToken,
-  })
+// POST /kite/logout -> { success, message }
+export const kiteLogout = () => apiPost('/kite/logout')
 
-// POST /api/logout (requires shared secret) -> { success, message }
-export const logout = () => apiPost('/api/logout', undefined, { requireSecret: true })
+// Compatibility exports
+export const getStatus = getKiteStatus
+export const getLoginUrl = getKiteLoginUrl
+export const logout = kiteLogout
 
 // GET /api/profile -> user profile fields
 export const getProfile = () => apiGet('/api/profile')

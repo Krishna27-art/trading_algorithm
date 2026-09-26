@@ -21,7 +21,7 @@ def test_universe_constituent_count_and_resolution():
     assert "HDFCBANK" in NIFTY_50_CONSTITUENTS
 
     tokens = resolve_universe_tokens()
-    assert len(tokens) == 50
+    assert len(tokens) >= 280
     for sym in NIFTY_50_CONSTITUENTS:
         assert sym in tokens
         assert isinstance(tokens[sym], int)
@@ -202,6 +202,92 @@ def test_scanning_pipeline_summary_counters():
     assert summary["tradable_count"] > 0
     assert summary["setup_count"] == summary["tradable_count"]
     assert "strong_signal_count" in summary
+
+
+def test_300_stock_universe_exact_counts_and_zero_duplicates():
+    from config.universe import StockUniverse
+
+    universe = StockUniverse()
+    all_stocks = universe.all_stocks
+    large = universe.large_cap_100
+    mid = universe.mid_cap_100
+    small = universe.small_cap_100
+
+    assert len(all_stocks) == 300
+    assert len(large) == 100
+    assert len(mid) == 100
+    assert len(small) == 100
+
+    symbols = [r.symbol for r in all_stocks]
+    assert len(set(symbols)) == 300, "Duplicate symbols found in universe!"
+
+    # Verify each stock has required scanner fields
+    for s in all_stocks:
+        assert isinstance(s.symbol, str) and len(s.symbol) > 0
+        assert isinstance(s.name, str) and len(s.name) > 0
+        assert isinstance(s.market_cap_rank, int) and s.market_cap_rank > 0
+        assert s.category in ("large", "mid", "small")
+
+    # Test symbol and token lookup
+    rel = universe.get_stock("RELIANCE")
+    assert rel is not None
+    assert rel.symbol == "RELIANCE"
+    assert rel.category == "large"
+
+    tcs_token = universe.get_token("TCS", token_map={"TCS": 2953217})
+    assert tcs_token == 2953217
+
+
+def test_stock_universe_validation_failure_raises_error(tmp_path):
+    import json
+    from config.universe import StockUniverse
+
+    # Case 1: Less than 300 stocks (299)
+    data_invalid_count = [
+        {"symbol": f"SYM{i}", "name": f"Name{i}", "market_cap_rank": i + 1, "category": "large" if i < 100 else ("mid" if i < 200 else "small")}
+        for i in range(299)
+    ]
+    invalid_file = tmp_path / "invalid_count.json"
+    invalid_file.write_text(json.dumps(data_invalid_count))
+
+    with pytest.raises(ValueError, match="Total stock count is 299, expected exactly 300"):
+        StockUniverse(json_path=invalid_file)
+
+    # Case 2: Duplicate symbol
+    data_duplicate = [
+        {"symbol": "RELIANCE" if i in (0, 1) else f"SYM{i}", "name": f"Name{i}", "market_cap_rank": i + 1, "category": "large" if i < 100 else ("mid" if i < 200 else "small")}
+        for i in range(300)
+    ]
+    duplicate_file = tmp_path / "duplicate.json"
+    duplicate_file.write_text(json.dumps(data_duplicate))
+
+    with pytest.raises(ValueError, match="Duplicate stock symbol 'RELIANCE'"):
+        StockUniverse(json_path=duplicate_file)
+
+
+def test_instrument_resolver_300_universe_and_unresolved_reporting():
+    from data.instrument_resolver import instrument_resolver
+
+    test_syms = ["RELIANCE", "TCS", "UNKNOWN_XYZ_999"]
+    resolved_map, unresolved = instrument_resolver.resolve_universe(
+        symbols=test_syms,
+        force_refresh=True,
+    )
+
+    assert "UNKNOWN_XYZ_999" in unresolved
+    assert "UNKNOWN_XYZ_999" not in resolved_map
+
+
+def test_scanner_uses_300_stocks_without_nifty50_fallback():
+    from scanner.stock_ranker import StockUniverseScanner
+
+    scanner = StockUniverseScanner()
+    assert len(scanner.universe.all_stocks) == 300
+
+    candidates, data_source = scanner.scan_universe(kite_client=None, top_n=5)
+    assert scanner.last_pipeline_summary["universe_count"] == 300
+    assert len(candidates) == 5
+
 
 
 

@@ -1,13 +1,15 @@
 """
-Zerodha Kite Connect Client Wrapper
+Zerodha Kite Connect Client Wrapper (Delegates to unified KiteBrokerAdapter).
 Provides high-level helper functions for market data, order placement, and risk safeguards.
 """
 
-import json
+from __future__ import annotations
+
 import logging
 from typing import Any, Dict, List, Optional
 from kiteconnect import KiteConnect
 
+from broker.kite_adapter import KiteBrokerAdapter
 from config.settings import settings
 
 logging.basicConfig(
@@ -20,75 +22,34 @@ logger = logging.getLogger("kite_client")
 
 class KiteApp:
     def __init__(self):
-        self.api_key = settings.kite_api_key
-        self.api_secret = settings.kite_api_secret
-        self.kite: Optional[KiteConnect] = None
-        self._initialize_session()
+        self.adapter = KiteBrokerAdapter.get_instance()
+        self.api_key = self.adapter.api_key
+        self.api_secret = self.adapter.api_secret
 
-    def _get_access_token(self) -> Optional[str]:
-        # Priority 1: session_token.json
-        if settings.token_file.exists():
-            try:
-                with open(settings.token_file, "r") as f:
-                    data = json.load(f)
-                    token = data.get("access_token")
-                    if token:
-                        return token
-            except Exception as e:
-                logger.warning(f"Could not read session_token.json: {e}")
-
-        # Priority 2: .env file
-        if settings.kite_access_token:
-            return settings.kite_access_token
-
-        return None
-
-    def _initialize_session(self):
-        if not self.api_key or self.api_key == "your_api_key_here":
-            logger.error("API Key not configured in .env file.")
-            return
-
-        token = self._get_access_token()
-        if not token:
-            logger.warning("No access token found. Please run 'python auth.py' to generate one.")
-            return
-
-        self.kite = KiteConnect(api_key=self.api_key)
-        self.kite.set_access_token(token)
+    @property
+    def kite(self) -> Optional[KiteConnect]:
+        return self.adapter.kite
 
     def is_connected(self) -> bool:
-        if not self.kite:
-            return False
-        try:
-            profile = self.kite.profile()
-            return bool(profile and "user_id" in profile)
-        except Exception as e:
-            logger.error(f"Kite session validation failed: {e}")
-            return False
+        client, _ = self.adapter.get_active_client(force_validate=True)
+        return client is not None
 
     def get_profile(self) -> Optional[Dict[str, Any]]:
-        try:
-            return self.kite.profile() if self.kite else None
-        except Exception as e:
-            logger.error(f"Error fetching profile: {e}")
-            return None
+        return self.adapter.get_user_profile()
 
     def get_margins(self) -> Optional[Dict[str, Any]]:
-        try:
-            return self.kite.margins() if self.kite else None
-        except Exception as e:
-            logger.error(f"Error fetching margins: {e}")
-            return None
+        return self.adapter.get_account_margins()
 
     def get_ltp(self, instruments: List[str]) -> Dict[str, Any]:
         """
         Fetch Last Traded Price (LTP) for given instruments.
         Example instruments: ['NSE:INFY', 'NSE:RELIANCE', 'NFO:NIFTY24SEP25000CE']
         """
+        client, _ = self.adapter.get_active_client()
+        if not client:
+            return {}
         try:
-            if not self.kite:
-                return {}
-            return self.kite.ltp(instruments)
+            return client.ltp(instruments)
         except Exception as e:
             logger.error(f"Error fetching LTP for {instruments}: {e}")
             return {}
@@ -106,10 +67,11 @@ class KiteApp:
         Fetch historical candle data.
         Interval options: 'minute', '3minute', '5minute', '10minute', '15minute', '30minute', '60minute', 'day'
         """
+        client, _ = self.adapter.get_active_client()
+        if not client:
+            return []
         try:
-            if not self.kite:
-                return []
-            return self.kite.historical_data(
+            return client.historical_data(
                 instrument_token=instrument_token,
                 from_date=from_date,
                 to_date=to_date,
@@ -137,7 +99,8 @@ class KiteApp:
         """
         Places order with optional manual confirmation safeguard (semi-automated).
         """
-        if not self.kite:
+        client, _ = self.adapter.get_active_client()
+        if not client:
             logger.error("Kite is not connected. Order aborted.")
             return None
 
@@ -162,7 +125,7 @@ class KiteApp:
                 return None
 
         try:
-            order_id = self.kite.place_order(
+            order_id = client.place_order(
                 variety=variety,
                 exchange=exchange,
                 tradingsymbol=tradingsymbol,

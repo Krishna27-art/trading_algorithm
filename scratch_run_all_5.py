@@ -14,7 +14,7 @@ sys.path.insert(0, str(os.path.abspath(".")))
 
 from kite_client import KiteApp
 from config.settings import settings
-from config.universe import create_instrument_config_for_equity, resolve_universe_tokens, NIFTY_50_CONSTITUENTS
+from config.universe import create_instrument_config_for_equity, resolve_universe_tokens
 from data.historical_loader import HistoricalDataLoader
 from data.eod_panel_loader import EODPanelLoader
 from data.options_chain_loader import OptionsChainLoader

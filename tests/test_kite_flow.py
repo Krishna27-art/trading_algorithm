@@ -25,17 +25,25 @@ def test_instrument_resolver_canonical_indices():
 
 def test_instrument_resolver_mock_instruments():
     resolver = InstrumentResolver()
+    cache_file = resolver._get_cache_path("MOCK_NSE")
+    if cache_file.exists():
+        cache_file.unlink()
+    resolver._memory_cache.pop("MOCK_NSE", None)
+
     mock_kite = MagicMock()
     mock_kite.instruments.return_value = [
-        {"instrument_token": 738561, "tradingsymbol": "RELIANCE", "exchange": "NSE", "lot_size": 1},
-        {"instrument_token": 295321, "tradingsymbol": "TCS", "exchange": "NSE", "lot_size": 1},
+        {"instrument_token": 738561, "tradingsymbol": "RELIANCE", "exchange": "MOCK_NSE", "lot_size": 1},
+        {"instrument_token": 295321, "tradingsymbol": "MOCK_TCS", "exchange": "MOCK_NSE", "lot_size": 1},
     ]
 
-    rel_tok = resolver.resolve_token("RELIANCE", exchange="NSE", kite_client=mock_kite)
+    rel_tok = resolver.resolve_token("RELIANCE", exchange="MOCK_NSE", kite_client=mock_kite)
     assert rel_tok == 738561
 
-    tcs_tok = resolver.resolve_token("TCS", exchange="NSE", kite_client=mock_kite)
+    tcs_tok = resolver.resolve_token("MOCK_TCS", exchange="MOCK_NSE", kite_client=mock_kite)
     assert tcs_tok == 295321
+
+    if cache_file.exists():
+        cache_file.unlink()
 
 
 def test_historical_loader_supports_raw_kiteconnect():

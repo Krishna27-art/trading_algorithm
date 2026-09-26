@@ -1,16 +1,8 @@
 """
-NIFTY 50 Universe Definition and Token Resolution.
+300-Stock Master Scanner Universe Definition and Token Resolution.
 
-IMPORTANT REBALANCING NOTICE:
------------------------------
-NSE Indices rebalances the NIFTY 50 index roughly twice a year (semi-annually,
-typically announced in February/August and effective in March/September).
-This list reflects the official NIFTY 50 constituents as maintained by NSE.
-Periodically review and manually refresh this constituent list against NSE's
-published constituent factsheet (available via nseindia.com). Do NOT dynamically
-scrape nseindia.com during runtime: NSE enforces stringent anti-scraping and
-Cloudflare bot detection, and static deterministic universe definitions are
-essential for predictable, production-grade algorithmic execution.
+Maintains the single source of truth for the 300-stock scanning universe
+(100 Large Cap, 100 Mid Cap, 100 Small Cap) loaded from data/universe/300_stocks.json.
 """
 
 from __future__ import annotations
@@ -24,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from config.settings import InstrumentConfig, InstrumentType, settings
 from monitoring.logger import logger
 
-# Official NSE Tradingsymbols for current NIFTY 50 constituents (Alphabetical)
+# Official NSE Tradingsymbols for current NIFTY 50 constituents (Kept for historical reference/testing)
 NIFTY_50_CONSTITUENTS: List[str] = [
     "ADANIENT",
     "ADANIPORTS",
@@ -78,7 +70,7 @@ NIFTY_50_CONSTITUENTS: List[str] = [
     "WIPRO",
 ]
 
-# Official NSE Tradingsymbols for current NIFTY 100 constituents (Alphabetical, 100 names)
+# Official NSE Tradingsymbols for current NIFTY 100 constituents (Kept for historical reference/testing)
 NIFTY_100_CONSTITUENTS: List[str] = sorted(list(set(NIFTY_50_CONSTITUENTS + [
     "ABB",
     "ADANIENSOL",
@@ -138,10 +130,7 @@ def get_universe(
     membership_csv: Optional[Path] = None,
 ) -> List[str]:
     """
-    Point-in-time accessor for NIFTY 100 constituents.
-    If membership_csv is provided or exists at data/cache/nifty100_membership.csv (format: date,symbol),
-    it reads the point-in-time constituent list for as_of.
-    Otherwise, falls back to the static list with an explicit survivorship warning.
+    Point-in-time accessor for NIFTY 100 constituents (kept for historical index analysis).
     """
     csv_path = membership_csv or (settings.base_dir / "data" / "cache" / "nifty100_membership.csv")
 
@@ -150,7 +139,6 @@ def get_universe(
             import pandas as pd
             df = pd.read_csv(csv_path, parse_dates=["date"])
             df["date"] = pd.to_datetime(df["date"]).dt.date
-            # Filter for latest date <= as_of
             valid_dates = df[df["date"] <= as_of]["date"]
             if not valid_dates.empty:
                 target_date = valid_dates.max()
@@ -160,11 +148,10 @@ def get_universe(
         except Exception as e:
             logger.warning(f"Failed to read membership history from {csv_path}: {e}")
 
-    logger.warning("Using static NIFTY 100 universe; results carry survivorship bias.")
     return list(NIFTY_100_CONSTITUENTS)
 
 
-# Static reference tokens for offline / fallback execution without live Kite instruments dump
+# Static reference tokens for offline fallback
 _FALLBACK_NSE_TOKENS: Dict[str, int] = {
     "ADANIENT": 6401,
     "ADANIPORTS": 3861249,
@@ -218,75 +205,6 @@ _FALLBACK_NSE_TOKENS: Dict[str, int] = {
     "WIPRO": 969473,
 }
 
-DEFAULT_CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "cache" / "nifty50_tokens.json"
-
-
-def resolve_universe_tokens(
-    kite_client: Optional[Any] = None,
-    cache_path: Optional[Path] = None,
-    force_refresh: bool = False,
-) -> Dict[str, int]:
-    """
-    Resolves Kite instrument tokens for all NIFTY 50 constituents.
-    1. Checks if local JSON cache exists.
-    2. If missing or force_refresh=True, downloads the NSE instrument dump once
-       via kite.instruments("NSE") and parses tokens in a single O(N) pass.
-    3. Falls back gracefully to static tokens if offline.
-    """
-    target_cache = cache_path or DEFAULT_CACHE_FILE
-
-    # 1. Read from cache if valid
-    if target_cache.exists() and not force_refresh:
-        try:
-            with open(target_cache, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if all(sym in data for sym in NIFTY_50_CONSTITUENTS):
-                logger.info(f"Loaded {len(data)} NIFTY 50 tokens from cache: {target_cache}")
-                return data
-        except Exception as e:
-            logger.warning(f"Error reading token cache from {target_cache}: {e}")
-
-    # 2. Query live Kite if client provided
-    resolved: Dict[str, int] = {}
-    if kite_client is not None:
-        try:
-            # kite_client can be KiteApp or KiteConnect
-            client = getattr(kite_client, "kite", kite_client)
-            if hasattr(client, "instruments"):
-                logger.info("Resolving NIFTY 50 instrument tokens via kite.instruments('NSE')...")
-                all_nse = client.instruments("NSE")
-                target_set = set(NIFTY_50_CONSTITUENTS)
-                for inst in all_nse:
-                    sym = inst.get("tradingsymbol")
-                    if sym in target_set:
-                        resolved[sym] = int(inst["instrument_token"])
-
-                if len(resolved) == len(NIFTY_50_CONSTITUENTS):
-                    target_cache.parent.mkdir(parents=True, exist_ok=True)
-                    with open(target_cache, "w", encoding="utf-8") as f:
-                        json.dump(resolved, f, indent=2)
-                    logger.info(f"Resolved and cached {len(resolved)} NIFTY 50 tokens to {target_cache}")
-                    return resolved
-                else:
-                    missing = target_set - set(resolved.keys())
-                    logger.warning(f"Kite dump missing tokens for: {missing}. Merging with fallback.")
-        except Exception as e:
-            logger.warning(f"Failed to fetch live instrument dump from Kite: {e}")
-
-    # 3. Fallback to bundled static mapping
-    merged = dict(_FALLBACK_NSE_TOKENS)
-    merged.update(resolved)
-
-    # Save merged fallback to cache if not already present
-    try:
-        target_cache.parent.mkdir(parents=True, exist_ok=True)
-        with open(target_cache, "w", encoding="utf-8") as f:
-            json.dump(merged, f, indent=2)
-    except Exception:
-        pass
-
-    return merged
-
 
 def create_instrument_config_for_equity(
     symbol: str,
@@ -296,24 +214,18 @@ def create_instrument_config_for_equity(
 ) -> InstrumentConfig:
     """
     Factory creating an InstrumentConfig for an equity constituent.
-    Calibrates min_orb_range, max_orb_range, and max_risk_cap proportionate
-    to the equity's price, exactly preserving the index calibration ratio
-    (40 / 120 / 80 points on a 24,000 index = ~0.17% / 0.50% / 0.33%).
     """
     price = max(current_price, 10.0)
 
-    # 40 / 24,000 = 0.00167
     min_orb = round(max(price * 0.0017, 0.5), 2)
-    # 120 / 24,000 = 0.00500
     max_orb = round(max(price * 0.0060, min_orb * 2.5), 2)
-    # 80 / 24,000 = 0.00333
     max_risk = round(max(price * 0.0040, min_orb * 1.5), 2)
 
     return InstrumentConfig(
         symbol=symbol,
         exchange="NSE",
         instrument_type=InstrumentType.EQUITY,
-        lot_size=1,  # Equity MIS trades in single share increments
+        lot_size=1,
         tick_size=0.05,
         min_orb_range=min_orb,
         max_orb_range=max_orb,
@@ -343,8 +255,8 @@ DEFAULT_300_CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "cach
 
 class StockUniverse:
     """
-    Custom 300-stock scanning universe (100 Large Cap, 100 Mid Cap, 100 Small Cap).
-    Classification is sourced from a maintained local dataset at data/universe/300_stocks.json.
+    Single source of truth for the 300-stock scanning universe (100 Large Cap, 100 Mid Cap, 100 Small Cap).
+    Enforces strict validation on load and raises ValueError/RuntimeError on dataset defects.
     """
 
     def __init__(self, json_path: Optional[Path] = None):
@@ -352,48 +264,142 @@ class StockUniverse:
             Path(__file__).resolve().parent.parent / "data" / "universe" / "300_stocks.json"
         )
         self._records: List[StockRecord] = []
-        self._load()
+        self._symbol_map: Dict[str, StockRecord] = {}
+        self._tokens_cache: Dict[str, int] = {}
+        self._load_and_validate()
 
-    def _load(self) -> None:
+    def _load_and_validate(self) -> None:
         if not self.json_path.exists():
-            raise FileNotFoundError(f"Universe data dataset file not found: {self.json_path}")
-        with open(self.json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self._records = [
-            StockRecord(
-                symbol=item["symbol"],
-                name=item["name"],
-                market_cap_rank=int(item["market_cap_rank"]),
-                category=str(item["category"]).lower(),
-            )
-            for item in data
-        ]
+            raise FileNotFoundError(f"Master universe data dataset file not found: {self.json_path}")
+
+        try:
+            with open(self.json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse master 300-stock universe JSON at {self.json_path}: {e}")
+
+        if not isinstance(data, list):
+            raise ValueError(f"Master universe file {self.json_path} must contain a JSON array of stock objects.")
+
+        records: List[StockRecord] = []
+        validation_errors: List[str] = []
+        seen_symbols = set()
+
+        for idx, item in enumerate(data):
+            if not isinstance(item, dict):
+                validation_errors.append(f"Item at index {idx} is not a JSON object.")
+                continue
+
+            sym = str(item.get("symbol", "")).strip().upper()
+            name = str(item.get("name", "")).strip()
+            rank = item.get("market_cap_rank")
+            cat = str(item.get("category", "")).strip().lower()
+
+            if not sym:
+                validation_errors.append(f"Item at index {idx} missing required field 'symbol'.")
+            elif sym in seen_symbols:
+                validation_errors.append(f"Duplicate stock symbol '{sym}' found at index {idx}.")
+            else:
+                seen_symbols.add(sym)
+
+            if not name:
+                validation_errors.append(f"Stock '{sym or idx}' missing required field 'name'.")
+
+            try:
+                rank_int = int(rank)
+                if rank_int <= 0:
+                    validation_errors.append(f"Stock '{sym}' invalid 'market_cap_rank': {rank}.")
+            except (ValueError, TypeError):
+                validation_errors.append(f"Stock '{sym}' non-integer 'market_cap_rank': {rank}.")
+                rank_int = 0
+
+            if cat not in ("large", "mid", "small"):
+                validation_errors.append(f"Stock '{sym}' invalid 'category': '{cat}'. Must be 'large', 'mid', or 'small'.")
+
+            records.append(StockRecord(symbol=sym, name=name, market_cap_rank=rank_int, category=cat))
+
+        large_cnt = sum(1 for r in records if r.category == "large")
+        mid_cnt = sum(1 for r in records if r.category == "mid")
+        small_cnt = sum(1 for r in records if r.category == "small")
+        total_cnt = len(records)
+
+        if total_cnt != 300:
+            validation_errors.append(f"Total stock count is {total_cnt}, expected exactly 300.")
+        if large_cnt != 100:
+            validation_errors.append(f"Large cap count is {large_cnt}, expected exactly 100.")
+        if mid_cnt != 100:
+            validation_errors.append(f"Mid cap count is {mid_cnt}, expected exactly 100.")
+        if small_cnt != 100:
+            validation_errors.append(f"Small cap count is {small_cnt}, expected exactly 100.")
+
+        if validation_errors:
+            error_msg = f"300-Stock Universe Validation Failed ({self.json_path}):\n" + "\n".join(f" - {err}" for err in validation_errors)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        self._records = records
+        self._symbol_map = {r.symbol: r for r in records}
 
     @property
-    def large_cap_100(self) -> List[StockRecord]:
+    def large_cap_stocks(self) -> List[StockRecord]:
         return [r for r in self._records if r.category == "large"]
 
     @property
-    def mid_cap_100(self) -> List[StockRecord]:
+    def mid_cap_stocks(self) -> List[StockRecord]:
         return [r for r in self._records if r.category == "mid"]
 
     @property
-    def small_cap_100(self) -> List[StockRecord]:
+    def small_cap_stocks(self) -> List[StockRecord]:
         return [r for r in self._records if r.category == "small"]
+
+    @property
+    def large_cap_100(self) -> List[StockRecord]:
+        return self.large_cap_stocks
+
+    @property
+    def mid_cap_100(self) -> List[StockRecord]:
+        return self.mid_cap_stocks
+
+    @property
+    def small_cap_100(self) -> List[StockRecord]:
+        return self.small_cap_stocks
 
     @property
     def all_stocks(self) -> List[StockRecord]:
         return list(self._records)
 
+    def get_stock(self, symbol: str) -> Optional[StockRecord]:
+        """Lookup StockRecord by tradingsymbol."""
+        return self._symbol_map.get(symbol.strip().upper())
+
+    def get_token(self, symbol: str, token_map: Optional[Dict[str, int]] = None) -> Optional[int]:
+        """Lookup numeric Kite instrument token by tradingsymbol."""
+        sym = symbol.strip().upper()
+        if token_map and sym in token_map:
+            return token_map[sym]
+        if sym in self._tokens_cache:
+            return self._tokens_cache[sym]
+        if not self._tokens_cache and DEFAULT_300_CACHE_FILE.exists():
+            try:
+                with open(DEFAULT_300_CACHE_FILE, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                    self._tokens_cache = {k.strip().upper(): int(v) for k, v in cached.items() if v is not None}
+                return self._tokens_cache.get(sym)
+            except Exception:
+                pass
+        return None
+
     def print_startup_summary(self, token_map: Dict[str, int]) -> Dict[str, Any]:
         """
-        Prints startup validation counts for Large/Mid/Small cap categories
+        Prints startup validation summary for Large/Mid/Small cap categories
         and instrument token resolution state.
         """
         large_cnt = len(self.large_cap_100)
         mid_cnt = len(self.mid_cap_100)
         small_cnt = len(self.small_cap_100)
         total_cnt = len(self.all_stocks)
+
+        self._tokens_cache.update({k: v for k, v in token_map.items() if v is not None})
 
         resolved_syms = [
             r.symbol for r in self.all_stocks if r.symbol in token_map and token_map[r.symbol] is not None
@@ -436,50 +442,30 @@ def resolve_300_universe_tokens(
     force_refresh: bool = False,
 ) -> Dict[str, int]:
     """
-    Resolves Kite instrument tokens for all 300 stocks in the scanning universe.
-    1. Reads local JSON cache if available.
-    2. Downloads NSE instrument dump via kite.instruments("NSE") once if missing/forced.
-    3. Caches result to data/cache/universe_300_tokens.json.
+    Resolves Kite instrument tokens for all 300 stocks in the scanning universe
+    using instrument_resolver.
     """
-    target_cache = cache_path or DEFAULT_300_CACHE_FILE
+    from data.instrument_resolver import instrument_resolver
+
     universe = StockUniverse()
-    target_symbols = [r.symbol for r in universe.all_stocks]
+    symbols = [r.symbol for r in universe.all_stocks]
+    resolved_map, _ = instrument_resolver.resolve_universe(
+        symbols=symbols,
+        kite_client=kite_client,
+        cache_path=cache_path,
+        force_refresh=force_refresh,
+    )
 
-    # 1. Read from cache if valid
-    if target_cache.exists() and not force_refresh:
-        try:
-            with open(target_cache, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if any(sym in data for sym in target_symbols):
-                logger.info(f"Loaded {len(data)} instrument tokens from cache: {target_cache}")
-                return data
-        except Exception as e:
-            logger.warning(f"Error reading token cache from {target_cache}: {e}")
-
-    # 2. Resolve via live Kite dump
-    resolved: Dict[str, int] = {}
-    if kite_client is not None:
-        try:
-            client = getattr(kite_client, "kite", kite_client)
-            if hasattr(client, "instruments"):
-                logger.info("Resolving 300-stock universe instrument tokens via kite.instruments('NSE')...")
-                all_nse = client.instruments("NSE")
-                target_set = set(target_symbols)
-                for inst in all_nse:
-                    sym = inst.get("tradingsymbol")
-                    if sym in target_set:
-                        resolved[sym] = int(inst["instrument_token"])
-
-                target_cache.parent.mkdir(parents=True, exist_ok=True)
-                with open(target_cache, "w", encoding="utf-8") as f:
-                    json.dump(resolved, f, indent=2)
-                logger.info(f"Resolved and cached {len(resolved)}/300 tokens to {target_cache}")
-                return resolved
-        except Exception as e:
-            logger.warning(f"Failed to fetch live instrument dump from Kite: {e}")
-
-    # 3. Merge with fallback offline tokens
+    # Fallback to _FALLBACK_NSE_TOKENS if offline
     merged = dict(_FALLBACK_NSE_TOKENS)
-    merged.update(resolved)
+    merged.update(resolved_map)
     return merged
 
+
+def resolve_universe_tokens(
+    kite_client: Optional[Any] = None,
+    cache_path: Optional[Path] = None,
+    force_refresh: bool = False,
+) -> Dict[str, int]:
+    """Compatibility alias delegating to resolve_300_universe_tokens."""
+    return resolve_300_universe_tokens(kite_client=kite_client, cache_path=cache_path, force_refresh=force_refresh)

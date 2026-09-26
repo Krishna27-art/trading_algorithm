@@ -13,7 +13,12 @@ const STRATEGIES = [
   { id: 'orb', label: 'ORB' },
   { id: 'cpr', label: 'CPR' },
   { id: 'dual_ema', label: 'Dual EMA' },
+  { id: 'nse_rm_100', label: 'NSE-RM-100' },
+  { id: 'nse_vrp_index', label: 'NSE-VRP-INDEX' },
+  { id: 'apex', label: 'APEX-AIVEM' },
 ]
+
+const ALL_STRATEGY_KEYS = ['orb', 'cpr', 'dual_ema', 'nse_rm_100', 'nse_vrp_index', 'apex']
 
 export default function LiveSignalsPage() {
   const [filter, setFilter] = useState('all')
@@ -25,7 +30,10 @@ export default function LiveSignalsPage() {
   const candidates = research.data?.candidates || []
   const visible = useMemo(() => {
     if (filter === 'all') return candidates
-    return candidates.filter((c) => c.predictions?.[filter]?.direction)
+    return candidates.filter((c) => {
+      const preds = c.strategies || c.predictions || {}
+      return preds[filter] && preds[filter].status !== 'UNAVAILABLE'
+    })
   }, [candidates, filter])
 
   const toggle = (symbol) => {
@@ -40,7 +48,7 @@ export default function LiveSignalsPage() {
     <div className="space-y-4 animate-fade-in">
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1 rounded-md border border-[var(--border-strong)] p-1">
+          <div className="flex items-center gap-1 rounded-md border border-[var(--border-strong)] p-1 flex-wrap">
             {STRATEGIES.map((s) => (
               <button
                 key={s.id}
@@ -65,7 +73,7 @@ export default function LiveSignalsPage() {
       </Card>
 
       {research.status === 'loading' && !research.data ? (
-        <Card><Loading label="Scanning universe…" /></Card>
+        <Card><Loading label="Scanning 300-stock universe…" /></Card>
       ) : research.status === 'error' && !research.data ? (
         <Card><ErrorState error={research.error} onRetry={research.refresh} /></Card>
       ) : research.data?.status === 'AUTH_REQUIRED' ? (
@@ -129,7 +137,7 @@ function KeyInsights({ insights }) {
 }
 
 function SignalRow({ candidate, filter, expanded, onToggle }) {
-  const preds = candidate.predictions || {}
+  const preds = candidate.strategies || candidate.predictions || {}
   const focused = filter !== 'all' ? preds[filter] : null
 
   return (
@@ -151,24 +159,24 @@ function SignalRow({ candidate, filter, expanded, onToggle }) {
 
       {filter === 'all' ? (
         <div className="mt-3 flex flex-wrap gap-2">
-          {['orb', 'cpr', 'dual_ema'].map((k) => (
+          {ALL_STRATEGY_KEYS.map((k) => (
             <StrategyChip key={k} name={k} pred={preds[k]} />
           ))}
         </div>
       ) : (
         focused && (
           <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <MiniStat label="Direction" value={focused.direction || '—'} tone={dirTone(focused.direction)} />
+            <MiniStat label="Status" value={focused.status?.replaceAll('_', ' ')} tone={dirTone(focused.direction, focused.status)} />
+            <MiniStat label="Direction" value={focused.direction || '—'} tone={dirTone(focused.direction, focused.status)} />
             <MiniStat label="Entry" value={formatCurrency(focused.entry)} />
             <MiniStat label="Stop loss" value={formatCurrency(focused.stop_loss)} tone="negative" />
-            <MiniStat label="Target" value={formatCurrency(focused.target)} tone="positive" />
           </div>
         )
       )}
 
       {expanded && (
         <div className="mt-4 pt-4 border-t border-[var(--border)] space-y-3">
-          {['orb', 'cpr', 'dual_ema'].map((k) => (
+          {ALL_STRATEGY_KEYS.map((k) => (
             <StrategyDetail key={k} name={k} pred={preds[k]} />
           ))}
         </div>
@@ -179,7 +187,7 @@ function SignalRow({ candidate, filter, expanded, onToggle }) {
 
 function StrategyChip({ name, pred }) {
   if (!pred) return null
-  const tone = dirTone(pred.direction)
+  const tone = dirTone(pred.direction, pred.status)
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium ${chipTone(tone)}`}>
       {pred.direction === 'LONG' && <ArrowUpRight className="w-3 h-3" />}
@@ -195,7 +203,7 @@ function StrategyDetail({ name, pred }) {
     <div className="rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm font-semibold">{labelFor(name)}</span>
-        <StatusPill tone={dirTone(pred.direction)} dot={false}>
+        <StatusPill tone={dirTone(pred.direction, pred.status)} dot={false}>
           {pred.status.replaceAll('_', ' ')}
         </StatusPill>
       </div>
@@ -208,10 +216,19 @@ function StrategyDetail({ name, pred }) {
       )}
       {pred.reason && <p className="text-xs text-[var(--text-dim)] mb-2">{pred.reason}</p>}
       {pred.levels && Object.keys(pred.levels).length > 0 && (
-        <div className="flex flex-wrap gap-x-4 gap-y-1">
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mb-1">
           {Object.entries(pred.levels).map(([k, v]) => (
             <span key={k} className="text-xs font-num text-[var(--text-faint)]">
               {k}: <span className="text-[var(--text-dim)]">{String(v)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {pred.metrics && Object.keys(pred.metrics).length > 0 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 pt-1 border-t border-[var(--border)]/40">
+          {Object.entries(pred.metrics).map(([k, v]) => (
+            <span key={k} className="text-xs font-num text-[var(--text-faint)]">
+              {k}: <span className="text-[var(--accent)] font-medium">{String(v)}</span>
             </span>
           ))}
         </div>
@@ -221,23 +238,25 @@ function StrategyDetail({ name, pred }) {
 }
 
 function MiniStat({ label, value, tone }) {
-  const color = tone === 'positive' ? 'text-[var(--positive)]' : tone === 'negative' ? 'text-[var(--negative)]' : 'text-[var(--text)]'
+  const color = tone === 'positive' ? 'text-[var(--positive)]' : tone === 'negative' ? 'text-[var(--negative)]' : tone === 'warning' ? 'text-[var(--warning)]' : 'text-[var(--text)]'
   return (
     <div>
       <p className="text-xs text-[var(--text-faint)]">{label}</p>
-      <p className={`text-sm font-num font-medium ${color}`}>{value}</p>
+      <p className={`text-sm font-num font-medium ${color}`}>{value || '—'}</p>
     </div>
   )
 }
 
-function dirTone(direction) {
+function dirTone(direction, status) {
   if (direction === 'LONG') return 'positive'
   if (direction === 'SHORT') return 'negative'
+  if (status === 'UNAVAILABLE' || status === 'ERROR') return 'warning'
   return 'neutral'
 }
 function chipTone(tone) {
   if (tone === 'positive') return 'text-[var(--positive)] bg-[var(--positive-dim)] border-[var(--positive)]/30'
   if (tone === 'negative') return 'text-[var(--negative)] bg-[var(--negative-dim)] border-[var(--negative)]/30'
+  if (tone === 'warning') return 'text-[var(--warning)] bg-[var(--warning-dim)] border-[var(--warning)]/30'
   return 'text-[var(--text-dim)] bg-white/[0.04] border-[var(--border-strong)]'
 }
 function consensusTone(direction) {
@@ -247,5 +266,14 @@ function consensusTone(direction) {
   return 'neutral'
 }
 function labelFor(key) {
-  return { orb: 'ORB', cpr: 'CPR', dual_ema: 'Dual EMA' }[key] || key
+  return (
+    {
+      orb: 'ORB',
+      cpr: 'CPR',
+      dual_ema: 'Dual EMA',
+      nse_rm_100: 'NSE-RM-100',
+      nse_vrp_index: 'NSE-VRP-INDEX',
+      apex: 'APEX-AIVEM',
+    }[key] || key
+  )
 }

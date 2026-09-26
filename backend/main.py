@@ -1,5 +1,4 @@
 import hmac
-import json
 import logging
 import os
 from datetime import datetime
@@ -14,15 +13,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel, Field
-from dotenv import set_key
 from config.settings import settings
+
+# Single source of truth for the Kite session (session_token.json): saving,
+# reading, live-validating, and clearing it. See broker/kite_adapter.py —
+# this used to be duplicated here, in kite_client.py, AND in that module.
+from broker.kite_adapter import (
+    clear_session,
+    get_active_kite,
+    get_active_kite_with_diagnostics,
+    get_saved_session,
+    save_session,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("backend_api")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-TOKEN_FILE = BASE_DIR / "session_token.json"
 ENV_FILE = BASE_DIR / ".env"
 
 app = FastAPI(
@@ -62,9 +70,6 @@ def verify_shared_secret(x_shared_secret: Optional[str] = Header(None, alias="X-
     return True
 
 
-# Global in-memory kite client cache for fast local responses
-_cached_kite: Optional[KiteConnect] = None
-
 # Global in-memory cache for live research predictions to prevent expensive repetitive calculations
 _live_research_cache: Dict[str, Any] = {
     "timestamp": 0.0,
@@ -81,91 +86,6 @@ class LoginRequest(BaseModel):
 
 class LoginUrlRequest(BaseModel):
     api_key: Optional[str] = None
-
-
-def get_saved_session() -> Optional[Dict[str, Any]]:
-    """Retrieves saved Kite session token with multi-source fallback."""
-    from config.settings import settings
-    # 1. Primary path: settings.token_file (session_token.json)
-    token_candidates = [settings.token_file, TOKEN_FILE]
-    for p in token_candidates:
-        if p and p.exists():
-            try:
-                with open(p, "r") as f:
-                    data = json.load(f)
-                    if data.get("access_token") and data.get("api_key"):
-                        return data
-            except Exception as e:
-                logger.warning(f"Failed to read session file {p}: {e}")
-
-    # 2. Environment fallback
-    if settings.kite_api_key and settings.kite_access_token:
-        if settings.kite_api_key != "your_api_key_here":
-            return {
-                "api_key": settings.kite_api_key,
-                "access_token": settings.kite_access_token,
-                "user_id": settings.kite_user_id or "",
-                "user_name": "Trader",
-                "login_time": datetime.now().isoformat(),
-            }
-
-    return None
-
-
-def get_active_kite_with_diagnostics(force_validate: bool = False) -> Tuple[Optional[KiteConnect], Optional[str]]:
-    """
-    Returns an authenticated KiteConnect instance and diagnostic error message.
-    If force_validate is True, calls kite.profile() to verify live validity.
-    """
-    global _cached_kite
-    from config.settings import settings
-
-    session = get_saved_session()
-    if not session:
-        _cached_kite = None
-        return None, "No saved Kite session found. Please log in with Kite Connect."
-
-    api_key = session.get("api_key")
-    access_token = session.get("access_token")
-    if not api_key or not access_token:
-        _cached_kite = None
-        return None, "Session file exists but is missing api_key or access_token."
-
-    # Return cached if valid and not explicitly asked to re-verify live
-    if _cached_kite is not None and not force_validate:
-        return _cached_kite, None
-
-    try:
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
-        # Verify profile against live Zerodha API
-        profile = kite.profile()
-        if profile and "user_id" in profile:
-            _cached_kite = kite
-            return kite, None
-        _cached_kite = None
-        return None, "Kite profile check returned empty profile."
-    except Exception as e:
-        err_type = type(e).__name__
-        err_msg = str(e)
-        logger.warning(f"Kite session validation failed ({err_type}): {err_msg}")
-        _cached_kite = None
-
-        # Clean up stale token if definitely invalid/expired
-        if "TokenException" in err_type or "403" in err_msg or "expired" in err_msg.lower():
-            for p in [settings.token_file, TOKEN_FILE]:
-                if p and p.exists():
-                    try:
-                        p.unlink()
-                    except Exception:
-                        pass
-        return None, f"Kite session error ({err_type}): {err_msg}"
-
-
-def get_active_kite() -> Optional[KiteConnect]:
-    """Convenience getter returning active Kite client or None."""
-    kite, _ = get_active_kite_with_diagnostics(force_validate=False)
-    return kite
 
 
 # =========================================================================
@@ -189,7 +109,11 @@ def kite_login():
 def kite_callback(
     request_token: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
+    # Renamed from `status` (the Kite redirect's literal query param name) to
+    # `auth_status` so it doesn't shadow fastapi's `status` module, which the
+    # error branches below rely on. The query string the browser sends is
+    # unaffected — `alias="status"` keeps binding to `?status=...`.
+    auth_status: Optional[str] = Query(None, alias="status"),
 ):
     """
     Automatic Zerodha OAuth redirect callback endpoint.
@@ -198,8 +122,8 @@ def kite_callback(
     """
     frontend_url = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
 
-    if status != "success" or not request_token:
-        logger.error(f"Kite callback rejected: status={status}, request_token={request_token}")
+    if auth_status != "success" or not request_token:
+        logger.error(f"Kite callback rejected: status={auth_status}, request_token={request_token}")
         return RedirectResponse(
             url=f"{frontend_url}?auth_error=Kite+login+was+cancelled+or+failed.",
             status_code=307,
@@ -222,34 +146,18 @@ def kite_callback(
             api_secret=api_secret.strip(),
         )
 
-        access_token = session_data["access_token"]
-        public_token = session_data.get("public_token", "")
-        user_name = session_data.get("user_name", "Trader")
-        user_id = session_data.get("user_id", "")
+        save_session(
+            api_key=api_key.strip(),
+            access_token=session_data["access_token"],
+            user_id=session_data.get("user_id", ""),
+            user_name=session_data.get("user_name", "Trader"),
+            public_token=session_data.get("public_token", ""),
+        )
 
-        payload = {
-            "api_key": api_key.strip(),
-            "user_id": user_id,
-            "user_name": user_name,
-            "access_token": access_token,
-            "public_token": public_token,
-            "login_time": datetime.now().isoformat(),
-        }
-
-        with open(settings.token_file, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.chmod(settings.token_file, 0o600)
-
-        if TOKEN_FILE != settings.token_file:
-            with open(TOKEN_FILE, "w") as f:
-                json.dump(payload, f, indent=2)
-            os.chmod(TOKEN_FILE, 0o600)
-
-        global _cached_kite
-        kite.set_access_token(access_token)
-        _cached_kite = kite
-
-        logger.info(f"Successfully authenticated Kite session for user {user_id} ({user_name}).")
+        logger.info(
+            f"Successfully authenticated Kite session for user "
+            f"{session_data.get('user_id', '')} ({session_data.get('user_name', 'Trader')})."
+        )
         return RedirectResponse(url=frontend_url, status_code=307)
 
     except Exception as e:
@@ -298,14 +206,7 @@ def kite_status():
 @app.post("/kite/logout")
 def kite_logout():
     """Clears local access token and session state."""
-    global _cached_kite
-    _cached_kite = None
-    for p in [settings.token_file, TOKEN_FILE]:
-        if p and p.exists():
-            try:
-                p.unlink()
-            except Exception as e:
-                logger.warning(f"Error deleting token file {p}: {e}")
+    clear_session()
     return {"success": True, "message": "Logged out successfully"}
 
 
@@ -395,6 +296,7 @@ def get_user_margins():
 
 @app.post("/api/logout")
 def logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
+    verify_shared_secret(x_shared_secret)
     return kite_logout()
 
 
@@ -550,11 +452,12 @@ def get_universe_scan(
 
 
 @app.get("/api/research/live")
-def get_live_research(top_n: int = 10, force_refresh: bool = False):
+def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthetic: bool = True):
     """
     Unified Live Research & Predictions Endpoint.
-    Uses REAL Kite market quotes to rank NIFTY 50 universe, runs actual
-    ORB, CPR, and Dual-EMA strategy models on the top candidates,
+    Uses REAL Kite market quotes (or synthetic fallback when unauthenticated/offline)
+    to rank the 300-stock universe, runs actual ORB, CPR, Dual-EMA, NSE-RM-100,
+    NSE-VRP-INDEX, and APEX-AIVEM strategy models on top candidates,
     calculates consensus, and derives key insights.
     """
     import time as time_mod
@@ -562,7 +465,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
     from config.settings import settings
     from data.market_calendar import MarketCalendar
     from data.historical_loader import HistoricalDataLoader
-    from scanner.stock_ranker import NiftyUniverseScanner
+    from scanner.stock_ranker import StockUniverseScanner
     from strategy.prediction_service import CandidatePrediction, prediction_service
 
     now = datetime.now()
@@ -571,7 +474,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
     is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
 
-    if not kite and not is_test:
+    if not kite and not is_test and not allow_synthetic:
         return {
             "status": "AUTH_REQUIRED",
             "data_source": "NONE",
@@ -595,11 +498,11 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
         return _live_research_cache["data"]
 
     try:
-        scanner = NiftyUniverseScanner()
+        scanner = StockUniverseScanner()
         ranked_metrics, data_source_label = scanner.scan_universe(
             kite_client=kite,
             top_n=top_n,
-            allow_synthetic=is_test,
+            allow_synthetic=is_test or allow_synthetic,
         )
 
         candidates: List[CandidatePrediction] = []
@@ -637,7 +540,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
                     df_15m = None
 
             # 3. If in test or fallback, generate realistic session bars for simulation
-            if df_15m is None and is_test:
+            if df_15m is None and (is_test or allow_synthetic):
                 df_15m = HistoricalDataLoader.generate_synthetic_nifty_data(
                     days=5,
                     seed=idx * 17,
@@ -669,6 +572,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
                 df_15m=df_15m,
                 current_ltp=ltp,
                 token=token,
+                stock_metric=item,
             )
 
             cand = CandidatePrediction(
@@ -683,13 +587,14 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
             candidates.append(cand)
 
         key_insights = prediction_service.extract_key_insights(candidates)
+        summary = getattr(scanner, "last_pipeline_summary", {})
 
         response_payload = {
             "status": "success",
             "data_source": "REAL_KITE" if data_source_label == "REAL" else "SYNTHETIC_TEST",
             "timestamp": now.isoformat(),
             "market_status": "OPEN" if is_open else "CLOSED",
-            "scanned_count": 50,
+            "scanned_count": summary.get("universe_count", 300),
             "returned_count": len(candidates),
             "candidates": [c.to_dict() for c in candidates],
             "key_insights": key_insights,
@@ -914,7 +819,16 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
     is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
     if strat_name == "rm100":
-        from backtest.rm100_backtest import RM100Backtester
+        try:
+            from backtest.rm100_backtest import RM100Backtester
+        except ImportError:
+            # backtest/rm100_backtest.py has not been written yet — NSE-RM-100
+            # is still a research/experimental strategy, not wired into the
+            # live backend. Fail cleanly instead of a raw 500 ImportError.
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="RM-100 backtesting is not yet implemented on the backend.",
+            )
         from config.universe import get_universe
         from data.eod_panel_loader import EODPanelLoader
         from strategy.residual_momentum import ResidualMomentumStrategy
@@ -1642,7 +1556,3 @@ def exit_order(
     db.save_order(record)
 
     return {"success": True, "message": f"Closed position on {req.symbol}", "order": record.dict()}
-
-
-
-

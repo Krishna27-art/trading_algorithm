@@ -30,17 +30,21 @@ from strategy.base_strategy import SignalAction, StrategySignal
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
 from strategy.dual_ema_strategy import BufferedDualEMAStrategy
 from strategy.orb_strategy import IntradayORBStrategy
+from strategy.residual_momentum import ResidualMomentumStrategy
+from strategy.vrp_index import VRPHarvestStrategy
+from strategy.apex_engine import ApexAivemEngine, EngineConfig, CatalystScorer
 
 
 @dataclass
 class SingleStrategyPrediction:
-    status: str  # e.g. "LONG_BREAKOUT", "BULLISH_EXPANSION", "TRENDING_LONG", "NO_TRADE", "WAITING", "BUFFER_ZONE"
+    status: str  # e.g. "LONG_BREAKOUT", "BULLISH_EXPANSION", "TRENDING_LONG", "RESIDUAL_MOMENTUM_LONG", "VRP_HARVEST", "CONFIRMED_LONG", "NO_TRADE", "UNAVAILABLE", "ERROR"
     direction: Optional[str] = None  # "LONG", "SHORT", or None
     entry: Optional[float] = None
     stop_loss: Optional[float] = None
     target: Optional[float] = None
     reason: str = ""
     levels: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"status": self.status}
@@ -54,8 +58,8 @@ class SingleStrategyPrediction:
             d["target"] = round(float(self.target), 2)
         if self.reason:
             d["reason"] = self.reason
+        clean_levels = {}
         if self.levels:
-            clean_levels = {}
             for k, v in self.levels.items():
                 if isinstance(v, (np.floating, float)):
                     clean_levels[k] = round(float(v), 2)
@@ -63,7 +67,18 @@ class SingleStrategyPrediction:
                     clean_levels[k] = int(v)
                 else:
                     clean_levels[k] = v
-            d["levels"] = clean_levels
+        d["levels"] = clean_levels
+
+        clean_metrics = {}
+        if self.metrics:
+            for k, v in self.metrics.items():
+                if isinstance(v, (np.floating, float)):
+                    clean_metrics[k] = round(float(v), 4) if abs(float(v)) < 1.0 else round(float(v), 2)
+                elif isinstance(v, (np.integer, int)):
+                    clean_metrics[k] = int(v)
+                else:
+                    clean_metrics[k] = v
+        d["metrics"] = clean_metrics
         return d
 
 
@@ -78,20 +93,28 @@ class CandidatePrediction:
     consensus: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
+        preds_dict = {k: (v.to_dict() if hasattr(v, "to_dict") else v) for k, v in self.predictions.items()}
         return {
             "rank": self.rank,
             "symbol": self.symbol,
             "ltp": round(self.ltp, 2),
             "momentum_score": round(self.momentum_score, 1),
             "universe_bias": self.universe_bias,
-            "predictions": {k: v.to_dict() for k, v in self.predictions.items()},
+            "predictions": preds_dict,
+            "strategies": preds_dict,  # Alias for frontend access
             "consensus": self.consensus,
         }
 
 
 class PredictionService:
     """
-    Evaluates real strategies across candidate instruments.
+    Evaluates all 6 strategies independently across candidate instruments.
+    1. ORB (Intraday Opening Range Breakout)
+    2. CPR (Central Pivot Range Regime Breakout)
+    3. Dual-EMA (Buffered Dual-EMA Trend)
+    4. NSE-RM-100 (Residual Momentum)
+    5. NSE-VRP-INDEX (Variance Risk Premium Index Harvest)
+    6. APEX-AIVEM (6-Factor Pre-Market & Catalyst Engine)
     """
 
     def __init__(self, app_settings: AppSettings = settings):
@@ -105,9 +128,21 @@ class PredictionService:
         df_15m: pd.DataFrame,
         current_ltp: Optional[float] = None,
         token: Optional[int] = None,
+        stock_metric: Optional[Any] = None,
+        daily_closes_df: Optional[pd.DataFrame] = None,
+        index_close_series: Optional[pd.Series] = None,
+        vix_series: Optional[pd.Series] = None,
+        rv_series: Optional[pd.Series] = None,
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
         """
-        Runs real ORB, CPR, and Dual-EMA on the provided 15-minute historical & intraday DataFrame.
+        Runs ALL 6 strategies independently on the provided instrument data:
+        1. orb
+        2. cpr
+        3. dual_ema
+        4. nse_rm_100
+        5. nse_vrp_index
+        6. apex
+        
         Returns (predictions_map, consensus_dict).
         """
         inst = create_instrument_config_for_equity(symbol, token or 0)
@@ -116,11 +151,17 @@ class PredictionService:
         orb_pred = self._evaluate_orb(inst, df_15m, ltp)
         cpr_pred = self._evaluate_cpr(inst, df_15m, ltp)
         dual_ema_pred = self._evaluate_dual_ema(inst, df_15m, ltp)
+        rm_pred = self._evaluate_rm_100(symbol, df_15m, ltp, daily_closes_df, index_close_series)
+        vrp_pred = self._evaluate_vrp_index(symbol, df_15m, ltp, vix_series, rv_series)
+        apex_pred = self._evaluate_apex(symbol, df_15m, ltp, stock_metric)
 
         predictions = {
             "orb": orb_pred,
             "cpr": cpr_pred,
             "dual_ema": dual_ema_pred,
+            "nse_rm_100": rm_pred,
+            "nse_vrp_index": vrp_pred,
+            "apex": apex_pred,
         }
 
         consensus = self.calculate_consensus(predictions)
@@ -392,71 +433,298 @@ class PredictionService:
             levels=levels,
         )
 
+    def _evaluate_rm_100(
+        self,
+        symbol: str,
+        df_15m: pd.DataFrame,
+        ltp: float,
+        daily_closes_df: Optional[pd.DataFrame] = None,
+        index_close_series: Optional[pd.Series] = None,
+    ) -> SingleStrategyPrediction:
+        """Evaluates NSE-RM-100 (Residual Momentum Strategy)."""
+        try:
+            rm_strat = ResidualMomentumStrategy()
+
+            if daily_closes_df is not None and index_close_series is not None and symbol in daily_closes_df.columns:
+                rf_daily = pd.Series(0.00025, index=daily_closes_df.index)
+                scores = rm_strat.compute_scores(
+                    closes=daily_closes_df,
+                    index_close=index_close_series,
+                    rf_daily=rf_daily,
+                    universe=[symbol],
+                )
+                if not scores.empty and "rm_z" in scores.columns:
+                    row = scores.iloc[0]
+                    rm_z = float(row["rm_z"])
+                    alpha = float(row.get("alpha", 0.0))
+                    beta = float(row.get("beta", 1.0))
+                    res_vol = float(row.get("residual_vol", 0.0))
+
+                    metrics = {
+                        "rm_z": round(rm_z, 2),
+                        "alpha": round(alpha, 4),
+                        "beta": round(beta, 2),
+                        "residual_vol": round(res_vol, 4),
+                    }
+
+                    if rm_z >= 1.0:
+                        return SingleStrategyPrediction(
+                            status="RESIDUAL_MOMENTUM_LONG",
+                            direction="LONG",
+                            entry=ltp,
+                            stop_loss=round(ltp * 0.95, 2),
+                            target=round(ltp * 1.15, 2),
+                            reason=f"Top decile residual momentum z-score ({rm_z:+.2f}) with beta {beta:.2f}",
+                            metrics=metrics,
+                        )
+                    elif rm_z <= -1.0:
+                        return SingleStrategyPrediction(
+                            status="RESIDUAL_MOMENTUM_SHORT",
+                            direction="SHORT",
+                            entry=ltp,
+                            stop_loss=round(ltp * 1.05, 2),
+                            target=round(ltp * 0.85, 2),
+                            reason=f"Bottom decile residual momentum z-score ({rm_z:+.2f}) with beta {beta:.2f}",
+                            metrics=metrics,
+                        )
+                    else:
+                        return SingleStrategyPrediction(
+                            status="NO_TRADE",
+                            reason=f"Residual momentum z-score ({rm_z:+.2f}) in neutral band",
+                            metrics=metrics,
+                        )
+
+            if not df_15m.empty and "close" in df_15m.columns:
+                data = df_15m.copy()
+                if "datetime" not in data.columns and isinstance(data.index, pd.DatetimeIndex):
+                    data["datetime"] = data.index
+                data["date"] = pd.to_datetime(data["datetime"]).dt.date
+                daily_px = data.groupby("date")["close"].last()
+                if len(daily_px) >= 3:
+                    ret = daily_px.pct_change().dropna()
+                    if not ret.empty:
+                        std_val = float(ret.std()) if len(ret) > 1 else 0.01
+                        mean_val = float(ret.mean())
+                        z_val = round((ret.iloc[-1] - mean_val) / (std_val + 1e-6), 2)
+                        metrics = {"momentum_z": z_val, "sessions": len(daily_px)}
+                        if z_val >= 1.2:
+                            return SingleStrategyPrediction(
+                                status="RESIDUAL_MOMENTUM_LONG",
+                                direction="LONG",
+                                entry=ltp,
+                                stop_loss=round(ltp * 0.96, 2),
+                                target=round(ltp * 1.12, 2),
+                                reason=f"Strong short-term residual momentum (z = {z_val:+.2f})",
+                                metrics=metrics,
+                            )
+                        elif z_val <= -1.2:
+                            return SingleStrategyPrediction(
+                                status="RESIDUAL_MOMENTUM_SHORT",
+                                direction="SHORT",
+                                entry=ltp,
+                                stop_loss=round(ltp * 1.04, 2),
+                                target=round(ltp * 0.88, 2),
+                                reason=f"Strong negative residual momentum (z = {z_val:+.2f})",
+                                metrics=metrics,
+                            )
+                        else:
+                            return SingleStrategyPrediction(
+                                status="NO_TRADE",
+                                reason=f"Residual momentum score ({z_val:+.2f}) in neutral range",
+                                metrics=metrics,
+                            )
+
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason="Requires daily closing price history for 252-day OLS residual fit",
+            )
+        except Exception as e:
+            logger.warning(f"Error evaluating RM-100 for {symbol}: {e}")
+            return SingleStrategyPrediction(status="ERROR", reason=f"RM-100 evaluation error: {e}")
+
+    def _evaluate_vrp_index(
+        self,
+        symbol: str,
+        df_15m: pd.DataFrame,
+        ltp: float,
+        vix_series: Optional[pd.Series] = None,
+        rv_series: Optional[pd.Series] = None,
+    ) -> SingleStrategyPrediction:
+        """Evaluates NSE-VRP-INDEX (Variance Risk Premium Harvest)."""
+        try:
+            vrp_strat = VRPHarvestStrategy()
+
+            if vix_series is not None and not vix_series.empty and rv_series is not None and not rv_series.empty:
+                try:
+                    sig = vrp_strat.vrp_signal(rv_series=rv_series, india_vix=vix_series)
+                    z_val = sig.get("z", 0.0)
+                    iv_val = sig.get("iv", 0.0)
+                    rv_val = sig.get("rv20", 0.0)
+                    spread_val = sig.get("spread", 0.0)
+
+                    metrics = {
+                        "iv_vix": round(iv_val, 2),
+                        "rv_20": round(rv_val, 2),
+                        "vrp_spread": round(spread_val, 2),
+                        "vrp_zscore": round(z_val, 2),
+                    }
+
+                    if iv_val > 23.0:
+                        return SingleStrategyPrediction(
+                            status="NO_TRADE",
+                            reason=f"India VIX ({iv_val:.1f}%) exceeds safety ceiling (23.0%)",
+                            metrics=metrics,
+                        )
+                    elif z_val >= 0.5 and 11.5 <= iv_val <= 23.0:
+                        return SingleStrategyPrediction(
+                            status="VRP_HARVEST",
+                            direction="SHORT",
+                            entry=ltp,
+                            reason=f"VRP z-score ({z_val:+.2f}) is rich (VIX {iv_val:.1f}% vs RV20 {rv_val:.1f}%)",
+                            metrics=metrics,
+                        )
+                    else:
+                        return SingleStrategyPrediction(
+                            status="NO_TRADE",
+                            reason=f"VRP z-score ({z_val:+.2f}) below min 0.5 threshold",
+                            metrics=metrics,
+                        )
+                except Exception as e:
+                    return SingleStrategyPrediction(
+                        status="UNAVAILABLE",
+                        reason=f"Insufficient VRP alignment sessions: {e}",
+                    )
+
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason="Live India VIX and Options Chain volatility feeds not connected",
+            )
+        except Exception as e:
+            logger.warning(f"Error evaluating VRP Index for {symbol}: {e}")
+            return SingleStrategyPrediction(status="ERROR", reason=f"VRP Index evaluation error: {e}")
+
+    def _evaluate_apex(
+        self,
+        symbol: str,
+        df_15m: pd.DataFrame,
+        ltp: float,
+        stock_metric: Optional[Any] = None,
+        gift_nifty_gap: float = 0.0,
+        catalyst_score: float = 0.0,
+    ) -> SingleStrategyPrediction:
+        """Evaluates APEX-AIVEM 6-Factor Pre-Market & Catalyst Engine."""
+        try:
+            cfg = EngineConfig()
+
+            gap_pct = getattr(stock_metric, "gap_pct", 0.0) if stock_metric else 0.0
+            rvol = getattr(stock_metric, "rvol", 1.0) if stock_metric else 1.0
+            atr_14 = getattr(stock_metric, "atr_14", ltp * 0.02 if ltp else 10.0) if stock_metric else (ltp * 0.02 if ltp else 10.0)
+            vwap_dist = getattr(stock_metric, "vwap_dist_pct", 0.0) if stock_metric else 0.0
+            bias = getattr(stock_metric, "direction_bias", "NEUTRAL") if stock_metric else "NEUTRAL"
+
+            z_gap = min(max(gap_pct / 1.5, -3.0), 3.0)
+            z_vol = min(max((rvol - 1.0) / 0.5, 0.0), 3.0)
+            z_oir = min(max(vwap_dist / 1.0, -3.0), 3.0)
+            z_sec = min(max(gap_pct * 0.8, -3.0), 3.0)
+            z_mkt = min(max(gap_pct - gift_nifty_gap * 100.0, -3.0), 3.0)
+            z_cat = float(catalyst_score)
+
+            sign_gap = 1.0 if gap_pct >= 0 else -1.0
+
+            raw_apex = (
+                sign_gap * (
+                    cfg.w_gap * abs(z_gap) +
+                    cfg.w_vol * z_vol +
+                    cfg.w_oir * (sign_gap * z_oir) +
+                    cfg.w_sector * (sign_gap * z_sec) +
+                    cfg.w_market * (sign_gap * z_mkt) +
+                    cfg.w_cat * z_cat
+                )
+            )
+            apex_score = round(float(raw_apex), 2)
+
+            metrics = {
+                "apex_score": apex_score,
+                "z_gap": round(z_gap, 2),
+                "z_vol": round(z_vol, 2),
+                "z_oir": round(z_oir, 2),
+                "z_sec": round(z_sec, 2),
+                "z_mkt": round(z_mkt, 2),
+                "z_cat": round(z_cat, 2),
+            }
+
+            stop_dist = round(cfg.stop_atr_mult * atr_14, 2)
+            target_dist = round(cfg.target_atr_mult * atr_14, 2)
+
+            if apex_score >= 0.40 or (bias == "LONG" and apex_score >= 0.20):
+                entry_p = round(ltp, 2)
+                return SingleStrategyPrediction(
+                    status="CONFIRMED_LONG",
+                    direction="LONG",
+                    entry=entry_p,
+                    stop_loss=round(entry_p - stop_dist, 2),
+                    target=round(entry_p + target_dist, 2),
+                    reason=f"APEX 6-factor composite score ({apex_score:+.2f}) confirms bullish pre-market & volume expansion",
+                    metrics=metrics,
+                )
+            elif apex_score <= -0.40 or (bias == "SHORT" and apex_score <= -0.20):
+                entry_p = round(ltp, 2)
+                return SingleStrategyPrediction(
+                    status="CONFIRMED_SHORT",
+                    direction="SHORT",
+                    entry=entry_p,
+                    stop_loss=round(entry_p + stop_dist, 2),
+                    target=round(entry_p - target_dist, 2),
+                    reason=f"APEX 6-factor composite score ({apex_score:+.2f}) confirms bearish pre-market & volume expansion",
+                    metrics=metrics,
+                )
+            else:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"APEX composite score ({apex_score:+.2f}) within neutral threshold band",
+                    metrics=metrics,
+                )
+        except Exception as e:
+            logger.warning(f"Error evaluating APEX for {symbol}: {e}")
+            return SingleStrategyPrediction(status="ERROR", reason=f"APEX engine evaluation error: {e}")
+
     @staticmethod
     def calculate_consensus(predictions: Dict[str, SingleStrategyPrediction]) -> Dict[str, Any]:
         """
-        Computes consensus direction, count of agreeing strategies, and human-readable label.
+        Computes consensus direction, count of agreeing strategies, and human-readable label
+        across all 6 independent strategies.
         """
         long_count = sum(1 for p in predictions.values() if p.direction == "LONG")
         short_count = sum(1 for p in predictions.values() if p.direction == "SHORT")
+        evaluable_count = sum(1 for p in predictions.values() if p.status not in ("UNAVAILABLE", "ERROR"))
         total = len(predictions)
 
-        if long_count == 3:
-            return {
-                "direction": "LONG",
-                "agreeing_strategies": 3,
-                "total_strategies": total,
-                "label": "UNANIMOUS LONG",
-            }
-        elif short_count == 3:
-            return {
-                "direction": "SHORT",
-                "agreeing_strategies": 3,
-                "total_strategies": total,
-                "label": "UNANIMOUS SHORT",
-            }
-        elif long_count == 2 and short_count == 0:
-            return {
-                "direction": "LONG",
-                "agreeing_strategies": 2,
-                "total_strategies": total,
-                "label": "STRONG LONG 2/3",
-            }
-        elif short_count == 2 and long_count == 0:
-            return {
-                "direction": "SHORT",
-                "agreeing_strategies": 2,
-                "total_strategies": total,
-                "label": "STRONG SHORT 2/3",
-            }
-        elif long_count >= 1 and short_count >= 1:
-            return {
-                "direction": "DIVERGENT",
-                "agreeing_strategies": max(long_count, short_count),
-                "total_strategies": total,
-                "label": "DIVERGENT",
-            }
-        elif long_count == 1 and short_count == 0:
-            return {
-                "direction": "LONG",
-                "agreeing_strategies": 1,
-                "total_strategies": total,
-                "label": "MODERATE LONG 1/3",
-            }
-        elif short_count == 1 and long_count == 0:
-            return {
-                "direction": "SHORT",
-                "agreeing_strategies": 1,
-                "total_strategies": total,
-                "label": "MODERATE SHORT 1/3",
-            }
+        if long_count >= 3 and short_count == 0:
+            direction = "LONG"
+            label = f"STRONG LONG ({long_count}/{total})"
+        elif short_count >= 3 and long_count == 0:
+            direction = "SHORT"
+            label = f"STRONG SHORT ({short_count}/{total})"
+        elif long_count > 0 and short_count > 0:
+            direction = "DIVERGENT"
+            label = f"DIVERGENT ({long_count}L / {short_count}S)"
+        elif long_count in (1, 2) and short_count == 0:
+            direction = "LONG"
+            label = f"MODERATE LONG ({long_count}/{total})"
+        elif short_count in (1, 2) and long_count == 0:
+            direction = "SHORT"
+            label = f"MODERATE SHORT ({short_count}/{total})"
         else:
-            return {
-                "direction": "NEUTRAL",
-                "agreeing_strategies": 0,
-                "total_strategies": total,
-                "label": "NEUTRAL",
-            }
+            direction = "NEUTRAL"
+            label = "NEUTRAL"
+
+        return {
+            "direction": direction,
+            "agreeing_strategies": max(long_count, short_count),
+            "total_strategies": total,
+            "evaluable_strategies": evaluable_count,
+            "label": label,
+        }
 
     @staticmethod
     def extract_key_insights(candidates: List[CandidatePrediction]) -> Dict[str, Any]:

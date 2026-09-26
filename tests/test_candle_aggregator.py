@@ -90,3 +90,71 @@ def test_candle_aggregator_ticks_and_closure():
     assert aggregator.current_candle is None
     assert len(aggregator.completed_candles) == 0
     assert aggregator.current_vwap == 0.0
+
+
+def test_multisymbol_candle_aggregator_kite_ticks():
+    from data.candle_aggregator import MultiSymbolCandleAggregator
+
+    token_map = {738561: "RELIANCE", 2953217: "TCS"}
+    closed_events = []
+
+    def on_close(candle_dict, vwap):
+        closed_events.append((candle_dict, vwap))
+
+    multi_agg = MultiSymbolCandleAggregator(
+        token_to_symbol_map=token_map,
+        timeframe_minutes=15,
+        on_candle_close=on_close,
+    )
+
+    t1 = datetime(2026, 3, 2, 9, 15, 10)
+    t2 = datetime(2026, 3, 2, 9, 20, 0)
+    t3 = datetime(2026, 3, 2, 9, 30, 1)
+
+    raw_ticks = [
+        {
+            "instrument_token": 738561,
+            "last_price": 2950.0,
+            "last_traded_quantity": 50,
+            "exchange_timestamp": t1,
+        },
+        {
+            "instrument_token": 2953217,
+            "last_price": 4100.0,
+            "last_traded_quantity": 25,
+            "exchange_timestamp": t1,
+        },
+        {
+            "instrument_token": 738561,
+            "last_price": 2965.0,
+            "last_traded_quantity": 30,
+            "exchange_timestamp": t2,
+        },
+    ]
+
+    multi_agg.process_ticks(raw_ticks)
+    assert len(closed_events) == 0
+
+    # Rollover tick for RELIANCE
+    rollover_ticks = [
+        {
+            "instrument_token": 738561,
+            "last_price": 2970.0,
+            "last_traded_quantity": 10,
+            "exchange_timestamp": t3,
+        }
+    ]
+    multi_agg.process_ticks(rollover_ticks)
+
+    assert len(closed_events) == 1
+    rel_candle, rel_vwap = closed_events[0]
+    assert rel_candle["symbol"] == "RELIANCE"
+    assert rel_candle["open"] == 2950.0
+    assert rel_candle["high"] == 2965.0
+    assert rel_candle["low"] == 2950.0
+    assert rel_candle["close"] == 2965.0
+    assert rel_candle["volume"] == 80
+
+    rel_df = multi_agg.get_symbol_dataframe("RELIANCE")
+    assert len(rel_df) == 1
+    assert rel_df.iloc[0]["close"] == 2965.0

@@ -539,7 +539,7 @@ def main():
                 print(f"[+] Starting live execution on {args.broker}...")
                 if args.broker == "KITE":
                     from broker.kite_adapter import KiteBrokerAdapter
-                    broker = KiteBrokerAdapter()
+                    broker = KiteBrokerAdapter.get_instance()
                 else:
                     print("[!] Broker not supported.")
                     return

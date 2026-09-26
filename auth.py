@@ -1,23 +1,16 @@
 """
-Zerodha Kite Connect Authentication Helper
+Zerodha Kite Connect Authentication Helper (CLI)
 Run this script once daily before market hours to generate your active session access token.
 
 Usage:
     python auth.py
 """
 
-import json
-import os
 import webbrowser
-from datetime import datetime
 from urllib.parse import parse_qs, urlparse
-from kiteconnect import KiteConnect
 
+from broker.kite_adapter import KiteBrokerAdapter
 from config.settings import settings
-
-
-def get_login_url(kite: KiteConnect) -> str:
-    return kite.login_url()
 
 
 def extract_request_token(input_str: str) -> str:
@@ -39,8 +32,8 @@ def authenticate():
         print("[!] ERROR: KITE_API_SECRET is missing in .env file.")
         return None
 
-    kite = KiteConnect(api_key=settings.kite_api_key)
-    login_url = get_login_url(kite)
+    adapter = KiteBrokerAdapter.get_instance()
+    login_url = adapter.get_login_url()
 
     print("=" * 60)
     print("  ZERODHA KITE CONNECT - DAILY AUTHENTICATION")
@@ -66,30 +59,14 @@ def authenticate():
 
     print("\n[+] Exchanging request token for session access token...")
     try:
-        session_data = kite.generate_session(request_token=request_token, api_secret=settings.kite_api_secret)
-        access_token = session_data["access_token"]
-        public_token = session_data.get("public_token", "")
-        user_name = session_data.get("user_name", "Trader")
-        user_id = session_data.get("user_id", "")
-
-        # Save session to session_token.json — NEVER persist api_secret
-        payload = {
-            "api_key": settings.kite_api_key,
-            "user_id": user_id,
-            "user_name": user_name,
-            "access_token": access_token,
-            "public_token": public_token,
-            "login_time": datetime.now().isoformat(),
-        }
-
-        with open(settings.token_file, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.chmod(settings.token_file, 0o600)
+        payload = adapter.generate_session_from_request_token(request_token)
+        user_name = payload.get("user_name", "Trader")
+        user_id = payload.get("user_id", "")
 
         print(f"\n[✓] Success! Authenticated as: {user_name} ({user_id})")
         print(f"[✓] Access token saved to '{settings.token_file.name}'")
         print("[✓] Valid for today's trading session.")
-        return access_token
+        return payload.get("access_token")
 
     except Exception as e:
         print(f"\n[!] Authentication failed: {e}")

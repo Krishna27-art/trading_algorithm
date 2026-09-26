@@ -40,7 +40,7 @@ from tabulate import tabulate
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config.settings import settings
-from config.universe import create_instrument_config_for_equity, resolve_universe_tokens, NIFTY_50_CONSTITUENTS
+from config.universe import create_instrument_config_for_equity, resolve_universe_tokens
 from data.eod_panel_loader import EODPanelLoader
 from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver

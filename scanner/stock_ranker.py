@@ -1,8 +1,8 @@
 """
-300-Stock Universe Scanner & Explainable Stock Ranker.
+300-Stock Master Scanner & Explainable Stock Ranker.
 
 Pulls live market quotes for all 300 universe constituents (100 Large, 100 Mid, 100 Small)
-in batched requests via Kite Connect (up to 400 instruments per quote call).
+from StockUniverse using InstrumentResolver for token resolution.
 Applies a separate Liquidity Filter layer, computes explainable ranking signals
 (Gap %, RVOL, ATR Volatility, VWAP Distance), and combines them via transparent weighting.
 """
@@ -19,14 +19,12 @@ import pandas as pd
 
 from config.settings import InstrumentConfig, settings
 from config.universe import (
-    NIFTY_50_CONSTITUENTS,
     StockRecord,
     StockUniverse,
     create_instrument_config_for_equity,
-    resolve_300_universe_tokens,
-    resolve_universe_tokens,
 )
 from data.historical_loader import HistoricalDataLoader
+from data.instrument_resolver import instrument_resolver
 from monitoring.logger import logger
 from scanner.liquidity_filter import LiquidityFilter, LiquidityFilterResult, LiquidityStatus
 
@@ -64,18 +62,29 @@ class StockRankingMetrics:
 
 class StockUniverseScanner:
     """
-    Scans and ranks the 300-stock scanning universe (100 Large, 100 Mid, 100 Small).
-    Supports batched Kite quotes and synthetic fallback when offline/testing.
+    Scans and ranks the master 300-stock scanning universe (100 Large, 100 Mid, 100 Small).
+    Consumes StockUniverse and InstrumentResolver for token mapping.
     """
 
     def __init__(self, cache_dir: Optional[Path] = None):
-        self.cache_dir = cache_dir or (Path(__file__).resolve().parent.parent / "data" / "cache")
+        self.cache_dir = cache_dir or (settings.base_dir / "data" / "cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.universe = StockUniverse()
-        self.token_map = resolve_300_universe_tokens(cache_path=self.cache_dir / "universe_300_tokens.json")
-        self.universe.print_startup_summary(self.token_map)
         self.liquidity_filter = LiquidityFilter()
+        self.token_map: Dict[str, int] = {}
+        self.unresolved_symbols: List[str] = []
         self.last_pipeline_summary: Dict[str, Any] = {}
+
+    def resolve_tokens(self, kite_client: Optional[Any] = None, force_refresh: bool = False) -> Dict[str, int]:
+        symbols = [r.symbol for r in self.universe.all_stocks]
+        self.token_map, self.unresolved_symbols = instrument_resolver.resolve_universe(
+            symbols=symbols,
+            kite_client=kite_client,
+            cache_path=self.cache_dir / "universe_300_tokens.json",
+            force_refresh=force_refresh,
+        )
+        self.universe.print_startup_summary(self.token_map)
+        return self.token_map
 
     @staticmethod
     def calculate_atr_from_candles(candles_df: pd.DataFrame, period: int = 14) -> float:
@@ -124,6 +133,8 @@ class StockUniverseScanner:
         force_refresh_history: bool = False,
         allow_synthetic: bool = True,
     ) -> Tuple[List[StockRankingMetrics], str]:
+        self.resolve_tokens(kite_client=kite_client, force_refresh=False)
+
         is_live_connected = False
         client = None
 
@@ -162,7 +173,7 @@ class StockUniverseScanner:
         all_records = self.universe.all_stocks
         symbols = [r.symbol for r in all_records]
 
-        # Batched REST quotes (up to 150 per chunk to avoid payload/URL limits)
+        # Batched REST quotes (150 per chunk to respect URL/payload limits)
         quotes: Dict[str, Any] = {}
         batch_size = 150
         for i in range(0, len(symbols), batch_size):
@@ -210,7 +221,6 @@ class StockUniverseScanner:
             volume = int(q_data.get("volume", 0))
             vwap = float(q_data.get("average_price", ltp)) or ltp
 
-            # Fetch 20-day historical context safely
             try:
                 avg_vol_20d, atr_14 = self._get_historical_context(
                     kite_client=kite,
@@ -224,7 +234,6 @@ class StockUniverseScanner:
                 logger.warning(f"Could not load history context for {sym}: {e}")
                 avg_vol_20d, atr_14 = volume, round(ltp * 0.02, 2)
 
-            # Evaluate Liquidity Filter
             raw_eval_dict = {
                 "symbol": sym,
                 "ltp": ltp,
@@ -258,7 +267,6 @@ class StockUniverseScanner:
             tradable_cnt += 1
             setup_cnt += 1
 
-            # Compute explainable signals
             gap_pct = round(((open_p - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
             rvol = round(volume / avg_vol_20d, 2) if avg_vol_20d > 0 else 1.0
             atr_pct = round((atr_14 / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
@@ -409,7 +417,6 @@ class StockUniverseScanner:
             atr_pct = round(float(rng.uniform(1.2, 3.5)), 2)
             atr_14 = round(prev_close * (atr_pct / 100.0), 2)
 
-            # Evaluate liquidity filter
             liq_res = self.liquidity_filter.evaluate_stock({
                 "symbol": sym,
                 "ltp": ltp,
@@ -517,5 +524,5 @@ class StockUniverseScanner:
         return configs
 
 
-# Alias NiftyUniverseScanner for full backward compatibility
+# Alias NiftyUniverseScanner for backward compatibility
 NiftyUniverseScanner = StockUniverseScanner

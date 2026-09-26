@@ -47,6 +47,7 @@ from backtest.strategy_backtester import StrategyBacktester as EventDrivenBackte
 from backtest.performance import PerformanceAnalyzer, PerformanceReport
 from config.settings import AppSettings, InstrumentConfig, settings
 from monitoring.logger import logger
+from strategy.orb_strategy import IntradayORBStrategy
 
 ParamSelector = Callable[[pd.DataFrame], InstrumentConfig]
 BacktesterFactory = Callable[[InstrumentConfig], object]  # must expose .generate_trades(df, initial_capital)
@@ -101,7 +102,7 @@ class RollingWalkForwardValidator:
         self.instrument = instrument
         self.settings = app_settings
         self.backtester_factory = backtester_factory or (
-            lambda inst: EventDrivenBacktester(inst, app_settings)
+            lambda inst: EventDrivenBacktester(lambda: IntradayORBStrategy(inst), inst, app_settings)
         )
 
     def validate(

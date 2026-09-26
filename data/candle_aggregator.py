@@ -107,5 +107,98 @@ class CandleAggregator:
         if not self.completed_candles:
             return pd.DataFrame()
         df = pd.DataFrame(self.completed_candles)
-        df.set_index("datetime", inplace=True)
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"])
         return df
+
+
+class MultiSymbolCandleAggregator:
+    """
+    Manages CandleAggregator instances for multiple symbols/tokens simultaneously.
+    Consumes live Zerodha KiteTicker ticks (from on_ticks callback) and routes them to
+    their respective per-symbol CandleAggregators. Emits completed candles for strategy processing.
+    """
+
+    def __init__(
+        self,
+        token_to_symbol_map: Dict[int, str],
+        timeframe_minutes: int = 15,
+        on_candle_close: Optional[Callable[[dict, float], None]] = None,
+    ):
+        self.token_to_symbol_map = {int(k): str(v) for k, v in token_to_symbol_map.items()}
+        self.timeframe_minutes = timeframe_minutes
+        self.on_candle_close = on_candle_close
+        self.aggregators: Dict[str, CandleAggregator] = {}
+        self.last_volume_by_token: Dict[int, int] = {}
+        self._init_aggregators()
+
+    def _init_aggregators(self):
+        for token, symbol in self.token_to_symbol_map.items():
+            if symbol not in self.aggregators:
+                self.aggregators[symbol] = CandleAggregator(
+                    symbol=symbol,
+                    timeframe_minutes=self.timeframe_minutes,
+                    on_candle_close=self.on_candle_close,
+                )
+
+    def process_ticks(self, ticks: Any):
+        """
+        Processes a batch of raw Zerodha KiteTicker tick objects.
+        """
+        if not isinstance(ticks, list):
+            if isinstance(ticks, dict):
+                ticks = [ticks]
+            else:
+                return
+
+        for tick in ticks:
+            if not isinstance(tick, dict):
+                continue
+
+            token = tick.get("instrument_token")
+            if token is None:
+                continue
+
+            symbol = self.token_to_symbol_map.get(int(token))
+            if not symbol:
+                continue
+
+            price = tick.get("last_price")
+            if price is None or price <= 0:
+                continue
+
+            last_qty = tick.get("last_traded_quantity") or tick.get("last_quantity")
+            vol_traded = tick.get("volume_traded") or tick.get("volume")
+
+            if last_qty is not None and last_qty > 0:
+                volume = int(last_qty)
+            elif vol_traded is not None:
+                prev_vol = self.last_volume_by_token.get(int(token), 0)
+                volume = max(int(vol_traded) - prev_vol, 0) if prev_vol > 0 else 0
+                self.last_volume_by_token[int(token)] = int(vol_traded)
+            else:
+                volume = 0
+
+            raw_ts = tick.get("exchange_timestamp") or tick.get("timestamp")
+            if isinstance(raw_ts, datetime):
+                timestamp = raw_ts
+            elif isinstance(raw_ts, str):
+                try:
+                    timestamp = datetime.fromisoformat(raw_ts)
+                except Exception:
+                    timestamp = datetime.now()
+            else:
+                timestamp = datetime.now()
+
+            agg = self.aggregators.get(symbol)
+            if agg:
+                agg.process_tick(price=float(price), volume=volume, timestamp=timestamp)
+
+    def get_symbol_dataframe(self, symbol: str) -> pd.DataFrame:
+        agg = self.aggregators.get(symbol)
+        return agg.get_completed_dataframe() if agg else pd.DataFrame()
+
+    def reset_all_daily_sessions(self):
+        for agg in self.aggregators.values():
+            agg.reset_daily_session()
+        self.last_volume_by_token.clear()

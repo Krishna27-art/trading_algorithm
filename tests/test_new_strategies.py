@@ -136,3 +136,53 @@ def test_rolling_walk_forward_still_defaults_to_orb(instrument, synthetic_df):
         initial_capital=settings.risk.initial_capital,
     )
     assert len(result.folds) >= 1
+
+
+def test_prediction_service_evaluates_all_6_strategies():
+    from strategy.prediction_service import PredictionService, CandidatePrediction
+    import pandas as pd
+    import numpy as np
+    
+    dates = pd.date_range("2024-01-01 09:15", periods=50, freq="15min")
+    df_15m = pd.DataFrame({
+        "datetime": dates,
+        "open": np.linspace(2400, 2450, 50),
+        "high": np.linspace(2410, 2460, 50),
+        "low": np.linspace(2390, 2440, 50),
+        "close": np.linspace(2405, 2455, 50),
+        "volume": [1000] * 50
+    })
+    
+    service = PredictionService()
+    preds, consensus = service.evaluate_symbol("RELIANCE", df_15m, current_ltp=2455.0)
+    
+    # Check that all 6 strategy keys are present in predictions
+    expected_keys = {"orb", "cpr", "dual_ema", "nse_rm_100", "nse_vrp_index", "apex"}
+    assert set(preds.keys()) == expected_keys
+    
+    cand = CandidatePrediction(
+        rank=1,
+        symbol="RELIANCE",
+        ltp=2455.0,
+        momentum_score=75.0,
+        universe_bias="NEUTRAL",
+        predictions=preds,
+        consensus=consensus,
+    )
+    
+    cand_dict = cand.to_dict()
+    assert "strategies" in cand_dict
+    assert set(cand_dict["strategies"].keys()) == expected_keys
+    
+    # Check strategy prediction structure
+    for key, strat_data in cand_dict["strategies"].items():
+        assert "status" in strat_data
+        assert "reason" in strat_data
+        assert "levels" in strat_data
+        assert "metrics" in strat_data
+        if strat_data.get("direction"):
+            assert "entry" in strat_data
+            assert "stop_loss" in strat_data
+            assert "target" in strat_data
+
+

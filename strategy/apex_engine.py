@@ -286,11 +286,11 @@ class ApexAivemStrategy(BaseStrategy):
         *,
         india_vix: Optional[float] = None,
         calendar_blackout: bool = False,
-        gift_nifty_gap: float = 0.0,
-        sector_rs: float = 0.0,
-        market_rs: float = 0.0,
-        catalyst_score: int = 0,
-        cpr_norm: float = 0.0,
+        gift_nifty_gap: Optional[float] = None,
+        sector_rs: Optional[float] = None,
+        market_rs: Optional[float] = None,
+        catalyst_score: Optional[int] = None,
+        cpr_norm: Optional[float] = None,
         order_imbalance: Optional[float] = None,
         headlines: Optional[list[str]] = None,
     ) -> None:
@@ -302,7 +302,7 @@ class ApexAivemStrategy(BaseStrategy):
         They must NOT come from CPR, Dual EMA, or ORB predictions.
         """
 
-        if headlines is not None and catalyst_score == 0:
+        if headlines is not None and (catalyst_score is None or catalyst_score == 0):
             catalyst_score = self.catalyst_scorer.score(
                 self.symbol,
                 headlines,
@@ -311,11 +311,11 @@ class ApexAivemStrategy(BaseStrategy):
         self.context = {
             "india_vix": india_vix,
             "calendar_blackout": calendar_blackout,
-            "gift_nifty_gap": float(gift_nifty_gap),
-            "sector_rs": float(sector_rs),
-            "market_rs": float(market_rs),
-            "catalyst_score": float(catalyst_score),
-            "cpr_norm": float(cpr_norm),
+            "gift_nifty_gap": float(gift_nifty_gap) if gift_nifty_gap is not None else None,
+            "sector_rs": float(sector_rs) if sector_rs is not None else None,
+            "market_rs": float(market_rs) if market_rs is not None else None,
+            "catalyst_score": float(catalyst_score) if catalyst_score is not None else None,
+            "cpr_norm": float(cpr_norm) if cpr_norm is not None else None,
             "order_imbalance": order_imbalance,
         }
 
@@ -503,54 +503,45 @@ class ApexAivemStrategy(BaseStrategy):
             oir = (close - open_price) / candle_range
             oir = float(np.clip(oir, -1.0, 1.0))
 
-        sector_rs = float(self.context.get("sector_rs", 0.0))
-        market_rs = float(self.context.get("market_rs", 0.0))
-        catalyst = float(self.context.get("catalyst_score", 0.0))
-        cpr_norm = float(self.context.get("cpr_norm", 0.0))
-
-        # Normalize each factor to a stable bounded range.
-        z_gap = float(
-            np.clip(abs(gap_atr) / 1.0, 0.0, 3.0)
-        )
-
-        z_vol = float(
-            np.clip(np.log(max(rvol, 0.01)), -3.0, 3.0)
-        )
-
-        z_oir = float(
-            np.clip(oir * 3.0, -3.0, 3.0)
-        )
-
-        z_sector = float(
-            np.clip(sector_rs * 3.0, -3.0, 3.0)
-        )
-
-        z_market = float(
-            np.clip(market_rs * 3.0, -3.0, 3.0)
-        )
-
-        z_cat = float(
-            np.clip((catalyst / 3.0) * 3.0, 0.0, 3.0)
-        )
-
+        # Dynamically accumulate active weights based strictly on verified real inputs
         gap_sign = 1.0 if gap_atr >= 0 else -1.0
+        z_gap = float(np.clip(abs(gap_atr) / 1.0, 0.0, 3.0))
+        z_vol = float(np.clip(np.log(max(rvol, 0.01)), -3.0, 3.0))
+        z_oir = float(np.clip(oir * 3.0, -3.0, 3.0))
 
-        composite = gap_sign * (
-            self._weight_gap(z_gap)
-            + self._weight_volume(z_vol)
+        total_active_weight = self.cfg.w_gap + self.cfg.w_vol + self.cfg.w_oir
+        raw_weighted_sum = (
+            self.cfg.w_gap * z_gap
+            + self.cfg.w_vol * z_vol
             + self.cfg.w_oir * (gap_sign * z_oir)
-            + self.cfg.w_sector * (gap_sign * z_sector)
-            + self.cfg.w_market * (gap_sign * z_market)
-            + self.cfg.w_cat * z_cat
         )
 
-        # Preserve the original APEX idea of reducing conviction when
-        # CPR-normalization/context says the setup is less favorable.
-        cpr_multiplier = 1.0 - (
-            0.10 * float(np.clip(cpr_norm, 0.0, 1.5))
-        )
+        sector_rs = self.context.get("sector_rs")
+        if sector_rs is not None:
+            z_sector = float(np.clip(float(sector_rs) * 3.0, -3.0, 3.0))
+            raw_weighted_sum += self.cfg.w_sector * (gap_sign * z_sector)
+            total_active_weight += self.cfg.w_sector
 
-        composite *= cpr_multiplier
+        market_rs = self.context.get("market_rs")
+        if market_rs is not None:
+            z_market = float(np.clip(float(market_rs) * 3.0, -3.0, 3.0))
+            raw_weighted_sum += self.cfg.w_market * (gap_sign * z_market)
+            total_active_weight += self.cfg.w_market
+
+        catalyst = self.context.get("catalyst_score")
+        if catalyst is not None and float(catalyst) > 0:
+            z_cat = float(np.clip((float(catalyst) / 3.0) * 3.0, 0.0, 3.0))
+            raw_weighted_sum += self.cfg.w_cat * z_cat
+            total_active_weight += self.cfg.w_cat
+
+        # Normalize composite score by total active weights so missing inputs do not bias as 0
+        norm_factor = (1.0 / total_active_weight) if total_active_weight > 0 else 1.0
+        composite = gap_sign * (raw_weighted_sum * norm_factor)
+
+        cpr_norm = self.context.get("cpr_norm")
+        if cpr_norm is not None:
+            cpr_multiplier = 1.0 - (0.10 * float(np.clip(float(cpr_norm), 0.0, 1.5)))
+            composite *= cpr_multiplier
 
         return {
             "atr": atr,
@@ -650,7 +641,7 @@ class ApexAivemStrategy(BaseStrategy):
             }
             return None
 
-        if features["cpr_norm"] > self.cfg.cpr_norm_max:
+        if features.get("cpr_norm") is not None and features["cpr_norm"] > self.cfg.cpr_norm_max:
             self.last_analysis = {
                 **features,
                 "status": "NO_TRADE",

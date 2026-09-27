@@ -13,14 +13,12 @@ const STRATEGIES = [
   { id: 'orb', label: 'ORB' },
   { id: 'cpr', label: 'CPR' },
   { id: 'dual_ema', label: 'Dual EMA' },
-  { id: 'nse_rm_100', label: 'NSE-RM-100' },
-  { id: 'nse_vrp_index', label: 'NSE-VRP-INDEX' },
   { id: 'apex', label: 'APEX-AIVEM' },
 ]
 
-const ALL_STRATEGY_KEYS = ['orb', 'cpr', 'dual_ema', 'nse_rm_100', 'nse_vrp_index', 'apex']
+const ALL_STRATEGY_KEYS = ['orb', 'cpr', 'dual_ema', 'apex']
 
-export default function LiveSignalsPage() {
+export default function LiveSignalsPage({ isAuthenticated }) {
   const [filter, setFilter] = useState('all')
   const [expanded, setExpanded] = useState(() => new Set())
   // Backend caches this endpoint for 15s server-side; polling faster wouldn't
@@ -35,6 +33,11 @@ export default function LiveSignalsPage() {
       return preds[filter] && preds[filter].status !== 'UNAVAILABLE'
     })
   }, [candidates, filter])
+
+  // Only show the auth-required banner when the endpoint explicitly says so
+  // AND the App-level auth check hasn't confirmed we're connected.
+  const showAuthRequired =
+    research.data?.status === 'AUTH_REQUIRED' && !isAuthenticated
 
   const toggle = (symbol) => {
     setExpanded((prev) => {
@@ -76,7 +79,7 @@ export default function LiveSignalsPage() {
         <Card><Loading label="Scanning 300-stock universe…" /></Card>
       ) : research.status === 'error' && !research.data ? (
         <Card><ErrorState error={research.error} onRetry={research.refresh} /></Card>
-      ) : research.data?.status === 'AUTH_REQUIRED' ? (
+      ) : showAuthRequired ? (
         <Card>
           <EmptyState label="Live signals require a connected Kite session." hint={research.data.message} />
         </Card>

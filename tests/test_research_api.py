@@ -116,34 +116,14 @@ def test_prediction_service_extract_key_insights():
 
 
 def test_get_research_live_endpoint():
-    """Tests get_live_research returns proper contract in test mode."""
+    """Tests get_live_research returns proper auth requirement when offline."""
     data = get_live_research(top_n=5, force_refresh=True)
-    assert data["status"] == "success"
-    assert "data_source" in data
+    assert data["status"] == "AUTH_REQUIRED"
+    assert data["data_source"] == "NONE"
     assert "timestamp" in data
     assert "market_status" in data
-    assert data["scanned_count"] >= 50
-    assert len(data["candidates"]) == 5
-    assert len(data["candidates"]) == 5
-
-    cand = data["candidates"][0]
-    assert "rank" in cand
-    assert "symbol" in cand
-    assert "ltp" in cand
-    assert "momentum_score" in cand
-    assert "universe_bias" in cand
-    assert "predictions" in cand
-    assert "orb" in cand["predictions"]
-    assert "cpr" in cand["predictions"]
-    assert "dual_ema" in cand["predictions"]
-    assert "consensus" in cand
-    assert "label" in cand["consensus"]
-
-    assert "key_insights" in data
-    assert "top_long" in data["key_insights"]
-    assert "top_short" in data["key_insights"]
-    assert "strongest_consensus" in data["key_insights"]
-    assert "divergent_signals" in data["key_insights"]
+    assert data["scanned_count"] == 0
+    assert len(data["candidates"]) == 0
 
 
 def test_research_backtest_endpoints():

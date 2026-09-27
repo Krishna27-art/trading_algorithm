@@ -9,7 +9,7 @@ import { getStrategyState, getTelemetry } from '../api/market'
 import { getPositions } from '../api/positions'
 import { formatCurrency } from '../utils/format'
 
-export default function DashboardPage({ onNavigate }) {
+export default function DashboardPage({ onNavigate, isAuthenticated }) {
   const health = usePolling(getSystemHealth, { intervalMs: 10000 })
   const state = usePolling(() => getStrategyState(), { intervalMs: 30000 })
 
@@ -23,6 +23,12 @@ export default function DashboardPage({ onNavigate }) {
   const positions = usePolling(getPositions, { intervalMs: 10000 })
 
   const overallReady = health.data?.overall_status === 'READY'
+
+  // Trust App-level auth (confirmed via /kite/status) unless the telemetry
+  // endpoint explicitly reports authenticated === false.
+  const kiteConnected = telemetry.data
+    ? telemetry.data.authenticated !== false
+    : isAuthenticated
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -55,15 +61,15 @@ export default function DashboardPage({ onNavigate }) {
           <Loading />
         ) : telemetry.status === 'error' && !telemetry.data ? (
           <ErrorState error={telemetry.error} onRetry={telemetry.refresh} />
-        ) : !telemetry.data?.authenticated ? (
+        ) : !kiteConnected ? (
           <EmptyState
             label="Live signals require a connected Kite session."
             hint={telemetry.data?.message}
           />
-        ) : telemetry.data.active_signal ? (
+        ) : telemetry.data?.active_signal ? (
           <SignalSummary signal={telemetry.data.active_signal} />
         ) : (
-          <EmptyState label="No active signal" hint={telemetry.data.algorithm_state} />
+          <EmptyState label="No active signal" hint={telemetry.data?.algorithm_state} />
         )}
       </Card>
 

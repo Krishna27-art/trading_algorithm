@@ -31,7 +31,7 @@ function formatChangeVal(val) {
   return `${sign}${num.toFixed(2)}`
 }
 
-export default function StocksPage() {
+export default function StocksPage({ isAuthenticated }) {
   const { data, status, error, updatedAt, refresh } = usePolling(getMarketPrices, {
     intervalMs: 5000,
   })
@@ -83,7 +83,7 @@ export default function StocksPage() {
     }
   }, [stocks])
 
-  const isAuthRequired = data?.status === 'AUTH_REQUIRED'
+  const isAuthRequired = data?.status === 'AUTH_REQUIRED' && !isAuthenticated
   const isRealKite = data?.data_source === 'REAL_KITE'
 
   return (

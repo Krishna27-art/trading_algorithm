@@ -138,28 +138,32 @@ def run_predict(top_n: int = 5):
             print(f"[+] LIVE SESSION CONNECTED: {profile.get('user_name')} ({profile.get('user_id')})")
         except Exception:
             print("[+] LIVE SESSION CONNECTED.")
-    else:
-        print("[!] NOTICE: No active Kite Connect session. Running in offline/simulated data mode.")
+    if not kite:
+        print("[!] ERROR: No active Kite Connect session found.")
+        print("    Live predictions require real market data from Kite. Please authenticate with `python auth.py`.")
+        return
 
     ranked_metrics, _ = NiftyUniverseScanner().scan_universe(kite_client=kite_app, top_n=top_n)
     target_symbols = ["NIFTY"] + [m.symbol for m in ranked_metrics]
 
     today = date.today()
     start_d = today - timedelta(days=10)
-    tokens = resolve_universe_tokens(kite_client=kite, force_refresh=False) if kite else {}
+    tokens = resolve_universe_tokens(kite_client=kite, force_refresh=False)
 
     rows = []
     for sym in target_symbols:
         if sym == "NIFTY":
             token = 256265
-            ltp = float(kite.quote(["NSE:NIFTY 50"]).get("NSE:NIFTY 50", {}).get("last_price", 24000.0)) if kite else 24000.0
+            q = kite.quote(["NSE:NIFTY 50"]).get("NSE:NIFTY 50", {})
+            ltp = float(q.get("last_price", 0.0))
         else:
-            token = tokens.get(sym) or (instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite) if kite else 0) or 0
-            ltp = float(kite.quote([f"NSE:{sym}"]).get(f"NSE:{sym}", {}).get("last_price", 2000.0)) if kite else 2000.0
+            token = tokens.get(sym) or instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite) or 0
+            q = kite.quote([f"NSE:{sym}"]).get(f"NSE:{sym}", {})
+            ltp = float(q.get("last_price", 0.0))
 
         cache_file = settings.base_dir / "data" / "cache" / f"{sym}_15m.csv"
         df_15m = pd.DataFrame()
-        if kite_app:
+        if kite_app and token:
             try:
                 df_15m = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite_app,
@@ -170,14 +174,24 @@ def run_predict(top_n: int = 5):
                     cache_path=cache_file,
                     force_refresh=False,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Could not load 15m bars for {sym}: {e}")
                 df_15m = pd.DataFrame()
 
         if df_15m.empty:
-            df_15m = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=hash(sym) % 1000, base_price=ltp)
+            rows.append({
+                "Symbol": sym,
+                "LTP": f"₹{ltp:,.2f}" if ltp > 0 else "N/A",
+                "ORB": "DATA_UNAVAILABLE",
+                "CPR": "DATA_UNAVAILABLE",
+                "Dual-EMA": "DATA_UNAVAILABLE",
+                "APEX": "DATA_UNAVAILABLE",
+                "Consensus": "NO DATA",
+            })
+            continue
 
         preds, consensus = prediction_service.evaluate_symbol(symbol=sym, df_15m=df_15m, current_ltp=ltp, token=token)
-        orb, cpr, ema = preds["orb"], preds["cpr"], preds["dual_ema"]
+        orb, cpr, ema, apex = preds["orb"], preds["cpr"], preds["dual_ema"], preds["apex"]
 
         rows.append({
             "Symbol": sym,
@@ -185,6 +199,7 @@ def run_predict(top_n: int = 5):
             "ORB": f"{orb.direction or 'NONE'} ({orb.status})",
             "CPR": f"{cpr.direction or 'NONE'} ({cpr.status})",
             "Dual-EMA": f"{ema.direction or 'NONE'} ({ema.status})",
+            "APEX": f"{apex.direction or 'NONE'} ({apex.status})",
             "Consensus": consensus["label"],
         })
 

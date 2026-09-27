@@ -10,6 +10,8 @@ cache — call the module-level functions below instead.
 """
 
 import json
+import threading
+import time as _time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from kiteconnect import KiteConnect, KiteTicker
@@ -27,6 +29,7 @@ from monitoring.logger import logger
 # Process-wide cache of the last-validated KiteConnect client, so repeated
 # requests within a session don't each re-hit the /profile endpoint.
 _cached_kite: Optional[KiteConnect] = None
+_kite_lock = threading.Lock()
 
 
 def save_session(
@@ -57,7 +60,8 @@ def save_session(
 
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
-    _cached_kite = kite
+    with _kite_lock:
+        _cached_kite = kite
     return payload
 
 
@@ -88,7 +92,8 @@ def get_saved_session() -> Optional[Dict[str, Any]]:
 def clear_session() -> None:
     """Clears the in-memory cache and deletes the on-disk session file."""
     global _cached_kite
-    _cached_kite = None
+    with _kite_lock:
+        _cached_kite = None
     if settings.token_file.exists():
         try:
             settings.token_file.unlink()
@@ -97,40 +102,78 @@ def clear_session() -> None:
 
 
 def get_active_kite_with_diagnostics(force_validate: bool = False) -> Tuple[Optional[KiteConnect], Optional[str]]:
-    """Returns (KiteConnect instance, error message). Exactly one is None."""
+    """Returns (KiteConnect instance, error message). Exactly one is None.
+
+    Thread-safe: uses _kite_lock so that on a cold start only one thread
+    actually calls ``kite.profile()`` while the others wait and reuse the
+    result.  This prevents Kite API rate-limit failures from poisoning the
+    cache for concurrent requests.
+    """
     global _cached_kite
 
     session = get_saved_session()
     if not session:
-        _cached_kite = None
+        with _kite_lock:
+            _cached_kite = None
         return None, "No saved Kite session found. Please log in with Kite Connect."
 
     api_key = session.get("api_key")
     access_token = session.get("access_token")
     if not api_key or not access_token:
-        _cached_kite = None
+        with _kite_lock:
+            _cached_kite = None
         return None, "Session file exists but is missing api_key or access_token."
 
+    # Fast path: return already-validated client without acquiring the lock
+    # (reads of a Python object reference are atomic on CPython).
     if _cached_kite is not None and not force_validate:
         return _cached_kite, None
 
-    try:
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
-        profile = kite.profile()
-        if profile and "user_id" in profile:
-            _cached_kite = kite
-            return kite, None
+    # Slow path: only one thread validates at a time.
+    _should_clear = False
+    _err_msg_out = ""
+    with _kite_lock:
+        # Double-check after acquiring the lock — another thread may have
+        # already validated while we were waiting.
+        if _cached_kite is not None and not force_validate:
+            return _cached_kite, None
+
+        # Try up to 2 times — the first failure may be a transient race
+        # (e.g. server reload, network blip). Only clear the session file
+        # if both attempts confirm the token is genuinely invalid.
+        last_err_type = ""
+        last_err_msg = ""
+        for attempt in range(2):
+            try:
+                kite = KiteConnect(api_key=api_key)
+                kite.set_access_token(access_token)
+                profile = kite.profile()
+                if profile and "user_id" in profile:
+                    _cached_kite = kite
+                    return kite, None
+                _cached_kite = None
+                return None, "Kite profile check returned empty profile."
+            except Exception as e:
+                last_err_type = type(e).__name__
+                last_err_msg = str(e)
+                if attempt == 0:
+                    logger.info(f"Kite session validation attempt 1 failed ({last_err_type}): {last_err_msg} — retrying...")
+                    _time.sleep(0.5)
+                else:
+                    logger.warning(f"Kite session validation failed on retry ({last_err_type}): {last_err_msg}")
+
+        # Both attempts failed
         _cached_kite = None
-        return None, "Kite profile check returned empty profile."
-    except Exception as e:
-        err_type = type(e).__name__
-        err_msg = str(e)
-        logger.warning(f"Kite session validation failed ({err_type}): {err_msg}")
-        _cached_kite = None
-        if "TokenException" in err_type or "403" in err_msg or "expired" in err_msg.lower():
-            clear_session()
-        return None, f"Kite session error ({err_type}): {err_msg}"
+        _err_msg_out = f"Kite session error ({last_err_type}): {last_err_msg}"
+        # Only delete the session file for confirmed TokenException (invalid/
+        # expired token), never for transient network/timeout errors.
+        if "TokenException" in last_err_type:
+            _should_clear = True
+
+    # Clear session file outside the lock to avoid deadlock
+    if _should_clear:
+        clear_session()
+    return None, _err_msg_out
 
 
 def get_active_kite() -> Optional[KiteConnect]:

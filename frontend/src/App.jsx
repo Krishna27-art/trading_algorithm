@@ -80,9 +80,9 @@ export default function App() {
           onLogout={handleLogout}
           user={user}
         >
-          {activeTab === 'dashboard' && <DashboardPage onNavigate={setActiveTab} />}
-          {activeTab === 'signals' && <LiveSignalsPage />}
-          {activeTab === 'stocks' && <StocksPage />}
+          {activeTab === 'dashboard' && <DashboardPage onNavigate={setActiveTab} isAuthenticated={authState === 'authenticated'} />}
+          {activeTab === 'signals' && <LiveSignalsPage isAuthenticated={authState === 'authenticated'} />}
+          {activeTab === 'stocks' && <StocksPage isAuthenticated={authState === 'authenticated'} />}
           {activeTab === 'backtest' && <BacktestPage />}
           {activeTab === 'system' && <SystemStatusPage />}
         </AppShell>

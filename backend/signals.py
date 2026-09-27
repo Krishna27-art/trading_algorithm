@@ -188,7 +188,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
     is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
 
-    if not kite and not is_test:
+    if not kite:
         return {
             "status": "AUTH_REQUIRED",
             "data_source": "NONE",
@@ -229,15 +229,17 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
             ltp = item.ltp
             df_15m = None
 
-            # 1. Try reading cached 15m intraday file
+            # 1. Try reading cached 15m intraday file ONLY if it covers today's session
             cache_file = cache_dir / f"{sym}_15m.csv"
             if cache_file.exists():
                 try:
-                    df_15m, _ = HistoricalDataLoader.load_cached_data_with_validation(cache_file)
+                    cached_df, _ = HistoricalDataLoader.load_cached_data_with_validation(cache_file)
+                    if not cached_df.empty and cached_df["datetime"].dt.date.max() >= today:
+                        df_15m = cached_df
                 except Exception:
                     df_15m = None
 
-            # 2. If kite is connected and no cache, try loading real historical 15m bars
+            # 2. If kite is connected and cache does not cover today, fetch real historical 15m bars from Kite
             if (df_15m is None or df_15m.empty) and kite and token:
                 try:
                     start_d = today - timedelta(days=7)
@@ -253,15 +255,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
                     logger.debug(f"Could not load 15m bars for {sym} from Kite: {e}")
                     df_15m = None
 
-            # 3. If in test environment only, provide test data
-            if (df_15m is None or df_15m.empty) and is_test:
-                df_15m = HistoricalDataLoader.generate_synthetic_nifty_data(
-                    days=5,
-                    seed=idx * 17,
-                    base_price=ltp or 2000.0,
-                )
-
-            # In production: if real intraday data is unavailable, skip candidate or mark unavailable
+            # In production: if real intraday data is unavailable, skip candidate or mark unavailable (never fake data)
             if df_15m is None or df_15m.empty:
                 logger.warning(f"Real 15m intraday data unavailable for {sym} (Token {token}) — skipping.")
                 continue
@@ -288,7 +282,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
         key_insights = prediction_service.extract_key_insights(candidates)
         summary = getattr(scanner, "last_pipeline_summary", {})
 
-        if not candidates and not is_test:
+        if not candidates:
             response_payload = {
                 "status": "DATA_UNAVAILABLE",
                 "data_source": "REAL_KITE" if data_source_label == "REAL" else "NONE",
@@ -308,7 +302,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
         else:
             response_payload = {
                 "status": "success",
-                "data_source": "REAL_KITE" if data_source_label == "REAL" else "SYNTHETIC_TEST",
+                "data_source": "REAL_KITE" if data_source_label == "REAL" else "NONE",
                 "timestamp": now.isoformat(),
                 "market_status": "OPEN" if is_open else "CLOSED",
                 "scanned_count": summary.get("universe_count", 300),
@@ -831,7 +825,7 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
         df_eval = pd.DataFrame(candle_dicts)
 
     from strategy.prediction_service import prediction_service
-    preds, _ = prediction_service.evaluate_symbol(
+    preds, consensus = prediction_service.evaluate_symbol(
         symbol=target_inst.symbol,
         df_15m=df_eval,
         current_ltp=ltp,
@@ -842,6 +836,11 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     strategy_levels = pred.levels if pred and pred.levels else {}
     algo_state = pred.status.replace("_", " ") if pred else "SCANNING"
 
+    confidence = round(
+        (consensus.get("agreeing_strategies", 1) / max(consensus.get("total_strategies", 4), 1)) * 100.0,
+        1,
+    )
+
     active_signal = None
     if pred and pred.direction:
         active_signal = {
@@ -851,7 +850,7 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
             "entry": pred.entry or ltp,
             "stop_loss": pred.stop_loss,
             "target": pred.target,
-            "confidence": 85,
+            "confidence": confidence,
         }
 
     # Fetch recent trades from DB

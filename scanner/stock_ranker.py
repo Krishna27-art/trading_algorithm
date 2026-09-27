@@ -232,7 +232,7 @@ class StockUniverseScanner:
                 )
             except Exception as e:
                 logger.warning(f"Could not load history context for {sym}: {e}")
-                avg_vol_20d, atr_14 = volume, round(ltp * 0.02, 2)
+                avg_vol_20d, atr_14 = volume, 0.0
 
             raw_eval_dict = {
                 "symbol": sym,
@@ -372,7 +372,7 @@ class StockUniverseScanner:
         except Exception as e:
             logger.warning(f"Could not load historical context for {symbol}: {e}")
 
-        return 1000000, 25.0
+        return 0, 0.0
 
     def _scan_synthetic(self, seed: int = 42) -> List[StockRankingMetrics]:
         rng = np.random.default_rng(seed)

@@ -277,6 +277,10 @@ class StockUniverse:
     def all_stocks(self) -> List[StockRecord]:
         return list(self._records)
 
+    @property
+    def all_symbols(self) -> List[str]:
+        return [r.symbol for r in self._records]
+
     def get_stock(self, symbol: str) -> Optional[StockRecord]:
         """Lookup StockRecord by tradingsymbol."""
         return self._symbol_map.get(symbol.strip().upper())

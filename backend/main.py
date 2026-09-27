@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.kite import router as kite_router
+from backend.market import router as market_router
 from backend.positions import router as positions_router
 from backend.signals import router as signals_router
 from backend.system import router as system_router
@@ -50,6 +51,7 @@ app.add_middleware(
 )
 
 app.include_router(kite_router)
+app.include_router(market_router)
 app.include_router(signals_router)
 app.include_router(positions_router)
 app.include_router(system_router)

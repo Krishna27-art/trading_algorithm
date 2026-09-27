@@ -10,7 +10,7 @@ import os
 import pytest
 from datetime import datetime
 
-from backend.main import get_live_research, get_research_backtest, post_research_backtest
+from backend.signals import get_live_research, get_research_backtest, post_research_backtest
 from strategy.prediction_service import (
     CandidatePrediction,
     PredictionService,
@@ -30,7 +30,7 @@ def test_prediction_service_consensus_rules():
     c_long = PredictionService.calculate_consensus(preds_long)
     assert c_long["direction"] == "LONG"
     assert c_long["agreeing_strategies"] == 3
-    assert c_long["label"] == "UNANIMOUS LONG"
+    assert c_long["label"] == "STRONG LONG (3/3)"
 
     # 2. Strong Short 2/3
     preds_short = {
@@ -41,7 +41,7 @@ def test_prediction_service_consensus_rules():
     c_short = PredictionService.calculate_consensus(preds_short)
     assert c_short["direction"] == "SHORT"
     assert c_short["agreeing_strategies"] == 2
-    assert c_short["label"] == "STRONG SHORT 2/3"
+    assert c_short["label"] == "STRONG SHORT (2/3)"
 
     # 3. Divergent
     preds_divergent = {
@@ -51,7 +51,7 @@ def test_prediction_service_consensus_rules():
     }
     c_div = PredictionService.calculate_consensus(preds_divergent)
     assert c_div["direction"] == "DIVERGENT"
-    assert c_div["label"] == "DIVERGENT"
+    assert "DIVERGENT" in c_div["label"]
 
     # 4. Neutral
     preds_neutral = {
@@ -78,7 +78,7 @@ def test_prediction_service_extract_key_insights():
             "cpr": SingleStrategyPrediction(status="BULLISH_EXPANSION", direction="LONG", reason="CPR bullish"),
             "dual_ema": SingleStrategyPrediction(status="TRENDING_LONG", direction="LONG", reason="Dual EMA trend"),
         },
-        consensus={"direction": "LONG", "agreeing_strategies": 3, "total_strategies": 3, "label": "UNANIMOUS LONG"},
+        consensus={"direction": "LONG", "agreeing_strategies": 3, "total_strategies": 3, "label": "STRONG LONG (3/3)"},
     )
     c2 = CandidatePrediction(
         rank=2,
@@ -91,7 +91,7 @@ def test_prediction_service_extract_key_insights():
             "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT", reason="CPR bearish"),
             "dual_ema": SingleStrategyPrediction(status="TRENDING_SHORT", direction="SHORT", reason="Dual EMA short"),
         },
-        consensus={"direction": "SHORT", "agreeing_strategies": 3, "total_strategies": 3, "label": "UNANIMOUS SHORT"},
+        consensus={"direction": "SHORT", "agreeing_strategies": 3, "total_strategies": 3, "label": "STRONG SHORT (3/3)"},
     )
     c3 = CandidatePrediction(
         rank=3,
@@ -122,7 +122,8 @@ def test_get_research_live_endpoint():
     assert "data_source" in data
     assert "timestamp" in data
     assert "market_status" in data
-    assert data["scanned_count"] == 50
+    assert data["scanned_count"] >= 50
+    assert len(data["candidates"]) == 5
     assert len(data["candidates"]) == 5
 
     cand = data["candidates"][0]

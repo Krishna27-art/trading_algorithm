@@ -29,6 +29,7 @@ import pandas as pd
 from config.settings import AppSettings, InstrumentConfig, settings
 from config.universe import create_instrument_config_for_equity
 from indicators.vwap import calculate_session_vwap
+from strategy.apex_engine import ApexStrategy
 from strategy.base_strategy import SignalAction, StrategySignal
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
 from strategy.dual_ema_strategy import BufferedDualEMAStrategy
@@ -128,10 +129,11 @@ class PredictionService:
         stock_metric: Optional[Any] = None,
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
         """
-        Runs all 3 strategies independently on the provided instrument data:
+        Runs all 4 strategies independently on the provided instrument data:
         1. orb
         2. cpr
         3. dual_ema
+        4. apex
 
         Returns (predictions_map, consensus_dict).
         """
@@ -141,11 +143,13 @@ class PredictionService:
         orb_pred = self._evaluate_orb(inst, df_15m, ltp)
         cpr_pred = self._evaluate_cpr(inst, df_15m, ltp)
         dual_ema_pred = self._evaluate_dual_ema(inst, df_15m, ltp)
+        apex_pred = self._evaluate_apex(inst, df_15m, ltp)
 
         predictions = {
             "orb": orb_pred,
             "cpr": cpr_pred,
             "dual_ema": dual_ema_pred,
+            "apex": apex_pred,
         }
 
         consensus = self.calculate_consensus(predictions)
@@ -161,6 +165,7 @@ class PredictionService:
         data["date"] = data["datetime"].dt.date
         days = list(data.groupby("date"))
         return data, days
+
 
     def _evaluate_orb(
         self,
@@ -417,7 +422,85 @@ class PredictionService:
             levels=levels,
         )
 
+    def _evaluate_apex(
+        self,
+        inst: InstrumentConfig,
+        df_15m: pd.DataFrame,
+        ltp: float,
+    ) -> SingleStrategyPrediction:
+        """Evaluates actual ApexStrategy independently."""
+        if df_15m.empty:
+            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+
+        _, days = self._prepare_data(df_15m)
+        if not days:
+            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+
+        latest_date, today_df = days[-1]
+        lookback_df = (
+            df_15m.iloc[:-len(today_df)]
+            if len(days) > 1
+            else pd.DataFrame()
+        )
+
+        strategy = ApexStrategy(inst, self.settings.strategy)
+        strategy.seed_context(lookback_df)
+        strategy.reset_session(latest_date)
+
+        last_signal: Optional[StrategySignal] = None
+        for i in range(len(today_df)):
+            row = today_df.iloc[i]
+            candle = {
+                "datetime": row["datetime"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(row.get("volume", 0)),
+            }
+            vwap = float(row.get("vwap", row["close"]))
+            sig = strategy.on_candle(candle, vwap)
+            if sig:
+                last_signal = sig
+
+        analysis = strategy.last_analysis or {}
+        levels = {
+            k: v for k, v in analysis.items()
+            if k not in ("status", "reason", "direction", "entry", "stop_loss", "target")
+        }
+
+        if last_signal:
+            if last_signal.action == SignalAction.BUY:
+                return SingleStrategyPrediction(
+                    status="APEX_LONG",
+                    direction="LONG",
+                    entry=last_signal.price,
+                    stop_loss=last_signal.stop_loss,
+                    target=last_signal.target,
+                    reason=last_signal.reason or "APEX composite score & confirmation long",
+                    levels=levels,
+                )
+            elif last_signal.action == SignalAction.SELL:
+                return SingleStrategyPrediction(
+                    status="APEX_SHORT",
+                    direction="SHORT",
+                    entry=last_signal.price,
+                    stop_loss=last_signal.stop_loss,
+                    target=last_signal.target,
+                    reason=last_signal.reason or "APEX composite score & confirmation short",
+                    levels=levels,
+                )
+
+        status = analysis.get("status", "NO_TRADE")
+        reason = analysis.get("reason", "APEX criteria not met")
+        return SingleStrategyPrediction(
+            status=status,
+            reason=reason,
+            levels=levels,
+        )
+
     @staticmethod
+
     def calculate_consensus(predictions: Dict[str, SingleStrategyPrediction]) -> Dict[str, Any]:
         """
         Computes consensus direction, count of agreeing strategies, and human-readable label

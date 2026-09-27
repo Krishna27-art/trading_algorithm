@@ -17,3 +17,7 @@ export const getStrategyState = (strategy) =>
 // GET /api/strategy/scanner?top_n=&refresh= -> ranked NIFTY-50 universe scan
 export const getScanner = (topN = 5, refresh = false) =>
   apiGet(`/api/strategy/scanner?top_n=${topN}${refresh ? '&refresh=true' : ''}`)
+
+// GET /api/market/prices -> 300-stock universe live market quotes
+export const getMarketPrices = () => apiGet('/api/market/prices')
+

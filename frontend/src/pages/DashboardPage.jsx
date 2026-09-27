@@ -72,8 +72,8 @@ export default function DashboardPage({ onNavigate }) {
         <Card
           title="Positions"
           action={
-            <button onClick={() => onNavigate('positions')} className="text-xs text-[var(--accent)] hover:underline">
-              View all
+            <button onClick={() => onNavigate('stocks')} className="text-xs text-[var(--accent)] hover:underline">
+              View universe
             </button>
           }
         >
@@ -109,8 +109,8 @@ export default function DashboardPage({ onNavigate }) {
         <Card
           title="Risk today"
           action={
-            <button onClick={() => onNavigate('positions')} className="text-xs text-[var(--accent)] hover:underline">
-              Details
+            <button onClick={() => onNavigate('signals')} className="text-xs text-[var(--accent)] hover:underline">
+              Signals
             </button>
           }
         >

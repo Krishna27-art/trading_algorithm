@@ -79,7 +79,7 @@ export default function LoginPage({ onContinuePaper, authError }) {
             onClick={onContinuePaper}
             className="text-xs text-[var(--text-dim)] hover:text-[var(--text)] underline underline-offset-2 cursor-pointer"
           >
-            Continue without connecting (paper trading, no live market data)
+            Continue in offline mode (backtest & analytics only)
           </button>
         </div>
       </div>

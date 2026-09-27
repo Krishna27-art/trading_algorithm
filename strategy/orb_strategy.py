@@ -18,10 +18,12 @@ class IntradayORBStrategy(BaseStrategy):
         self,
         instrument: InstrumentConfig,
         strategy_config: StrategyConfig = settings.strategy,
+        execution_policy: str = "CONSERVATIVE",
     ):
         super().__init__(instrument.symbol)
         self.instrument = instrument
         self.config = strategy_config
+        self.execution_policy = getattr(execution_policy, "value", execution_policy)
 
         # Daily Session State
         self.current_date: Optional[date] = None
@@ -110,7 +112,8 @@ class IntradayORBStrategy(BaseStrategy):
                         f"[{self.symbol}] ORB Established: High={self.orb.high:.2f}, Low={self.orb.low:.2f}, "
                         f"Width={self.orb.width:.2f} pts | Volatility Filter Passed: {self.orb.is_valid_volatility}"
                     )
-            return None
+            if self.orb is None:
+                return None
 
         # 4. Filter Check: Skip if opening range failed baseline volatility cutoff (< 40 pts)
         if not self.orb.is_valid_volatility:
@@ -260,29 +263,118 @@ class IntradayORBStrategy(BaseStrategy):
         return None
 
     def _check_active_position_exits(self, candle: dict) -> Optional[StrategySignal]:
-        """Checks candle High/Low for intrabar stop or target triggers."""
+        """Checks candle Open/High/Low for intrabar stop or target triggers with gap detection."""
+        open_p = candle.get("open", candle["close"])
         high = candle["high"]
         low = candle["low"]
         close = candle["close"]
         bar_time = candle["datetime"]
 
         if self.position == 1:
-            # Trailing Stop to Breakeven check
+            # 1. Gap Open Checks
+            if open_p >= self.target:
+                return StrategySignal(
+                    action=SignalAction.EXIT,
+                    symbol=self.symbol,
+                    timestamp=bar_time,
+                    price=open_p,
+                    reason="PROFIT_TARGET",
+                )
+            if open_p <= self.stop_loss:
+                return StrategySignal(
+                    action=SignalAction.EXIT,
+                    symbol=self.symbol,
+                    timestamp=bar_time,
+                    price=open_p,
+                    reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
+                )
+
+            # 2. Intrabar Hits
+            hit_target = high >= self.target
+            hit_stop = low <= self.stop_loss
+
+            if hit_target and hit_stop:
+                if self.execution_policy == "OPTIMISTIC":
+                    return StrategySignal(
+                        action=SignalAction.EXIT,
+                        symbol=self.symbol,
+                        timestamp=bar_time,
+                        price=self.target,
+                        reason="PROFIT_TARGET",
+                    )
+                else:
+                    return StrategySignal(
+                        action=SignalAction.EXIT,
+                        symbol=self.symbol,
+                        timestamp=bar_time,
+                        price=self.stop_loss,
+                        reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
+                    )
+            elif hit_target:
+                return StrategySignal(
+                    action=SignalAction.EXIT,
+                    symbol=self.symbol,
+                    timestamp=bar_time,
+                    price=self.target,
+                    reason="PROFIT_TARGET",
+                )
+            elif hit_stop:
+                return StrategySignal(
+                    action=SignalAction.EXIT,
+                    symbol=self.symbol,
+                    timestamp=bar_time,
+                    price=self.stop_loss,
+                    reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
+                )
+
+            # 3. Post-bar Trailing Stop Update for subsequent bars
             if not self.trailing_breakeven_active:
                 if high >= (self.entry_price + (self.config.breakeven_r_multiple * self.initial_risk_dist)):
                     self.stop_loss = self.entry_price
                     self.trailing_breakeven_active = True
                     logger.info(f"[{self.symbol}] Trailing SL active: Stop moved to Breakeven ({self.stop_loss:.2f}).")
 
-            if low <= self.stop_loss:
+        elif self.position == -1:
+            # 1. Gap Open Checks
+            if open_p <= self.target:
                 return StrategySignal(
                     action=SignalAction.EXIT,
                     symbol=self.symbol,
                     timestamp=bar_time,
-                    price=self.stop_loss,
+                    price=open_p,
+                    reason="PROFIT_TARGET",
+                )
+            if open_p >= self.stop_loss:
+                return StrategySignal(
+                    action=SignalAction.EXIT,
+                    symbol=self.symbol,
+                    timestamp=bar_time,
+                    price=open_p,
                     reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
                 )
-            elif high >= self.target:
+
+            # 2. Intrabar Hits
+            hit_target = low <= self.target
+            hit_stop = high >= self.stop_loss
+
+            if hit_target and hit_stop:
+                if self.execution_policy == "OPTIMISTIC":
+                    return StrategySignal(
+                        action=SignalAction.EXIT,
+                        symbol=self.symbol,
+                        timestamp=bar_time,
+                        price=self.target,
+                        reason="PROFIT_TARGET",
+                    )
+                else:
+                    return StrategySignal(
+                        action=SignalAction.EXIT,
+                        symbol=self.symbol,
+                        timestamp=bar_time,
+                        price=self.stop_loss,
+                        reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
+                    )
+            elif hit_target:
                 return StrategySignal(
                     action=SignalAction.EXIT,
                     symbol=self.symbol,
@@ -290,29 +382,22 @@ class IntradayORBStrategy(BaseStrategy):
                     price=self.target,
                     reason="PROFIT_TARGET",
                 )
+            elif hit_stop:
+                return StrategySignal(
+                    action=SignalAction.EXIT,
+                    symbol=self.symbol,
+                    timestamp=bar_time,
+                    price=self.stop_loss,
+                    reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
+                )
 
-        elif self.position == -1:
+            # 3. Post-bar Trailing Stop Update for subsequent bars
             if not self.trailing_breakeven_active:
                 if low <= (self.entry_price - (self.config.breakeven_r_multiple * self.initial_risk_dist)):
                     self.stop_loss = self.entry_price
                     self.trailing_breakeven_active = True
                     logger.info(f"[{self.symbol}] Trailing SL active: Stop moved to Breakeven ({self.stop_loss:.2f}).")
 
-            if high >= self.stop_loss:
-                return StrategySignal(
-                    action=SignalAction.EXIT,
-                    symbol=self.symbol,
-                    timestamp=bar_time,
-                    price=self.stop_loss,
-                    reason="BREAKEVEN_SL" if self.trailing_breakeven_active else "STOP_LOSS",
-                )
-            elif low <= self.target:
-                return StrategySignal(
-                    action=SignalAction.EXIT,
-                    symbol=self.symbol,
-                    timestamp=bar_time,
-                    price=self.target,
-                    reason="PROFIT_TARGET",
-                )
-
         return None
+
+

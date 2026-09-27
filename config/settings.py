@@ -11,11 +11,6 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class BrokerType(str, Enum):
-    PAPER = "PAPER"
-    KITE = "KITE"
-
-
 class InstrumentType(str, Enum):
     FUTURES = "FUTURES"
     EQUITY = "EQUITY"
@@ -198,9 +193,6 @@ class VRPConfig(BaseModel):
 
 
 class AppSettings(BaseSettings):
-    # Active broker mode (DEFAULT: PAPER for safety)
-    active_broker: BrokerType = BrokerType.PAPER
-    
     # Target Instruments
     instruments: List[InstrumentConfig] = [
         InstrumentConfig(
@@ -244,7 +236,6 @@ class AppSettings(BaseSettings):
     # Risk limits from .env (₹-denominated caps, separate from percentage-based kill-switch)
     max_capital_per_trade: float = 10000.0
     max_daily_loss_limit: float = 2000.0
-    semi_automated_confirmation: bool = True
 
     # Security — NO DEFAULT: app refuses to start without this set in .env.
     # Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"

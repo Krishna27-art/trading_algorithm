@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from config.universe import (
-    NIFTY_50_CONSTITUENTS,
+    StockUniverse,
     create_instrument_config_for_equity,
     resolve_universe_tokens,
 )
@@ -15,17 +15,22 @@ from scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
 
 
 def test_universe_constituent_count_and_resolution():
-    assert len(NIFTY_50_CONSTITUENTS) == 50
-    assert "RELIANCE" in NIFTY_50_CONSTITUENTS
-    assert "TCS" in NIFTY_50_CONSTITUENTS
-    assert "HDFCBANK" in NIFTY_50_CONSTITUENTS
+    universe = StockUniverse()
+    assert len(universe.all_symbols) == 300
+    assert len(universe.large_cap_100) == 100
+    assert len(universe.mid_cap_100) == 100
+    assert len(universe.small_cap_100) == 100
+    assert "RELIANCE" in universe.all_symbols
+    assert "TCS" in universe.all_symbols
+    assert "HDFCBANK" in universe.all_symbols
 
     tokens = resolve_universe_tokens()
     assert len(tokens) >= 280
-    for sym in NIFTY_50_CONSTITUENTS:
+    for sym in ["RELIANCE", "TCS", "HDFCBANK"]:
         assert sym in tokens
         assert isinstance(tokens[sym], int)
         assert tokens[sym] > 0
+
 
 
 def test_explainable_score_computation():
@@ -117,7 +122,7 @@ def test_create_instrument_config_for_equity():
 
 
 def test_fastapi_scanner_and_multi_symbol_endpoints():
-    from backend.main import get_strategy_telemetry, get_universe_scan, trigger_backtest
+    from backend.signals import get_strategy_telemetry, get_universe_scan, trigger_backtest
 
     scan_res = get_universe_scan(top_n=5)
     assert scan_res["status"] == "success"

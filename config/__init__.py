@@ -1,6 +1,5 @@
 from .settings import (
     AppSettings,
-    BrokerType,
     InstrumentConfig,
     InstrumentType,
     RiskConfig,
@@ -11,7 +10,6 @@ from .settings import (
 
 __all__ = [
     "AppSettings",
-    "BrokerType",
     "InstrumentConfig",
     "InstrumentType",
     "RiskConfig",

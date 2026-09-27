@@ -46,7 +46,7 @@ from tabulate import tabulate
 from backtest.strategy_backtester import StrategyBacktester as EventDrivenBacktester
 from backtest.rolling_walk_forward import RollingWalkForwardValidator as WalkForwardValidator
 from backtest.rolling_walk_forward import RollingWalkForwardValidator
-from config.settings import BrokerType, InstrumentConfig, InstrumentType, settings
+from config.settings import InstrumentConfig, InstrumentType, settings
 from data.historical_loader import HistoricalDataLoader
 from data.market_calendar import MarketCalendar
 from monitoring.logger import logger
@@ -429,120 +429,11 @@ def run_rolling_walk_forward(strategy_name: str = "orb"):
           "no fold ever saw a future candle when deciding a trade.")
 
 
-def run_paper_simulation(instruments: Optional[List[InstrumentConfig]] = None):
-    # execution/execution_engine.py and monitoring/cli_monitor.py do not
-    # exist in this repository — this mode previously crashed with a raw
-    # ImportError partway through setup. Fail once, clearly, up front.
-    try:
-        from execution.execution_engine import ExecutionEngine
-        from monitoring.cli_monitor import CLIMonitor
-    except ImportError as e:
-        print("\n[!] --mode paper is unavailable: required modules are missing "
-              f"({e}).\n    execution/execution_engine.py and monitoring/cli_monitor.py "
-              "have not been implemented in this repository yet.\n"
-              "    Use --mode backtest / --mode rolling / --mode scan / --mode predict instead.")
-        return
-
-    from broker.paper_broker import PaperBrokerAdapter
-    from portfolio.portfolio_manager import PortfolioManager
-    from risk.risk_manager import RiskManager
-
-    print("\n" + "=" * 75)
-    print("  STARTING LIVE PAPER TRADING ENGINE (MULTI-INSTRUMENT SIMULATION)")
-    print("=" * 75)
-
-    target_instruments = instruments or [settings.instruments[0]]
-    broker = PaperBrokerAdapter(initial_capital=settings.risk.initial_capital)
-
-    # PORTFOLIO-WIDE RISK GOVERNANCE:
-    # A single shared PortfolioManager and RiskManager governs all engines.
-    # Enforces 1-trade-per-day max across ALL symbols and 2% daily loss kill-switch.
-    shared_portfolio = PortfolioManager(initial_capital=settings.risk.initial_capital)
-    shared_risk_manager = RiskManager(
-        risk_config=settings.risk,
-        max_portfolio_daily_trades=1,
-    )
-
-    engines = [
-        ExecutionEngine(
-            broker=broker,
-            instrument=inst,
-            app_settings=settings,
-            portfolio=shared_portfolio,
-            risk_manager=shared_risk_manager,
-        )
-        for inst in target_instruments
-    ]
-
-    for engine in engines:
-        engine.start()
-
-    print(f"[+] Active candidate engines: {', '.join(e.instrument.symbol for e in engines)}")
-    print("[+] Shared portfolio-wide risk gate initialized (max 1 trade total across all instruments).")
-
-    today = datetime.now().date()
-    start_t = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
-    end_t = datetime.combine(today, datetime.min.time()).replace(hour=14, minute=35)
-
-    cur_t = start_t
-    # Primary instrument for CLI monitor focus
-    primary_engine = engines[0]
-    cur_price = 24150.0 if primary_engine.instrument.symbol == "NIFTY" else 1500.0
-
-    while cur_t <= end_t:
-        price_step = (cur_t - start_t).total_seconds() / 60
-        if price_step < 30:  # 09:15 to 09:45
-            cur_price += (1.5 if price_step % 2 == 0 else -1.2)
-        elif 30 <= price_step < 75:  # Breakout upward
-            cur_price += 2.2
-        elif price_step >= 75:
-            cur_price += 1.8
-
-        # Process ticks across engines
-        for engine in engines:
-            tick_p = cur_price if engine == primary_engine else (cur_price * 0.98 + (hash(engine.instrument.symbol) % 50))
-            engine.process_tick(price=round(tick_p, 2), volume=1200, timestamp=cur_t)
-
-        phase = MarketCalendar.get_session_phase(cur_t.time()).value
-        orb = getattr(primary_engine.strategy, "orb", None)
-        total_session_trades = sum(shared_risk_manager.daily_trades_count.values())
-
-        CLIMonitor.render_state(
-            symbol=primary_engine.instrument.symbol,
-            ist_time=cur_t,
-            phase=phase,
-            orb_high=orb.high if orb else 0.0,
-            orb_low=orb.low if orb else 0.0,
-            orb_width=orb.width if orb else 0.0,
-            vol_filter_passed=orb.is_valid_volatility if orb else False,
-            vwap=primary_engine.candle_aggregator.current_vwap,
-            ltp=cur_price,
-            position=primary_engine.strategy.position,
-            entry_price=primary_engine.strategy.entry_price,
-            stop_loss=primary_engine.strategy.stop_loss,
-            target=primary_engine.strategy.target,
-            trailing_active=primary_engine.strategy.trailing_breakeven_active,
-            realized_pnl=shared_portfolio.realized_pnl_today,
-            unrealized_pnl=shared_portfolio.unrealized_pnl_today,
-            capital=shared_portfolio.current_capital,
-            trades_today=total_session_trades,
-            kill_switch=shared_risk_manager.kill_switch_active,
-        )
-
-        cur_t += timedelta(minutes=5)
-        time.sleep(0.08)
-
-    for engine in engines:
-        engine.stop()
-
-    print("\n[✓] Multi-instrument simulation completed.")
-
-
 def main():
-    parser = argparse.ArgumentParser(description="NSE Intraday Trading Algorithm Engine")
+    parser = argparse.ArgumentParser(description="NSE Intraday Trading Decision Support System")
     parser.add_argument(
         "--mode",
-        choices=["backtest", "walkforward", "rolling", "paper", "live", "scan", "predict"],
+        choices=["backtest", "walkforward", "rolling", "scan", "predict"],
         default="backtest",
         help="Operational mode (default: backtest)",
     )
@@ -553,16 +444,10 @@ def main():
         help="Trading strategy to run/backtest (default: orb)",
     )
     parser.add_argument(
-        "--broker",
-        choices=["PAPER", "KITE"],
-        default="PAPER",
-        help="Broker adapter (default: PAPER)",
-    )
-    parser.add_argument(
         "--top-n",
         type=int,
         default=5,
-        help="Number of top-ranked universe candidates to display or trade (default: 5)",
+        help="Number of top-ranked universe candidates to display (default: 5)",
     )
     parser.add_argument(
         "--symbol",
@@ -573,7 +458,7 @@ def main():
     parser.add_argument(
         "--scan",
         action="store_true",
-        help="Scan the NIFTY 50 universe to pick top candidates before running backtest / paper trading",
+        help="Scan the NIFTY universe to pick top candidates before running backtest",
     )
     args = parser.parse_args()
 
@@ -600,40 +485,6 @@ def main():
 
     elif args.mode == "rolling":
         run_rolling_walk_forward(strategy_name=args.strategy)
-
-    elif args.mode == "paper":
-        if args.scan:
-            _, top_configs = run_scanner(top_n=args.top_n)
-            run_paper_simulation(instruments=top_configs)
-        else:
-            run_paper_simulation()
-
-    elif args.mode == "live":
-        print("[!] SAFETY WARNING: Live trading mode requested.")
-        if args.broker == "PAPER":
-            print("[+] Defaulting to PAPER mode for safety.")
-            run_paper_simulation()
-        else:
-            confirm = input(f"Are you sure you want to trade REAL money with {args.broker}? (type 'CONFIRM'): ")
-            if confirm.strip() == "CONFIRM":
-                try:
-                    from execution.execution_engine import ExecutionEngine
-                except ImportError as e:
-                    print(f"\n[!] Live execution is unavailable: {e}\n"
-                          "    execution/execution_engine.py has not been implemented in this repository yet.")
-                    return
-
-                print(f"[+] Starting live execution on {args.broker}...")
-                if args.broker == "KITE":
-                    from broker.kite_adapter import KiteBrokerAdapter
-                    broker = KiteBrokerAdapter.get_instance()
-                else:
-                    print("[!] Broker not supported.")
-                    return
-                engine = ExecutionEngine(broker=broker, instrument=settings.instruments[0])
-                engine.start()
-            else:
-                print("[!] Live execution aborted.")
 
 
 if __name__ == "__main__":

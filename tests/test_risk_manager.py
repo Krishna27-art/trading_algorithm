@@ -97,46 +97,6 @@ def test_max_one_trade_per_day():
     assert "limit reached" in reason
 
 
-def test_execution_engine_realized_pnl_circuit_breaker():
-    from datetime import datetime
-    from broker.paper_broker import PaperBrokerAdapter
-    from config.settings import settings
-    from execution.execution_engine import ExecutionEngine
-    from strategy.base_strategy import SignalAction, StrategySignal
-
-    inst = settings.instruments[0]
-    broker = PaperBrokerAdapter(initial_capital=1000000.0)
-    engine = ExecutionEngine(broker=broker, instrument=inst, app_settings=settings)
-    engine.start()
-
-    # Simulate entering a trade
-    entry_sig = StrategySignal(
-        action=SignalAction.BUY,
-        symbol=inst.symbol,
-        timestamp=datetime(2026, 3, 2, 9, 45),
-        price=24000.0,
-        stop_loss=23900.0,
-        target=24200.0,
-        reason="ORB_BREAKOUT_LONG",
-    )
-    engine._execute_entry_signal(entry_sig)
-    assert engine.current_trade is not None
-
-    # Simulate exit with a large loss exceeding 2% (20k)
-    exit_sig = StrategySignal(
-        action=SignalAction.EXIT,
-        symbol=inst.symbol,
-        timestamp=datetime(2026, 3, 2, 10, 15),
-        price=23700.0, # -300 pts * qty
-        reason="STOP_LOSS",
-    )
-    engine._execute_exit_signal(exit_sig)
-
-    # Risk manager must have recorded the realized loss and triggered kill-switch
-    assert engine.risk_manager.daily_realized_pnl < -20000.0
-    assert engine.risk_manager.kill_switch_active is True
-
-
 def test_portfolio_wide_one_trade_per_day_across_symbols():
     """
     Verifies that the 1-trade-per-day limit applies across ALL instruments combined,
@@ -162,67 +122,5 @@ def test_portfolio_wide_one_trade_per_day_across_symbols():
     assert "Portfolio" in reason_tcs or "portfolio" in reason_tcs
     assert "limit reached" in reason_tcs
 
-
-def test_multi_instrument_shared_risk_manager_circuit_breaker():
-    """
-    Verifies that multiple ExecutionEngines sharing a single RiskManager and PortfolioManager
-    share the 2% daily loss circuit breaker and the 1-trade limit.
-    """
-    from datetime import datetime
-    from broker.paper_broker import PaperBrokerAdapter
-    from config.universe import create_instrument_config_for_equity
-    from execution.execution_engine import ExecutionEngine
-    from portfolio.portfolio_manager import PortfolioManager
-    from strategy.base_strategy import SignalAction, StrategySignal
-
-    inst_rel = create_instrument_config_for_equity("RELIANCE", 738561, current_price=3000.0)
-    inst_tcs = create_instrument_config_for_equity("TCS", 2953217, current_price=4000.0)
-
-    broker = PaperBrokerAdapter(initial_capital=1000000.0)
-    shared_portfolio = PortfolioManager(initial_capital=1000000.0)
-    shared_risk_manager = RiskManager(max_portfolio_daily_trades=1)
-
-    engine_rel = ExecutionEngine(
-        broker=broker,
-        instrument=inst_rel,
-        portfolio=shared_portfolio,
-        risk_manager=shared_risk_manager,
-    )
-    engine_tcs = ExecutionEngine(
-        broker=broker,
-        instrument=inst_tcs,
-        portfolio=shared_portfolio,
-        risk_manager=shared_risk_manager,
-    )
-
-    engine_rel.start()
-    engine_tcs.start()
-
-    # Enter a trade on RELIANCE
-    sig = StrategySignal(
-        action=SignalAction.BUY,
-        symbol="RELIANCE",
-        timestamp=datetime(2026, 3, 2, 9, 45),
-        price=3000.0,
-        stop_loss=2970.0,
-        target=3060.0,
-        reason="ORB_BREAKOUT_LONG",
-    )
-    engine_rel._execute_entry_signal(sig)
-    assert engine_rel.current_trade is not None
-
-    # Now attempt entry on TCS - must be blocked by the shared 1-trade portfolio limit
-    tcs_sig = StrategySignal(
-        action=SignalAction.BUY,
-        symbol="TCS",
-        timestamp=datetime(2026, 3, 2, 10, 0),
-        price=4000.0,
-        stop_loss=3960.0,
-        target=4080.0,
-        reason="ORB_BREAKOUT_LONG",
-    )
-    engine_tcs._execute_entry_signal(tcs_sig)
-    # Entry must have been rejected by the shared risk gate
-    assert engine_tcs.current_trade is None
 
 

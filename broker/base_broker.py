@@ -21,12 +21,6 @@ class BaseBrokerAdapter:
     def is_connected(self) -> bool:
         return self._connected
 
-    def place_order(self, order: OrderRecord) -> OrderRecord:
-        raise NotImplementedError
-
-    def cancel_order(self, order_id: str) -> bool:
-        raise NotImplementedError
-
     def get_positions(self) -> List[Dict[str, Any]]:
         return []
 

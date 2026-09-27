@@ -23,8 +23,7 @@ def get_system_health():
         "database": "CONNECTED" if db_file else "ERROR",
         "strategy_engine": "RUNNING",
         "risk_engine": "READY",
-        "order_manager": "READY",
-        "active_broker": "LIVE" if kite_conn else "PAPER",
+        "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
         "overall_status": "READY" if kite_conn else "DISCONNECTED",
         "timestamp": datetime.now().isoformat(),
     }

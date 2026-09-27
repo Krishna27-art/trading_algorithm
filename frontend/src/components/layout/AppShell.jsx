@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { LayoutGrid, Radio, Wallet, History, Activity, Settings, LogOut, Menu, X } from 'lucide-react'
+import { LayoutGrid, Radio, TrendingUp, History, Activity, Settings, LogOut, Menu, X } from 'lucide-react'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
   { id: 'signals', label: 'Signals', icon: Radio },
-  { id: 'positions', label: 'Positions', icon: Wallet },
+  { id: 'stocks', label: 'Stocks', icon: TrendingUp },
   { id: 'backtest', label: 'Backtest', icon: History },
   { id: 'system', label: 'System', icon: Activity },
 ]
@@ -48,7 +48,7 @@ export default function AppShell({ active, onNavigate, onOpenSettings, onLogout,
               ) : (
                 <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-medium">
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                  <span>Paper Trading</span>
+                  <span>Read-Only Mode</span>
                 </div>
               )}
               <button

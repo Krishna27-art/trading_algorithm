@@ -6,7 +6,7 @@ import SettingsModal from './components/layout/SettingsModal'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import LiveSignalsPage from './pages/LiveSignalsPage'
-import PositionsPage from './pages/PositionsPage'
+import StocksPage from './pages/StocksPage'
 import BacktestPage from './pages/BacktestPage'
 import SystemStatusPage from './pages/SystemStatusPage'
 import { getKiteStatus, kiteLogout } from './api/auth'
@@ -17,7 +17,6 @@ export default function App() {
   const [authError, setAuthError] = useState('')
   const [activeTab, setActiveTab] = useState('dashboard')
   const [showSettings, setShowSettings] = useState(false)
-  const [tradingMode, setTradingMode] = useState('PAPER')
 
   useEffect(() => {
     let cancelled = false
@@ -48,7 +47,7 @@ export default function App() {
     }
   }, [])
 
-  const handleContinuePaper = () => {
+  const handleContinueGuest = () => {
     setUser(null)
     setAuthState('guest')
   }
@@ -72,7 +71,7 @@ export default function App() {
           <p className="text-sm">Checking Kite session status…</p>
         </div>
       ) : authState === 'unauthenticated' ? (
-        <LoginPage onContinuePaper={handleContinuePaper} authError={authError} />
+        <LoginPage onContinuePaper={handleContinueGuest} authError={authError} />
       ) : (
         <AppShell
           active={activeTab}
@@ -83,7 +82,7 @@ export default function App() {
         >
           {activeTab === 'dashboard' && <DashboardPage onNavigate={setActiveTab} />}
           {activeTab === 'signals' && <LiveSignalsPage />}
-          {activeTab === 'positions' && <PositionsPage tradingMode={tradingMode} />}
+          {activeTab === 'stocks' && <StocksPage />}
           {activeTab === 'backtest' && <BacktestPage />}
           {activeTab === 'system' && <SystemStatusPage />}
         </AppShell>
@@ -92,10 +91,9 @@ export default function App() {
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
-          tradingMode={tradingMode}
-          onChangeTradingMode={setTradingMode}
         />
       )}
     </ErrorBoundary>
   )
 }
+

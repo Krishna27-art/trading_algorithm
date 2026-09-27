@@ -12,8 +12,8 @@ Tests:
 """
 
 import pytest
-from execution.position_service import PositionService, NormalizedPosition
-from backend.main import app, get_portfolio_positions
+from portfolio.position_service import PositionService, NormalizedPosition
+from backend.positions import get_portfolio_positions
 
 
 def test_position_deduplication():

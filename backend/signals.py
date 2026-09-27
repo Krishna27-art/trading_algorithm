@@ -86,8 +86,8 @@ def get_strategy_state(strategy: Optional[str] = None):
         "breakeven_r_multiple": settings.strategy.breakeven_r_multiple,
         "risk_per_trade_pct": settings.risk.risk_per_trade_pct * 100.0,
         "max_daily_loss_pct": settings.risk.max_daily_loss_pct * 100.0,
-        "active_broker": settings.active_broker.value,
-        "is_paper_trading": settings.active_broker.value == "PAPER",
+        "broker": "ZERODHA_KITE",
+        "read_only": True,
     }
 
 
@@ -106,20 +106,17 @@ def get_strategy_trades():
 def get_universe_scan(
     top_n: int = 5,
     refresh: bool = False,
-    allow_synthetic: Optional[bool] = None,
 ):
     """
-    Scans and ranks the NIFTY 50 universe using real batched Kite quotes.
+    Scans and ranks the 300-stock universe using real batched Kite quotes.
+    Requires an active Kite Connect session.
     """
-    from scanner.stock_ranker import NiftyUniverseScanner
+    from scanner.stock_ranker import StockUniverseScanner
 
     is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    permit_synthetic = allow_synthetic if allow_synthetic is not None else is_test
-
     kite = get_active_kite()
-    scanner = NiftyUniverseScanner()
 
-    if not kite and not permit_synthetic:
+    if not kite and not is_test:
         return {
             "status": "AUTH_REQUIRED",
             "data_source": "NONE",
@@ -131,11 +128,12 @@ def get_universe_scan(
         }
 
     try:
+        scanner = StockUniverseScanner()
         ranked, data_source = scanner.scan_universe(
             kite_client=kite,
             top_n=top_n,
             force_refresh_history=refresh,
-            allow_synthetic=permit_synthetic,
+            allow_synthetic=is_test,
         )
         summary = getattr(scanner, "last_pipeline_summary", {})
         return {
@@ -168,12 +166,13 @@ def get_universe_scan(
 
 
 @router.get("/api/research/live")
-def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthetic: bool = True):
+def get_live_research(top_n: int = 10, force_refresh: bool = False):
     """
     Unified Live Research & Predictions Endpoint.
-    Uses REAL Kite market quotes (or synthetic fallback when unauthenticated/offline)
-    to rank the 300-stock universe, runs the ORB, CPR, and Dual-EMA strategy
-    models on top candidates, calculates consensus, and derives key insights.
+    Uses REAL Kite market quotes and real 15-minute intraday candles to rank
+    the 300-stock universe, run strategy models on top candidates, calculate
+    consensus, and derive key insights.
+    Never fabricates synthetic candles or fake predictions in production.
     """
     import time as time_mod
     from datetime import time as dt_time
@@ -189,7 +188,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthe
     is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
 
-    if not kite and not is_test and not allow_synthetic:
+    if not kite and not is_test:
         return {
             "status": "AUTH_REQUIRED",
             "data_source": "NONE",
@@ -217,7 +216,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthe
         ranked_metrics, data_source_label = scanner.scan_universe(
             kite_client=kite,
             top_n=top_n,
-            allow_synthetic=is_test or allow_synthetic,
+            allow_synthetic=is_test,
         )
 
         candidates: List[CandidatePrediction] = []
@@ -238,8 +237,8 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthe
                 except Exception:
                     df_15m = None
 
-            # 2. If kite is connected and no cache, try loading historical 15m bars
-            if df_15m is None and kite and token:
+            # 2. If kite is connected and no cache, try loading real historical 15m bars
+            if (df_15m is None or df_15m.empty) and kite and token:
                 try:
                     start_d = today - timedelta(days=7)
                     df_15m = HistoricalDataLoader.fetch_real_data(
@@ -254,32 +253,18 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthe
                     logger.debug(f"Could not load 15m bars for {sym} from Kite: {e}")
                     df_15m = None
 
-            # 3. If in test or fallback, generate realistic session bars for simulation
-            if df_15m is None and (is_test or allow_synthetic):
+            # 3. If in test environment only, provide test data
+            if (df_15m is None or df_15m.empty) and is_test:
                 df_15m = HistoricalDataLoader.generate_synthetic_nifty_data(
                     days=5,
                     seed=idx * 17,
                     base_price=ltp or 2000.0,
                 )
 
-            # 4. If still no 15m bars, synthesize a 1-day bar frame from current quote OHLC
-            if df_15m is None:
-                bars = []
-                base = item.prev_close or ltp or 1000.0
-                open_p = item.open_price or ltp or base
-                # Create standard session timestamps
-                for h, m, frac in [(9, 15, 0.0), (9, 30, 0.2), (9, 45, 0.4), (10, 0, 0.6), (10, 15, 0.8), (10, 30, 1.0)]:
-                    bar_dt = datetime.combine(today, dt_time(h, m))
-                    close_p = round(open_p + (ltp - open_p) * frac, 2)
-                    bars.append({
-                        "datetime": bar_dt,
-                        "open": open_p if frac == 0.0 else round(open_p + (ltp - open_p) * (frac - 0.2), 2),
-                        "high": max(open_p, close_p, ltp),
-                        "low": min(open_p, close_p, ltp),
-                        "close": close_p,
-                        "volume": int(item.volume / 6) if item.volume else 10000,
-                    })
-                df_15m = pd.DataFrame(bars)
+            # In production: if real intraday data is unavailable, skip candidate or mark unavailable
+            if df_15m is None or df_15m.empty:
+                logger.warning(f"Real 15m intraday data unavailable for {sym} (Token {token}) — skipping.")
+                continue
 
             preds, consensus = prediction_service.evaluate_symbol(
                 symbol=sym,
@@ -303,16 +288,34 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False, allow_synthe
         key_insights = prediction_service.extract_key_insights(candidates)
         summary = getattr(scanner, "last_pipeline_summary", {})
 
-        response_payload = {
-            "status": "success",
-            "data_source": "REAL_KITE" if data_source_label == "REAL" else "SYNTHETIC_TEST",
-            "timestamp": now.isoformat(),
-            "market_status": "OPEN" if is_open else "CLOSED",
-            "scanned_count": summary.get("universe_count", 300),
-            "returned_count": len(candidates),
-            "candidates": [c.to_dict() for c in candidates],
-            "key_insights": key_insights,
-        }
+        if not candidates and not is_test:
+            response_payload = {
+                "status": "DATA_UNAVAILABLE",
+                "data_source": "REAL_KITE" if data_source_label == "REAL" else "NONE",
+                "timestamp": now.isoformat(),
+                "market_status": "OPEN" if is_open else "CLOSED",
+                "message": "Real 15-minute intraday candle data is currently unavailable from Kite.",
+                "scanned_count": summary.get("universe_count", 300),
+                "returned_count": 0,
+                "candidates": [],
+                "key_insights": {
+                    "top_long": None,
+                    "top_short": None,
+                    "strongest_consensus": None,
+                    "divergent_signals": [],
+                },
+            }
+        else:
+            response_payload = {
+                "status": "success",
+                "data_source": "REAL_KITE" if data_source_label == "REAL" else "SYNTHETIC_TEST",
+                "timestamp": now.isoformat(),
+                "market_status": "OPEN" if is_open else "CLOSED",
+                "scanned_count": summary.get("universe_count", 300),
+                "returned_count": len(candidates),
+                "candidates": [c.to_dict() for c in candidates],
+                "key_insights": key_insights,
+            }
 
         _live_research_cache["timestamp"] = time_mod.time()
         _live_research_cache["top_n"] = top_n

@@ -1,5 +1,7 @@
 """
 Static In-Sample / Out-Of-Sample Walk Forward Validator (70/30 Split).
+Now strategy-aware: pass strategy_name="cpr" / "dual_ema" / "apex" to
+validate any registered strategy (not just ORB).
 """
 
 from dataclasses import dataclass
@@ -22,9 +24,20 @@ class WalkForwardResult:
 
 
 class WalkForwardValidator:
-    def __init__(self, instrument: InstrumentConfig, app_settings: AppSettings = settings):
+    def __init__(
+        self,
+        instrument: InstrumentConfig,
+        app_settings: AppSettings = settings,
+        strategy_name: str = "orb",
+    ):
+        """
+        strategy_name: 'orb' | 'cpr' | 'dual_ema' | 'apex'
+        Selects which backtester class to instantiate for in-sample and
+        out-of-sample periods. Defaults to 'orb' for backwards compatibility.
+        """
         self.instrument = instrument
         self.settings = app_settings
+        self.strategy_name = strategy_name
 
     def validate(
         self,
@@ -47,12 +60,52 @@ class WalkForwardValidator:
         df_in = data[data["datetime"].dt.date.isin(in_sample_dates)].copy()
         df_out = data[data["datetime"].dt.date.isin(out_of_sample_dates)].copy()
 
-        backtester = EventDrivenBacktester(instrument=self.instrument, app_settings=self.settings)
+        # Fix 3.8: Build the correct backtester based on strategy_name
+        from backtest.strategy_backtester import StrategyBacktester
+        if self.strategy_name == "orb":
+            bt_in = EventDrivenBacktester(instrument=self.instrument, app_settings=self.settings)
+            bt_out = EventDrivenBacktester(instrument=self.instrument, app_settings=self.settings)
+        elif self.strategy_name == "cpr":
+            from strategy.cpr_strategy import CPRRegimeBreakoutStrategy
+            bt_in = StrategyBacktester(
+                strategy_factory=lambda: CPRRegimeBreakoutStrategy(self.instrument, self.settings.strategy),
+                instrument=self.instrument, app_settings=self.settings, persist_trades=False,
+            )
+            bt_out = StrategyBacktester(
+                strategy_factory=lambda: CPRRegimeBreakoutStrategy(self.instrument, self.settings.strategy),
+                instrument=self.instrument, app_settings=self.settings, persist_trades=False,
+            )
+        elif self.strategy_name == "dual_ema":
+            from strategy.dual_ema_strategy import BufferedDualEMAStrategy
+            bt_in = StrategyBacktester(
+                strategy_factory=lambda: BufferedDualEMAStrategy(self.instrument, self.settings.strategy),
+                instrument=self.instrument, app_settings=self.settings, persist_trades=False,
+            )
+            bt_out = StrategyBacktester(
+                strategy_factory=lambda: BufferedDualEMAStrategy(self.instrument, self.settings.strategy),
+                instrument=self.instrument, app_settings=self.settings, persist_trades=False,
+            )
+        elif self.strategy_name == "apex":
+            from strategy.apex_engine import ApexStrategy
+            bt_in = StrategyBacktester(
+                strategy_factory=lambda: ApexStrategy(self.instrument, self.settings.strategy),
+                instrument=self.instrument, app_settings=self.settings, persist_trades=False,
+            )
+            bt_out = StrategyBacktester(
+                strategy_factory=lambda: ApexStrategy(self.instrument, self.settings.strategy),
+                instrument=self.instrument, app_settings=self.settings, persist_trades=False,
+            )
+        else:
+            bt_in = EventDrivenBacktester(instrument=self.instrument, app_settings=self.settings)
+            bt_out = EventDrivenBacktester(instrument=self.instrument, app_settings=self.settings)
 
-        in_trades = backtester.generate_trades(df_in, initial_capital=initial_capital)
+        # Out-of-sample gets the in-sample data as pretrain context (no look-ahead)
+        in_trades = bt_in.generate_trades(df_in, initial_capital=initial_capital)
         in_report = PerformanceAnalyzer.generate_report(in_trades, initial_capital=initial_capital)
 
-        out_trades = backtester.generate_trades(df_out, initial_capital=initial_capital)
+        out_trades = bt_out.generate_trades(
+            df_out, initial_capital=initial_capital, pretrain_df=df_in
+        )
         out_report = PerformanceAnalyzer.generate_report(out_trades, initial_capital=initial_capital)
 
         # Retention calculations

@@ -162,7 +162,13 @@ class RollingWalkForwardValidator:
                 f"({len(test_dates)} days), starting capital ₹{starting_capital:,.2f}"
             )
 
-            fold_trades = backtester.generate_trades(df_test, initial_capital=starting_capital)
+            # Fix 2.2: supply the full training window as strategy context so
+            # CPR's pivot regime, Dual-EMA's SMA200, etc. are correctly warmed
+            # up before the test block starts. df_train bars are NEVER traded —
+            # only df_test bars generate positions. No-look-ahead boundary held.
+            fold_trades = backtester.generate_trades(
+                df_test, initial_capital=starting_capital, pretrain_df=df_train
+            )
             report = PerformanceAnalyzer.generate_report(fold_trades, initial_capital=starting_capital)
             running_capital = starting_capital + report.net_pnl
             all_oos_trades.extend(fold_trades)

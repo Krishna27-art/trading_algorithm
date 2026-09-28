@@ -36,8 +36,14 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
-            <StatusPill tone={overallReady ? 'positive' : 'negative'}>
-              {health.status === 'loading' ? 'Checking backend…' : overallReady ? 'Backend connected' : 'Backend disconnected'}
+            <StatusPill tone={health.status === 'success' ? (overallReady ? 'positive' : 'neutral') : 'negative'}>
+              {health.status === 'loading'
+                ? 'Checking backend…'
+                : health.status === 'success'
+                  ? overallReady
+                    ? 'Broker connected'
+                    : 'Backend online (Offline mode)'
+                  : 'Backend disconnected'}
             </StatusPill>
             {telemetry.data && (
               <StatusPill tone={telemetry.data.market_status === 'OPEN' ? 'positive' : 'neutral'}>

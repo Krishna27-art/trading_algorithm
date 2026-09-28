@@ -14,9 +14,11 @@ const STRATEGIES = [
   { id: 'cpr', label: 'CPR' },
   { id: 'dual_ema', label: 'Dual EMA' },
   { id: 'apex', label: 'APEX-AIVEM' },
+  { id: 'sector_impulse', label: 'Sector Impulse' },
+  { id: 'ssf_l5_srm', label: 'SSF-L5-SRM' },
 ]
 
-const ALL_STRATEGY_KEYS = ['orb', 'cpr', 'dual_ema', 'apex']
+const ALL_STRATEGY_KEYS = ['orb', 'cpr', 'dual_ema', 'apex', 'sector_impulse', 'ssf_l5_srm']
 
 export default function LiveSignalsPage({ isAuthenticated }) {
   const [filter, setFilter] = useState('all')
@@ -274,9 +276,11 @@ function labelFor(key) {
       orb: 'ORB',
       cpr: 'CPR',
       dual_ema: 'Dual EMA',
+      apex: 'APEX-AIVEM',
+      sector_impulse: 'Sector Impulse',
+      ssf_l5_srm: 'SSF-L5-SRM',
       nse_rm_100: 'NSE-RM-100',
       nse_vrp_index: 'NSE-VRP-INDEX',
-      apex: 'APEX-AIVEM',
     }[key] || key
   )
 }

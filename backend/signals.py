@@ -51,6 +51,24 @@ STRATEGY_REGISTRY = {
         "timeframe": "15m candles",
         "key_levels": ["OR High", "OR Low", "VWAP"],
     },
+    "apex": {
+        "name": "APEX-AIVEM Pre-Market Catalyst & Momentum Engine",
+        "description": "Composite score (gap/ATR, RVOL, VWAP, candle imbalance) with optional VIX/GIFT-Nifty/sector context",
+        "timeframe": "15m candles",
+        "key_levels": ["VWAP", "ATR Stop", "ATR Target", "Gap/ATR Ratio"],
+    },
+    "sector_impulse": {
+        "name": "Sector Impulse Transmission (SIT)",
+        "description": "Cross-sectional lead-lag transmission trading lagging peers after idiosyncratic volume shock in sector leader",
+        "timeframe": "15m candles",
+        "key_levels": ["Leader Return", "Idiosyncratic Shock", "Gap Sigma", "Time Stop"],
+    },
+    "ssf_l5_srm": {
+        "name": "Single-Stock Futures L5 Microprice & Sector Residual Momentum (SSF-L5-SRM)",
+        "description": "Level-5 order flow imbalance, microprice drift, futures basis z-score, and sector residual momentum",
+        "timeframe": "Tick / L5 Depth / 15m Regime",
+        "key_levels": ["Microprice Dev", "Basis Z-Score", "OFI Imbalance", "Parkinson Vol"],
+    },
 }
 
 
@@ -242,7 +260,9 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
             # 2. If kite is connected and cache does not cover today, fetch real historical 15m bars from Kite
             if (df_15m is None or df_15m.empty) and kite and token:
                 try:
-                    start_d = today - timedelta(days=7)
+                    start_d = today - timedelta(days=45)  # 45 calendar days ≈ 30 trading sessions
+                    # CPR needs 20 prior sessions for its width-percentile regime distribution.
+                    # Dual-EMA needs ~200 15m bars for SMA200 warm-up. 45 days covers both.
                     df_15m = HistoricalDataLoader.fetch_real_data(
                         kite_client=kite,
                         instrument_token=token,
@@ -422,6 +442,33 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
     )
     rep_dual = bt_dual.run(df, initial_capital=settings.risk.initial_capital)
 
+    # 4. APEX Backtest
+    from strategy.apex_engine import ApexStrategy
+    bt_apex = StrategyBacktester(
+        strategy_factory=lambda: ApexStrategy(inst, settings.strategy),
+        instrument=inst,
+        app_settings=settings,
+    )
+    rep_apex = bt_apex.run(df, initial_capital=settings.risk.initial_capital)
+
+    # 5. Sector Impulse Backtest
+    from strategy.sector_impulse_strategy import SectorImpulseStrategy
+    bt_sit = StrategyBacktester(
+        strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy),
+        instrument=inst,
+        app_settings=settings,
+    )
+    rep_sit = bt_sit.run(df, initial_capital=settings.risk.initial_capital)
+
+    # 6. SSF-L5-SRM Backtest
+    from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
+    bt_ssf = StrategyBacktester(
+        strategy_factory=lambda: SsfL5SrmStrategy(inst, settings.strategy),
+        instrument=inst,
+        app_settings=settings,
+    )
+    rep_ssf = bt_ssf.run(df, initial_capital=settings.risk.initial_capital)
+
     def serialize_rep(rep) -> dict:
         pf = rep.profit_factor
         if pf is not None and (pf == float("inf") or pf != pf):
@@ -482,6 +529,39 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
             "net_pnl": round(rep_dual.net_pnl, 2),
             "state": "ACTIVE" if settings.active_strategy.lower() == "dual_ema" else "STANDBY",
         },
+        {
+            "strategy": "APEX-AIVEM Catalyst & Momentum",
+            "strategy_id": "apex",
+            "trades": rep_apex.total_trades,
+            "win_rate": round(rep_apex.win_rate_pct, 1),
+            "profit_factor": round(rep_apex.profit_factor if rep_apex.profit_factor != float("inf") else 99.9, 2),
+            "sharpe": round(rep_apex.sharpe_ratio, 2),
+            "max_drawdown": round(rep_apex.max_drawdown_pct, 1),
+            "net_pnl": round(rep_apex.net_pnl, 2),
+            "state": "ACTIVE" if settings.active_strategy.lower() == "apex" else "STANDBY",
+        },
+        {
+            "strategy": "Sector Impulse Transmission (SIT)",
+            "strategy_id": "sector_impulse",
+            "trades": rep_sit.total_trades,
+            "win_rate": round(rep_sit.win_rate_pct, 1),
+            "profit_factor": round(rep_sit.profit_factor if rep_sit.profit_factor != float("inf") else 99.9, 2),
+            "sharpe": round(rep_sit.sharpe_ratio, 2),
+            "max_drawdown": round(rep_sit.max_drawdown_pct, 1),
+            "net_pnl": round(rep_sit.net_pnl, 2),
+            "state": "ACTIVE" if settings.active_strategy.lower() in ("sector_impulse", "sit") else "STANDBY",
+        },
+        {
+            "strategy": "SSF-L5-SRM Microprice & Residual Momentum",
+            "strategy_id": "ssf_l5_srm",
+            "trades": rep_ssf.total_trades,
+            "win_rate": round(rep_ssf.win_rate_pct, 1),
+            "profit_factor": round(rep_ssf.profit_factor if rep_ssf.profit_factor != float("inf") else 99.9, 2),
+            "sharpe": round(rep_ssf.sharpe_ratio, 2),
+            "max_drawdown": round(rep_ssf.max_drawdown_pct, 1),
+            "net_pnl": round(rep_ssf.net_pnl, 2),
+            "state": "ACTIVE" if settings.active_strategy.lower() in ("ssf_l5_srm", "ssf") else "STANDBY",
+        },
     ]
 
     return {
@@ -492,6 +572,9 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
             "orb": serialize_rep(rep_orb),
             "cpr": serialize_rep(rep_cpr),
             "dual_ema": serialize_rep(rep_dual),
+            "apex": serialize_rep(rep_apex),
+            "sector_impulse": serialize_rep(rep_sit),
+            "ssf_l5_srm": serialize_rep(rep_ssf),
         },
         "comparison": comparison,
     }
@@ -524,9 +607,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
     strat_name = strategy.lower()
 
     # rm100 is a research/portfolio-level strategy, not wired into this
-    # backend's intraday backtester (no backtest.rm100_backtest module
-    # exists here) — fail fast and cleanly instead of importing modules
-    # that only make sense once that engine is un-parked.
+    # backend's intraday backtester — fail fast and cleanly.
     if strat_name == "rm100":
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -617,6 +698,27 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             instrument=inst,
             app_settings=settings,
         )
+    elif strat_name == "apex":
+        from strategy.apex_engine import ApexStrategy
+        backtester = StrategyBacktester(
+            strategy_factory=lambda: ApexStrategy(inst, settings.strategy),
+            instrument=inst,
+            app_settings=settings,
+        )
+    elif strat_name in ("sector_impulse", "sit"):
+        from strategy.sector_impulse_strategy import SectorImpulseStrategy
+        backtester = StrategyBacktester(
+            strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy),
+            instrument=inst,
+            app_settings=settings,
+        )
+    elif strat_name in ("ssf_l5_srm", "ssf"):
+        from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
+        backtester = StrategyBacktester(
+            strategy_factory=lambda: SsfL5SrmStrategy(inst, settings.strategy),
+            instrument=inst,
+            app_settings=settings,
+        )
     else:
         from strategy.orb_strategy import IntradayORBStrategy
         backtester = StrategyBacktester(
@@ -685,7 +787,16 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
         quote_key = f"NSE:{symbol}"
     else:
         target_inst = settings.instruments[0]
-        token = target_inst.instrument_token
+        # Fix 1.4: NIFTY instrument_token is None by default in settings.
+        # Always resolve it via InstrumentResolver or fall back to the known
+        # NSE integer token (256265) rather than passing None to historical_data().
+        from data.instrument_resolver import instrument_resolver
+        kite_pre = get_active_kite()
+        token = (
+            instrument_resolver.resolve_token("NIFTY", exchange="NSE", kite_client=kite_pre)
+            or 256265
+        )
+        target_inst.instrument_token = token
         quote_key = "NSE:NIFTY 50"
 
     now = datetime.now()
@@ -763,7 +874,9 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
                     interval="15minute",
                 )
                 if not intraday_bars:
-                    # If market hasn't generated bars today, pull previous session
+                    # Market hasn't generated bars today (pre-market / holiday).
+                    # Pull the last session's bars — but keep their REAL dates so
+                    # strategies don't think they are replaying today.
                     prev_start = (now - timedelta(days=5)).strftime("%Y-%m-%d")
                     intraday_bars = kite.historical_data(
                         instrument_token=token,
@@ -773,10 +886,20 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
                     )[-15:]
 
                 for bar in intraday_bars:
+                    # Fix 1.5: preserve the original bar datetime — do NOT
+                    # re-stamp it with today's date if it comes from a previous
+                    # session. Strategies must see the real candle date.
                     dt = bar.get("date")
-                    t_str = dt.strftime("%H:%M") if hasattr(dt, "strftime") else str(dt)[11:16]
+                    if hasattr(dt, "strftime"):
+                        t_str = dt.strftime("%H:%M")
+                        bar_date = dt.strftime("%Y-%m-%d")
+                    else:
+                        dt_str = str(dt)
+                        t_str = dt_str[11:16]
+                        bar_date = dt_str[:10]
                     chart_candles.append({
                         "time": t_str,
+                        "date": bar_date,  # real date — never fabricated
                         "open": round(float(bar["open"]), 2),
                         "high": round(float(bar["high"]), 2),
                         "low": round(float(bar["low"]), 2),
@@ -794,6 +917,7 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
         for _, row in df_sample.iterrows():
             chart_candles.append({
                 "time": row["datetime"].strftime("%H:%M"),
+                "date": row["datetime"].strftime("%Y-%m-%d"),
                 "open": round(row["open"], 2),
                 "high": round(row["high"], 2),
                 "low": round(row["low"], 2),
@@ -806,11 +930,16 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     df_eval = pd.DataFrame()
     if chart_candles:
         candle_dicts = []
-        today_date = now.date()
         for c in chart_candles:
             try:
+                # Fix 1.5: use the real bar date preserved in the "date" field,
+                # not today's date. This prevents previous-session candles from
+                # appearing to belong to today when strategies evaluate them.
+                bar_date_str = c.get("date", now.strftime("%Y-%m-%d"))
                 t_parts = c["time"].split(":")
-                c_dt = datetime.combine(today_date, time(int(t_parts[0]), int(t_parts[1])))
+                from datetime import date as dt_date
+                bar_date = dt_date.fromisoformat(bar_date_str)
+                c_dt = datetime.combine(bar_date, time(int(t_parts[0]), int(t_parts[1])))
             except Exception:
                 c_dt = now
             candle_dicts.append({
@@ -836,10 +965,16 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     strategy_levels = pred.levels if pred and pred.levels else {}
     algo_state = pred.status.replace("_", " ") if pred else "SCANNING"
 
-    confidence = round(
-        (consensus.get("agreeing_strategies", 1) / max(consensus.get("total_strategies", 4), 1)) * 100.0,
+    # Fix 3.7: Separate strategy-specific confidence from consensus confidence.
+    # consensus_confidence = fraction of all evaluated strategies that agree.
+    # strategy_confidence = selected strategy's signal strength (direction set = 100%, no direction = 0%).
+    total_strategies = max(consensus.get("total_strategies", len(preds)), 1)
+    consensus_confidence = round(
+        (consensus.get("agreeing_strategies", 1) / total_strategies) * 100.0,
         1,
     )
+    strategy_has_direction = pred and pred.direction is not None
+    strategy_confidence = 100.0 if strategy_has_direction else 0.0
 
     active_signal = None
     if pred and pred.direction:
@@ -850,7 +985,10 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
             "entry": pred.entry or ltp,
             "stop_loss": pred.stop_loss,
             "target": pred.target,
-            "confidence": confidence,
+            "strategy_confidence": strategy_confidence,
+            "consensus_confidence": consensus_confidence,
+            # Keep legacy field so existing frontend code doesn't break
+            "confidence": consensus_confidence,
         }
 
     # Fetch recent trades from DB
@@ -859,21 +997,23 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     active_trade = None
     if trades and not trades[0].get("exit_price"):
         t = trades[0]
-        qty = t.get("quantity", target_inst.lot_size)
-        direction = t.get("direction", "BUY")
-        entry_p = t.get("entry_price", ltp)
-        unrealized = (ltp - entry_p) * qty if direction == "BUY" else (entry_p - ltp) * qty
-        active_trade = {
-            "id": t.get("trade_id", "TRD_01"),
-            "symbol": t.get("symbol", target_inst.symbol),
-            "direction": direction,
-            "entry_price": entry_p,
-            "current_price": ltp,
-            "stop_loss": t.get("initial_stop", entry_p * 0.99),
-            "target": t.get("initial_target", entry_p * 1.02),
-            "quantity": qty,
-            "unrealized_pnl": round(unrealized, 2),
-        }
+        qty = t.get("quantity")  # Fix 2.9: no fabricated fallback
+        direction = t.get("direction")
+        entry_p = t.get("entry_price")
+        # Only build active_trade card when all essential fields are real DB values
+        if qty and direction and entry_p:
+            unrealized = (ltp - entry_p) * qty if direction == "BUY" else (entry_p - ltp) * qty
+            active_trade = {
+                "id": t.get("trade_id"),          # None if missing — not "TRD_01"
+                "symbol": t.get("symbol"),
+                "direction": direction,
+                "entry_price": entry_p,
+                "current_price": ltp,
+                "stop_loss": t.get("initial_stop"),   # None if missing — not entry*0.99
+                "target": t.get("initial_target"),    # None if missing — not entry*1.02
+                "quantity": qty,
+                "unrealized_pnl": round(unrealized, 2),
+            }
 
     # Risk metrics
     capital = settings.risk.initial_capital

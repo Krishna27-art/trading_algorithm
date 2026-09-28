@@ -247,7 +247,9 @@ def test_stock_universe_validation_failure_raises_error(tmp_path):
     import json
     from config.universe import StockUniverse
 
-    # Case 1: Less than 300 stocks (299)
+    # Case 1: Less than 300 stocks (299) — soft-degrade: no ValueError, but a warning is logged
+    # (Fix 3.4: universe no longer hard-crashes on count mismatch)
+    import logging
     data_invalid_count = [
         {"symbol": f"SYM{i}", "name": f"Name{i}", "market_cap_rank": i + 1, "category": "large" if i < 100 else ("mid" if i < 200 else "small")}
         for i in range(299)
@@ -255,10 +257,13 @@ def test_stock_universe_validation_failure_raises_error(tmp_path):
     invalid_file = tmp_path / "invalid_count.json"
     invalid_file.write_text(json.dumps(data_invalid_count))
 
-    with pytest.raises(ValueError, match="Total stock count is 299, expected exactly 300"):
-        StockUniverse(json_path=invalid_file)
+    with pytest.warns(None) if False else __import__("contextlib").nullcontext():
+        # Should NOT raise — universe degrades gracefully
+        uni_partial = StockUniverse(json_path=invalid_file)
+        assert len(uni_partial.all_stocks) == 299  # 299 valid stocks were loaded
 
-    # Case 2: Duplicate symbol
+    # Case 2: Duplicate symbol — still logs an error but does NOT crash
+
     data_duplicate = [
         {"symbol": "RELIANCE" if i in (0, 1) else f"SYM{i}", "name": f"Name{i}", "market_cap_rank": i + 1, "category": "large" if i < 100 else ("mid" if i < 200 else "small")}
         for i in range(300)
@@ -266,8 +271,12 @@ def test_stock_universe_validation_failure_raises_error(tmp_path):
     duplicate_file = tmp_path / "duplicate.json"
     duplicate_file.write_text(json.dumps(data_duplicate))
 
-    with pytest.raises(ValueError, match="Duplicate stock symbol 'RELIANCE'"):
-        StockUniverse(json_path=duplicate_file)
+    with __import__("contextlib").nullcontext():
+        # Duplicate symbol is logged as an error but does NOT raise (soft-degrade)
+        uni_dup = StockUniverse(json_path=duplicate_file)
+        # 'RELIANCE' appears twice in the source; only the first occurrence is kept
+        symbols = [r.symbol for r in uni_dup.all_stocks]
+        assert symbols.count("RELIANCE") <= 1
 
 
 def test_instrument_resolver_300_universe_and_unresolved_reporting():

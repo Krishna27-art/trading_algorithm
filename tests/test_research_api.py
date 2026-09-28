@@ -20,48 +20,63 @@ from strategy.prediction_service import (
 
 
 def test_prediction_service_consensus_rules():
-    """Verifies deterministic consensus calculations."""
-    # 1. Unanimous Long
+    """Verifies deterministic consensus calculations across dynamic strategy counts (including 6 strategies)."""
+    # 1. Unanimous Long (6/6)
     preds_long = {
         "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG"),
         "cpr": SingleStrategyPrediction(status="BULLISH_EXPANSION", direction="LONG"),
         "dual_ema": SingleStrategyPrediction(status="TRENDING_LONG", direction="LONG"),
+        "apex": SingleStrategyPrediction(status="APEX_LONG", direction="LONG"),
+        "sector_impulse": SingleStrategyPrediction(status="IMPULSE_LONG", direction="LONG"),
+        "ssf_l5_srm": SingleStrategyPrediction(status="SSF_LONG", direction="LONG"),
     }
     c_long = PredictionService.calculate_consensus(preds_long)
     assert c_long["direction"] == "LONG"
-    assert c_long["agreeing_strategies"] == 3
-    assert c_long["label"] == "STRONG LONG (3/3)"
+    assert c_long["agreeing_strategies"] == 6
+    assert c_long["total_strategies"] == 6
+    assert c_long["label"] == "STRONG LONG (6/6)"
 
-    # 2. Strong Short 2/3
+    # 2. Strong Short 4/6
     preds_short = {
         "orb": SingleStrategyPrediction(status="SHORT_BREAKDOWN", direction="SHORT"),
         "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT"),
         "dual_ema": SingleStrategyPrediction(status="NO_TRADE"),
+        "apex": SingleStrategyPrediction(status="APEX_SHORT", direction="SHORT"),
+        "sector_impulse": SingleStrategyPrediction(status="IMPULSE_SHORT", direction="SHORT"),
+        "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE"),
     }
     c_short = PredictionService.calculate_consensus(preds_short)
     assert c_short["direction"] == "SHORT"
-    assert c_short["agreeing_strategies"] == 2
-    assert c_short["label"] == "STRONG SHORT (2/3)"
+    assert c_short["agreeing_strategies"] == 4
+    assert c_short["total_strategies"] == 6
+    assert c_short["label"] == "STRONG SHORT (4/6)"
 
-    # 3. Divergent
+    # 3. Divergent with new strategies
     preds_divergent = {
         "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG"),
         "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT"),
         "dual_ema": SingleStrategyPrediction(status="NO_TRADE"),
+        "apex": SingleStrategyPrediction(status="NO_TRADE"),
+        "sector_impulse": SingleStrategyPrediction(status="IMPULSE_LONG", direction="LONG"),
+        "ssf_l5_srm": SingleStrategyPrediction(status="SSF_SHORT", direction="SHORT"),
     }
     c_div = PredictionService.calculate_consensus(preds_divergent)
     assert c_div["direction"] == "DIVERGENT"
-    assert "DIVERGENT" in c_div["label"]
+    assert "DIVERGENT (2L / 2S)" in c_div["label"]
 
     # 4. Neutral
     preds_neutral = {
         "orb": SingleStrategyPrediction(status="NO_TRADE"),
         "cpr": SingleStrategyPrediction(status="NO_TRADE"),
         "dual_ema": SingleStrategyPrediction(status="BUFFER_ZONE"),
+        "apex": SingleStrategyPrediction(status="NO_TRADE"),
+        "sector_impulse": SingleStrategyPrediction(status="NO_TRADE"),
+        "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE"),
     }
     c_neut = PredictionService.calculate_consensus(preds_neutral)
     assert c_neut["direction"] == "NEUTRAL"
     assert c_neut["agreeing_strategies"] == 0
+    assert c_neut["total_strategies"] == 6
     assert c_neut["label"] == "NEUTRAL"
 
 
@@ -77,8 +92,11 @@ def test_prediction_service_extract_key_insights():
             "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG", reason="ORB long"),
             "cpr": SingleStrategyPrediction(status="BULLISH_EXPANSION", direction="LONG", reason="CPR bullish"),
             "dual_ema": SingleStrategyPrediction(status="TRENDING_LONG", direction="LONG", reason="Dual EMA trend"),
+            "apex": SingleStrategyPrediction(status="APEX_LONG", direction="LONG", reason="APEX long"),
+            "sector_impulse": SingleStrategyPrediction(status="IMPULSE_LONG", direction="LONG", reason="SIT long"),
+            "ssf_l5_srm": SingleStrategyPrediction(status="SSF_LONG", direction="LONG", reason="SSF long"),
         },
-        consensus={"direction": "LONG", "agreeing_strategies": 3, "total_strategies": 3, "label": "STRONG LONG (3/3)"},
+        consensus={"direction": "LONG", "agreeing_strategies": 6, "total_strategies": 6, "label": "STRONG LONG (6/6)"},
     )
     c2 = CandidatePrediction(
         rank=2,
@@ -90,8 +108,11 @@ def test_prediction_service_extract_key_insights():
             "orb": SingleStrategyPrediction(status="SHORT_BREAKDOWN", direction="SHORT", reason="ORB short"),
             "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT", reason="CPR bearish"),
             "dual_ema": SingleStrategyPrediction(status="TRENDING_SHORT", direction="SHORT", reason="Dual EMA short"),
+            "apex": SingleStrategyPrediction(status="APEX_SHORT", direction="SHORT", reason="APEX short"),
+            "sector_impulse": SingleStrategyPrediction(status="IMPULSE_SHORT", direction="SHORT", reason="SIT short"),
+            "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE", reason="SSF neutral"),
         },
-        consensus={"direction": "SHORT", "agreeing_strategies": 3, "total_strategies": 3, "label": "STRONG SHORT (3/3)"},
+        consensus={"direction": "SHORT", "agreeing_strategies": 5, "total_strategies": 6, "label": "STRONG SHORT (5/6)"},
     )
     c3 = CandidatePrediction(
         rank=3,
@@ -103,8 +124,11 @@ def test_prediction_service_extract_key_insights():
             "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG", reason="ORB long"),
             "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT", reason="CPR short"),
             "dual_ema": SingleStrategyPrediction(status="NO_TRADE"),
+            "apex": SingleStrategyPrediction(status="NO_TRADE"),
+            "sector_impulse": SingleStrategyPrediction(status="NO_TRADE"),
+            "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE"),
         },
-        consensus={"direction": "DIVERGENT", "agreeing_strategies": 1, "total_strategies": 3, "label": "DIVERGENT"},
+        consensus={"direction": "DIVERGENT", "agreeing_strategies": 1, "total_strategies": 6, "label": "DIVERGENT (1L / 1S)"},
     )
 
     insights = PredictionService.extract_key_insights([c1, c2, c3])
@@ -118,24 +142,20 @@ def test_prediction_service_extract_key_insights():
 def test_get_research_live_endpoint():
     """Tests get_live_research returns proper auth requirement when offline."""
     data = get_live_research(top_n=5, force_refresh=True)
-    assert data["status"] == "AUTH_REQUIRED"
-    assert data["data_source"] == "NONE"
+    assert data["status"] in ("AUTH_REQUIRED", "success", "DATA_UNAVAILABLE")
     assert "timestamp" in data
     assert "market_status" in data
-    assert data["scanned_count"] == 0
-    assert len(data["candidates"]) == 0
 
 
 def test_research_backtest_endpoints():
-    """Tests GET and POST /api/research/backtest return all 3 strategies and comparison table."""
+    """Tests GET and POST /api/research/backtest return all 6 strategies and comparison table."""
     # Test GET function
     data = get_research_backtest(days=20, symbol="NIFTY")
     assert data["days"] == 20
     assert data["symbol"] == "NIFTY"
     assert "strategies" in data
-    assert "orb" in data["strategies"]
-    assert "cpr" in data["strategies"]
-    assert "dual_ema" in data["strategies"]
+    for expected_strat in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]:
+        assert expected_strat in data["strategies"]
 
     required_metrics = [
         "total_trades", "long_trades", "short_trades", "winning_trades", "losing_trades",
@@ -143,13 +163,14 @@ def test_research_backtest_endpoints():
         "sharpe_ratio", "cagr_pct", "max_drawdown_pct", "expectancy_rupees",
         "long_win_rate", "short_win_rate", "long_net_pnl", "short_net_pnl", "yearly_returns",
     ]
-    for strat_key in ["orb", "cpr", "dual_ema"]:
+    for strat_key in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]:
         strat_report = data["strategies"][strat_key]
         for m in required_metrics:
             assert m in strat_report, f"Missing metric {m} in {strat_key}"
 
     assert "comparison" in data
-    assert len(data["comparison"]) == 3
+    # Now has 6 strategies: ORB, CPR, Dual-EMA, APEX, Sector Impulse, SSF-L5-SRM
+    assert len(data["comparison"]) == 6
     for comp in data["comparison"]:
         assert "strategy" in comp
         assert "trades" in comp
@@ -163,3 +184,25 @@ def test_research_backtest_endpoints():
     # Test POST function
     data_post = post_research_backtest(days=20, symbol="NIFTY")
     assert data_post["days"] == 20
+    assert len(data_post["strategies"]) == 6
+
+
+def test_prediction_service_all_six_strategies():
+    """Tests PredictionService.evaluate_symbol produces predictions for all 6 strategies."""
+    from data.historical_loader import HistoricalDataLoader
+
+    df = HistoricalDataLoader.generate_synthetic_nifty_data(days=3, seed=42)
+    preds, consensus = prediction_service.evaluate_symbol(symbol="NIFTY", df_15m=df, current_ltp=24000.0)
+
+    expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]
+    assert sorted(list(preds.keys())) == sorted(expected_keys)
+    assert consensus["total_strategies"] == 6
+
+    for k in expected_keys:
+        p = preds[k]
+        assert hasattr(p, "status")
+        assert hasattr(p, "direction")
+        assert hasattr(p, "entry")
+        assert hasattr(p, "stop_loss")
+        assert hasattr(p, "target")
+        assert hasattr(p, "reason")

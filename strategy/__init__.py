@@ -2,13 +2,21 @@ from .base_strategy import BaseStrategy, SignalAction, StrategySignal
 from .orb_strategy import IntradayORBStrategy
 from .cpr_strategy import CPRRegimeBreakoutStrategy
 from .dual_ema_strategy import BufferedDualEMAStrategy
+from .sector_impulse_strategy import SectorImpulseStrategy, SITConfig, PeerContext
+from .ssf_l5_srm_strategy import SsfL5SrmStrategy, SSFConfig, BookSnapshot
 
 __all__ = [
-    # intraday, single-instrument (ORB, CPR, Dual-EMA)
+    # intraday, single-instrument (ORB, CPR, Dual-EMA, Sector Impulse, SSF-L5-SRM)
     "BaseStrategy",
     "IntradayORBStrategy",
     "CPRRegimeBreakoutStrategy",
     "BufferedDualEMAStrategy",
+    "SectorImpulseStrategy",
+    "SITConfig",
+    "PeerContext",
+    "SsfL5SrmStrategy",
+    "SSFConfig",
+    "BookSnapshot",
     "SignalAction",
     "StrategySignal",
 ]

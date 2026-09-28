@@ -25,6 +25,7 @@ from backend.kite import router as kite_router
 from backend.market import router as market_router
 from backend.positions import router as positions_router
 from backend.signals import router as signals_router
+from backend.stream import router as stream_router
 from backend.system import router as system_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,4 +55,5 @@ app.include_router(kite_router)
 app.include_router(market_router)
 app.include_router(signals_router)
 app.include_router(positions_router)
+app.include_router(stream_router)
 app.include_router(system_router)

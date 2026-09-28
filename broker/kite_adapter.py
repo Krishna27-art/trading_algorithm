@@ -18,6 +18,7 @@ from kiteconnect import KiteConnect, KiteTicker
 
 from broker.base_broker import BaseBrokerAdapter
 from config.settings import settings
+from data.candle_aggregator import MultiSymbolCandleAggregator
 from database.models import OrderDirection, OrderRecord, OrderStatus, OrderType
 from monitoring.logger import logger
 
@@ -266,6 +267,93 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
             logger.error(f"[{self.name}] Error fetching margins: {e}")
             return {"net": 0.0, "available_cash": 0.0}
 
-    def start_market_stream(self, symbols: List[str], on_tick: Callable[[float, int, datetime], None]):
-        self.tick_callback = on_tick
-        logger.info(f"[{self.name}] KiteTicker stream configured for {symbols}.")
+    def start_market_stream(
+        self,
+        token_to_symbol: Dict[int, str],
+        on_candle_close: Callable[[dict, float], None],
+        timeframe_minutes: int = 15,
+    ) -> None:
+        """
+        Fix 2.3: Start a real KiteTicker WebSocket connection.
+        Ticks are routed through MultiSymbolCandleAggregator which fires
+        on_candle_close(candle_dict, vwap) each time a 15-minute candle closes.
+
+        token_to_symbol: {instrument_token: "SYMBOL"} for all instruments to subscribe.
+        on_candle_close: callback invoked when a candle completes.
+        """
+        if not token_to_symbol:
+            logger.warning(f"[{self.name}] start_market_stream called with no tokens.")
+            return
+
+        session = get_saved_session()
+        if not session:
+            raise RuntimeError("[KiteBrokerAdapter] No active Kite session. Run auth.py first.")
+
+        api_key = session["api_key"]
+        access_token = session["access_token"]
+
+        # Build the candle aggregator
+        self._aggregator = MultiSymbolCandleAggregator(
+            token_to_symbol_map=token_to_symbol,
+            timeframe_minutes=timeframe_minutes,
+            on_candle_close=on_candle_close,
+        )
+        self.tick_callback = on_candle_close
+        tokens = list(token_to_symbol.keys())
+
+        # Build and connect KiteTicker
+        kws = KiteTicker(api_key, access_token)
+
+        def on_ticks(ws, ticks):
+            try:
+                self._aggregator.process_ticks(ticks)
+            except Exception as e:
+                logger.error(f"[{self.name}] Error processing ticks: {e}")
+
+        def on_connect(ws, response):
+            ws.subscribe(tokens)
+            ws.set_mode(ws.MODE_FULL, tokens)
+            logger.info(
+                f"[{self.name}] KiteTicker connected — subscribed {len(tokens)} instruments "
+                f"({', '.join(str(t) for t in tokens[:5])}{'...' if len(tokens) > 5 else ''})"
+            )
+
+        def on_close(ws, code, reason):
+            logger.warning(f"[{self.name}] KiteTicker closed: code={code} reason={reason}")
+
+        def on_error(ws, code, reason):
+            logger.error(f"[{self.name}] KiteTicker error: code={code} reason={reason}")
+
+        def on_reconnect(ws, attempts_count):
+            logger.info(f"[{self.name}] KiteTicker reconnecting (attempt {attempts_count})...")
+
+        kws.on_ticks = on_ticks
+        kws.on_connect = on_connect
+        kws.on_close = on_close
+        kws.on_error = on_error
+        kws.on_reconnect = on_reconnect
+
+        self.kws = kws
+        kws.connect(threaded=True)
+        logger.info(f"[{self.name}] KiteTicker stream started (threaded).")
+
+    def stop_market_stream(self) -> None:
+        """Gracefully close the KiteTicker WebSocket connection."""
+        if self.kws:
+            try:
+                self.kws.close()
+                logger.info(f"[{self.name}] KiteTicker stream stopped.")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Error stopping KiteTicker: {e}")
+            finally:
+                self.kws = None
+        if hasattr(self, "_aggregator"):
+            self._aggregator = None
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton for use by backend/stream.py and other modules that
+# need to start/stop the WebSocket market stream. This follows the same
+# pattern as the shared _cached_kite for the REST session.
+# ---------------------------------------------------------------------------
+kite_broker_adapter = KiteBrokerAdapter()

@@ -2,19 +2,15 @@
 Unified Strategy Prediction Service.
 
 Executes the REAL strategy implementations:
-- IntradayORBStrategy (strategy/orb_strategy.py)
-- CPRRegimeBreakoutStrategy (strategy/cpr_strategy.py)
-- BufferedDualEMAStrategy (strategy/dual_ema_strategy.py)
+1. IntradayORBStrategy (strategy/orb_strategy.py)
+2. CPRRegimeBreakoutStrategy (strategy/cpr_strategy.py)
+3. BufferedDualEMAStrategy (strategy/dual_ema_strategy.py)
+4. ApexStrategy (strategy/apex_engine.py)
+5. SectorImpulseStrategy (strategy/sector_impulse_strategy.py)
+6. SsfL5SrmStrategy (strategy/ssf_l5_srm_strategy.py)
 
 Provides a single source of truth for live candidate predictions, consensus
-calculations, and key market insights.
-
-REMOVED vs. the original: NSE-RM-100 (residual momentum), NSE-VRP-INDEX
-(variance risk premium), and APEX-AIVEM (pre-market/catalyst) evaluation.
-Those are portfolio-level or research-stage engines outside the intraday
-ORB/CPR/Dual-EMA scope this service now covers; their strategy modules
-(strategy/residual_momentum.py, strategy/vrp_index.py, strategy/apex_engine.py)
-are unaffected and can still be driven directly by run_portfolio.py.
+calculations, and key market insights across all 6 strategies.
 """
 
 from __future__ import annotations
@@ -34,6 +30,8 @@ from strategy.base_strategy import SignalAction, StrategySignal
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
 from strategy.dual_ema_strategy import BufferedDualEMAStrategy
 from strategy.orb_strategy import IntradayORBStrategy
+from strategy.sector_impulse_strategy import SectorImpulseStrategy, SITConfig
+from strategy.ssf_l5_srm_strategy import BookSnapshot, SsfL5SrmStrategy, SSFConfig
 
 
 @dataclass
@@ -109,10 +107,13 @@ class CandidatePrediction:
 
 class PredictionService:
     """
-    Evaluates the 3 intraday strategies independently across candidate instruments.
-    1. ORB (Intraday Opening Range Breakout)
-    2. CPR (Central Pivot Range Regime Breakout)
-    3. Dual-EMA (Buffered Dual-EMA Trend)
+    Evaluates all 6 intraday strategies independently across candidate instruments.
+    1. ORB            (Intraday Opening Range Breakout)
+    2. CPR            (Central Pivot Range Regime Breakout)
+    3. Dual-EMA       (Buffered Dual-EMA Trend)
+    4. APEX           (APEX-AIVEM Composite Score & Momentum Engine)
+    5. Sector Impulse (Sector Impulse Transmission - SIT)
+    6. SSF-L5-SRM     (Single-Stock Futures Lead-Lag & Level-5 Microprice Drift)
     """
 
     def __init__(self, app_settings: AppSettings = settings):
@@ -129,11 +130,13 @@ class PredictionService:
         stock_metric: Optional[Any] = None,
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
         """
-        Runs all 4 strategies independently on the provided instrument data:
+        Runs all 6 strategies independently on the provided instrument data:
         1. orb
         2. cpr
         3. dual_ema
         4. apex
+        5. sector_impulse
+        6. ssf_l5_srm
 
         Returns (predictions_map, consensus_dict).
         """
@@ -144,12 +147,16 @@ class PredictionService:
         cpr_pred = self._evaluate_cpr(inst, df_15m, ltp)
         dual_ema_pred = self._evaluate_dual_ema(inst, df_15m, ltp)
         apex_pred = self._evaluate_apex(inst, df_15m, ltp)
+        sector_impulse_pred = self._evaluate_sector_impulse(inst, df_15m, ltp)
+        ssf_l5_srm_pred = self._evaluate_ssf_l5_srm(inst, df_15m, ltp)
 
         predictions = {
             "orb": orb_pred,
             "cpr": cpr_pred,
             "dual_ema": dual_ema_pred,
             "apex": apex_pred,
+            "sector_impulse": sector_impulse_pred,
+            "ssf_l5_srm": ssf_l5_srm_pred,
         }
 
         consensus = self.calculate_consensus(predictions)
@@ -499,12 +506,174 @@ class PredictionService:
             levels=levels,
         )
 
-    @staticmethod
+    def _evaluate_sector_impulse(
+        self,
+        inst: InstrumentConfig,
+        df_15m: pd.DataFrame,
+        ltp: float,
+    ) -> SingleStrategyPrediction:
+        """Evaluates SectorImpulseStrategy."""
+        if df_15m.empty:
+            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
 
+        _, days = self._prepare_data(df_15m)
+        if not days:
+            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+
+        latest_date, today_df = days[-1]
+        lookback_df = (
+            df_15m.iloc[:-len(today_df)]
+            if len(days) > 1
+            else pd.DataFrame()
+        )
+
+        strategy = SectorImpulseStrategy(inst, self.settings.strategy)
+        strategy.seed_context(lookback_df)
+        strategy.reset_session(latest_date)
+
+        last_signal: Optional[StrategySignal] = None
+        for i in range(len(today_df)):
+            row = today_df.iloc[i]
+            candle = {
+                "datetime": row["datetime"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(row.get("volume", 0)),
+            }
+            vwap = float(row.get("vwap", row["close"]))
+            sig = strategy.on_candle(candle, vwap)
+            if sig:
+                last_signal = sig
+
+        levels: Dict[str, Any] = {}
+        if strategy.model:
+            levels = {
+                "lead_lag_k": strategy.model.get("k"),
+                "rho": round(float(strategy.model.get("rho", 0.0)), 3),
+                "mkt_sig": round(float(strategy.model.get("mkt_sig", 0.0)), 4),
+            }
+
+        if last_signal:
+            if last_signal.action == SignalAction.BUY:
+                return SingleStrategyPrediction(
+                    status="IMPULSE_LONG",
+                    direction="LONG",
+                    entry=last_signal.price,
+                    stop_loss=last_signal.stop_loss,
+                    target=last_signal.target,
+                    reason=last_signal.reason or "Sector impulse transmission long breakout",
+                    levels=levels,
+                )
+            elif last_signal.action == SignalAction.SELL:
+                return SingleStrategyPrediction(
+                    status="IMPULSE_SHORT",
+                    direction="SHORT",
+                    entry=last_signal.price,
+                    stop_loss=last_signal.stop_loss,
+                    target=last_signal.target,
+                    reason=last_signal.reason or "Sector impulse transmission short breakdown",
+                    levels=levels,
+                )
+
+        if strategy.model is None:
+            reason = f"Sector impulse: {strategy.disabled_reason}" if strategy.disabled_reason else "Sector peer context not available for fitting"
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=reason,
+                levels=levels,
+            )
+
+        return SingleStrategyPrediction(
+            status="MONITORING",
+            reason=f"Monitoring sector impulse transmission (k={strategy.model.get('k')}, rho={strategy.model.get('rho', 0.0):.2f})",
+            levels=levels,
+        )
+
+    def _evaluate_ssf_l5_srm(
+        self,
+        inst: InstrumentConfig,
+        df_15m: pd.DataFrame,
+        ltp: float,
+    ) -> SingleStrategyPrediction:
+        """Evaluates SsfL5SrmStrategy (regime & microstructure filters)."""
+        if df_15m.empty:
+            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+
+        _, days = self._prepare_data(df_15m)
+        if not days:
+            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+
+        latest_date, today_df = days[-1]
+        strategy = SsfL5SrmStrategy(inst, self.settings.strategy)
+        strategy.reset_session(latest_date)
+
+        last_signal: Optional[StrategySignal] = None
+        for i in range(len(today_df)):
+            row = today_df.iloc[i]
+            candle = {
+                "datetime": row["datetime"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(row.get("volume", 0)),
+            }
+            vwap = float(row.get("vwap", row["close"]))
+            sig = strategy.on_candle(candle, vwap)
+            if sig:
+                last_signal = sig
+
+        levels: Dict[str, Any] = {
+            "regime_ok": strategy.regime_ok,
+            "bars_tracked": len(strategy._bars),
+        }
+        if strategy.last_features:
+            for k, v in strategy.last_features.items():
+                if isinstance(v, (float, np.floating)):
+                    levels[k] = round(float(v), 3)
+
+        if last_signal:
+            if last_signal.action == SignalAction.BUY:
+                return SingleStrategyPrediction(
+                    status="SSF_LONG",
+                    direction="LONG",
+                    entry=last_signal.price,
+                    stop_loss=last_signal.stop_loss,
+                    target=last_signal.target,
+                    reason=last_signal.reason or "SSF Level-5 microprice long signal",
+                    levels=levels,
+                )
+            elif last_signal.action == SignalAction.SELL:
+                return SingleStrategyPrediction(
+                    status="SSF_SHORT",
+                    direction="SHORT",
+                    entry=last_signal.price,
+                    stop_loss=last_signal.stop_loss,
+                    target=last_signal.target,
+                    reason=last_signal.reason or "SSF Level-5 microprice short signal",
+                    levels=levels,
+                )
+
+        if not strategy.regime_ok:
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="Regime filter inactive (Parkinson vol or fractal efficiency out of bounds)",
+                levels=levels,
+            )
+
+        return SingleStrategyPrediction(
+            status="WAITING",
+            reason="Regime conditions met; awaiting L5 order book / futures tick update",
+            levels=levels,
+        )
+
+    @staticmethod
     def calculate_consensus(predictions: Dict[str, SingleStrategyPrediction]) -> Dict[str, Any]:
         """
         Computes consensus direction, count of agreeing strategies, and human-readable label
-        across the 3 independent strategies.
+        dynamically across all evaluated strategies.
         """
         long_count = sum(1 for p in predictions.values() if p.direction == "LONG")
         short_count = sum(1 for p in predictions.values() if p.direction == "SHORT")
@@ -563,7 +732,7 @@ class PredictionService:
         strongest = max(candidates, key=lambda c: (c.consensus.get("agreeing_strategies", 0), c.momentum_score), default=None)
 
         # 4. Divergent Signals
-        divergents = [c.to_dict() for c in candidates if c.consensus.get("label") == "DIVERGENT"]
+        divergents = [c.to_dict() for c in candidates if c.consensus.get("direction") == "DIVERGENT" or c.consensus.get("label", "").startswith("DIVERGENT")]
 
         return {
             "top_long": top_long.to_dict() if top_long else None,

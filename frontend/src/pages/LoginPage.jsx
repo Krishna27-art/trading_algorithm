@@ -3,7 +3,7 @@ import { ExternalLink, AlertCircle, Loader2 } from 'lucide-react'
 import { getKiteLoginUrl } from '../api/auth'
 import { ApiError } from '../api/client'
 
-export default function LoginPage({ onContinuePaper, authError }) {
+export default function LoginPage({ onContinueOffline, authError }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(authError || '')
 
@@ -76,7 +76,7 @@ export default function LoginPage({ onContinuePaper, authError }) {
 
         <div className="pt-4 border-t border-[var(--border)] text-center">
           <button
-            onClick={onContinuePaper}
+            onClick={onContinueOffline}
             className="text-xs text-[var(--text-dim)] hover:text-[var(--text)] underline underline-offset-2 cursor-pointer"
           >
             Continue in offline mode (backtest & analytics only)

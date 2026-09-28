@@ -1,36 +1,21 @@
 """
 Command Line Runner for NSE Intraday Strategy Engine.
-Supports ORB+VWAP, CPR Regime Breakout, and Buffered Dual-EMA strategies.
+Supports ORB+VWAP, CPR Regime Breakout, Buffered Dual-EMA, and APEX-AIVEM strategies.
 
 Usage:
     python run_algo.py --mode backtest --strategy cpr
     python run_algo.py --mode backtest --strategy dual_ema
+    python run_algo.py --mode backtest --strategy apex
     python run_algo.py --mode rolling --strategy cpr
     python run_algo.py --mode scan --top-n 5
     python run_algo.py --mode predict --top-n 5
-    python run_algo.py --mode paper
-    python run_algo.py --mode live --broker KITE
+    python run_algo.py --mode walkforward
 
-CHANGES vs. the original run_algo.py + run_all_algorithms.py:
-  - run_all_algorithms.py is gone. Its algo 1/2/3 (ORB, CPR, Dual-EMA "what
-    would each strategy say right now" tables) are merged in here as a
-    single --mode predict, one combined table instead of three near-
-    identical ones — prediction_service.evaluate_symbol() already returns
-    all 3 strategies' predictions in one call, so three separate loops
-    over the same symbol list were pure duplication.
-  - Its algo 4/5/6 (RM-100, VRP-Index, APEX) are gone. Those are
-    portfolio-level/research-stage strategies, not part of this repo's
-    scope (ORB/CPR/Dual-EMA intraday only); still runnable independently
-    via strategy/residual_momentum.py, strategy/vrp_index.py,
-    strategy/apex_engine.py if/when that scope changes.
-  - --strategy no longer accepts rm100/vrp (they had no working backtester
-    here anyway: build_backtester()'s old "rm100" branch imported
-    backtest.rm100_backtest, a module that doesn't exist in this repo).
-  - --mode paper / --mode live --broker KITE used to import
-    execution.execution_engine.ExecutionEngine and
-    monitoring.cli_monitor.CLIMonitor — neither file exists in this repo,
-    so both modes crashed with an ImportError as soon as they were
-    invoked. They now fail with one clear message up front instead.
+Notes:
+  - --mode paper and --mode live are not available (no execution engine).
+  - --strategy rm100/vrp are not available (no backtest module for those).
+  - --mode walkforward runs a static 70/30 in-sample/out-of-sample split.
+  - --mode rolling runs expanding-window walk-forward in 20-day blocks.
 """
 
 import argparse
@@ -44,7 +29,7 @@ import pandas as pd
 from tabulate import tabulate
 
 from backtest.strategy_backtester import StrategyBacktester as EventDrivenBacktester
-from backtest.rolling_walk_forward import RollingWalkForwardValidator as WalkForwardValidator
+from backtest.walk_forward import WalkForwardValidator
 from backtest.rolling_walk_forward import RollingWalkForwardValidator
 from config.settings import InstrumentConfig, InstrumentType, settings
 from data.historical_loader import HistoricalDataLoader
@@ -60,8 +45,10 @@ def get_kite_session():
         app = KiteApp()
         if app.is_connected():
             return app, app.kite
-    except Exception:
-        pass
+        else:
+            logger.info("Kite session not authenticated — running without live market data. Run `python auth.py` to authenticate.")
+    except Exception as e:
+        logger.warning(f"Could not initialise Kite session: {e}")
     return None, None
 
 
@@ -186,12 +173,15 @@ def run_predict(top_n: int = 5):
                 "CPR": "DATA_UNAVAILABLE",
                 "Dual-EMA": "DATA_UNAVAILABLE",
                 "APEX": "DATA_UNAVAILABLE",
+                "Sector-Impulse": "DATA_UNAVAILABLE",
+                "SSF-L5-SRM": "DATA_UNAVAILABLE",
                 "Consensus": "NO DATA",
             })
             continue
 
         preds, consensus = prediction_service.evaluate_symbol(symbol=sym, df_15m=df_15m, current_ltp=ltp, token=token)
         orb, cpr, ema, apex = preds["orb"], preds["cpr"], preds["dual_ema"], preds["apex"]
+        sit, ssf = preds["sector_impulse"], preds["ssf_l5_srm"]
 
         rows.append({
             "Symbol": sym,
@@ -200,6 +190,8 @@ def run_predict(top_n: int = 5):
             "CPR": f"{cpr.direction or 'NONE'} ({cpr.status})",
             "Dual-EMA": f"{ema.direction or 'NONE'} ({ema.status})",
             "APEX": f"{apex.direction or 'NONE'} ({apex.status})",
+            "Sector-Impulse": f"{sit.direction or 'NONE'} ({sit.status})",
+            "SSF-L5-SRM": f"{ssf.direction or 'NONE'} ({ssf.status})",
             "Consensus": consensus["label"],
         })
 
@@ -222,7 +214,12 @@ def load_history(
        - If allow_synthetic=True: generates synthetic data with clear disclaimer
     """
     target_inst = instrument or settings.instruments[0]
-    cache_file = Path("data/cache") / f"{target_inst.symbol}_15m_{start_date.date()}_{days}d.csv"
+    # Canonical cache filename (matches the backend's convention: no date component)
+    cache_file = Path("data/cache") / f"{target_inst.symbol}_15m_{days}d.csv"
+    # Legacy fallback: check old date-stamped pattern so existing caches aren't wasted
+    legacy_cache = Path("data/cache") / f"{target_inst.symbol}_15m_{start_date.date()}_{days}d.csv"
+    if not cache_file.exists() and legacy_cache.exists():
+        cache_file = legacy_cache
 
     # 1. Try validated local cache first
     if cache_file.exists():
@@ -274,27 +271,48 @@ def load_history(
 def build_backtester(strategy_name: str, instrument: InstrumentConfig):
     """
     Maps a --strategy name to a backtester instance.
-    'orb'      -> the hardcoded ORB+VWAP EventDrivenBacktester (unchanged).
-    'cpr'      -> CPRRegimeBreakoutStrategy through the generic StrategyBacktester.
-    'dual_ema' -> BufferedDualEMAStrategy through the generic StrategyBacktester.
+    'orb'            -> IntradayORBStrategy through EventDrivenBacktester.
+    'cpr'            -> CPRRegimeBreakoutStrategy through StrategyBacktester.
+    'dual_ema'       -> BufferedDualEMAStrategy through StrategyBacktester.
+    'apex'           -> ApexStrategy through StrategyBacktester.
+    'sector_impulse' -> SectorImpulseStrategy through StrategyBacktester.
+    'ssf_l5_srm'     -> SsfL5SrmStrategy through StrategyBacktester.
     """
-    if strategy_name == "orb":
+    from backtest.strategy_backtester import StrategyBacktester
+    name = strategy_name.lower()
+    if name == "orb":
         return EventDrivenBacktester(instrument=instrument, app_settings=settings)
-    elif strategy_name == "cpr":
-        from backtest.strategy_backtester import StrategyBacktester
+    elif name == "cpr":
         from strategy.cpr_strategy import CPRRegimeBreakoutStrategy
         return StrategyBacktester(
             strategy_factory=lambda: CPRRegimeBreakoutStrategy(instrument, settings.strategy),
             instrument=instrument, app_settings=settings,
         )
-    elif strategy_name == "dual_ema":
-        from backtest.strategy_backtester import StrategyBacktester
+    elif name == "dual_ema":
         from strategy.dual_ema_strategy import BufferedDualEMAStrategy
         return StrategyBacktester(
             strategy_factory=lambda: BufferedDualEMAStrategy(instrument, settings.strategy),
             instrument=instrument, app_settings=settings,
         )
-    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema")
+    elif name == "apex":
+        from strategy.apex_engine import ApexStrategy
+        return StrategyBacktester(
+            strategy_factory=lambda: ApexStrategy(instrument, settings.strategy),
+            instrument=instrument, app_settings=settings,
+        )
+    elif name in ("sector_impulse", "sit"):
+        from strategy.sector_impulse_strategy import SectorImpulseStrategy
+        return StrategyBacktester(
+            strategy_factory=lambda: SectorImpulseStrategy(instrument, settings.strategy),
+            instrument=instrument, app_settings=settings,
+        )
+    elif name in ("ssf_l5_srm", "ssf"):
+        from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
+        return StrategyBacktester(
+            strategy_factory=lambda: SsfL5SrmStrategy(instrument, settings.strategy),
+            instrument=instrument, app_settings=settings,
+        )
+    raise ValueError(f"Unknown strategy '{strategy_name}'. Choose from: orb, cpr, dual_ema, apex, sector_impulse, ssf_l5_srm")
 
 
 def build_backtester_factory(strategy_name: str):
@@ -454,7 +472,7 @@ def main():
     )
     parser.add_argument(
         "--strategy",
-        choices=["orb", "cpr", "dual_ema"],
+        choices=["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "sit", "ssf"],
         default="orb",
         help="Trading strategy to run/backtest (default: orb)",
     )

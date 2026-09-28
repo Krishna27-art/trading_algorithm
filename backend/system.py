@@ -18,12 +18,13 @@ def get_system_health():
     db_file = settings.db_path.exists()
 
     return {
+        "backend": "ONLINE",
         "kite_api": "CONNECTED" if kite_conn else "DISCONNECTED",
         "market_data": "CONNECTED" if kite_conn else "DISCONNECTED",
         "database": "CONNECTED" if db_file else "ERROR",
         "strategy_engine": "RUNNING",
         "risk_engine": "READY",
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
-        "overall_status": "READY" if kite_conn else "DISCONNECTED",
+        "overall_status": "READY" if kite_conn else "STANDBY",
         "timestamp": datetime.now().isoformat(),
     }

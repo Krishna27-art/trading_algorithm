@@ -1,6 +1,14 @@
 """
-Event-Driven Backtest Engine for Intraday Strategies (with ORB+VWAP and Strategy Support).
-Includes execution policies, statutory costs, and zero look-ahead bias validation.
+ORB-Defaulting Backtester Shim (compatibility alias for StrategyBacktester).
+
+EventDrivenBacktester is a thin subclass of StrategyBacktester that defaults
+the strategy_factory to IntradayORBStrategy. It exists purely for backwards
+compatibility so that existing code that instantiates it with just an
+InstrumentConfig (and no strategy_factory) continues to run ORB backtests
+without modification.
+
+For backtesting ANY other strategy (CPR, Dual-EMA, APEX), use
+StrategyBacktester directly with the appropriate strategy_factory.
 """
 
 from enum import Enum

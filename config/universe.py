@@ -106,6 +106,9 @@ _FALLBACK_NSE_TOKENS: Dict[str, int] = {
     "TCS": 2953217,
     "TATACONSUM": 878593,
     "TATAMOTORS": 884737,
+    "TMPV": 884737,
+    "ETERNAL": 1304833,
+    "ASHOKLEY": 54273,
     "TATASTEEL": 895745,
     "TECHM": 3465729,
     "TITAN": 897537,
@@ -204,12 +207,17 @@ class StockUniverse:
             rank = item.get("market_cap_rank")
             cat = str(item.get("category", "")).strip().lower()
 
+            is_duplicate = False
             if not sym:
                 validation_errors.append(f"Item at index {idx} missing required field 'symbol'.")
             elif sym in seen_symbols:
                 validation_errors.append(f"Duplicate stock symbol '{sym}' found at index {idx}.")
+                is_duplicate = True
             else:
                 seen_symbols.add(sym)
+
+            if is_duplicate:
+                continue  # Skip duplicate — keep only the first occurrence
 
             if not name:
                 validation_errors.append(f"Stock '{sym or idx}' missing required field 'name'.")
@@ -227,27 +235,47 @@ class StockUniverse:
 
             records.append(StockRecord(symbol=sym, name=name, market_cap_rank=rank_int, category=cat))
 
+
         large_cnt = sum(1 for r in records if r.category == "large")
         mid_cnt = sum(1 for r in records if r.category == "mid")
         small_cnt = sum(1 for r in records if r.category == "small")
         total_cnt = len(records)
 
+        # Fix 3.4: Soft-degrade on count mismatch rather than hard-crashing.
+        # Log warnings for any category that is off, but proceed with whatever
+        # stocks are actually in the file so the scanner remains usable.
+        count_warnings = []
         if total_cnt != 300:
-            validation_errors.append(f"Total stock count is {total_cnt}, expected exactly 300.")
+            count_warnings.append(f"Total stock count is {total_cnt}, expected 300.")
         if large_cnt != 100:
-            validation_errors.append(f"Large cap count is {large_cnt}, expected exactly 100.")
+            count_warnings.append(f"Large cap count is {large_cnt}, expected 100.")
         if mid_cnt != 100:
-            validation_errors.append(f"Mid cap count is {mid_cnt}, expected exactly 100.")
+            count_warnings.append(f"Mid cap count is {mid_cnt}, expected 100.")
         if small_cnt != 100:
-            validation_errors.append(f"Small cap count is {small_cnt}, expected exactly 100.")
+            count_warnings.append(f"Small cap count is {small_cnt}, expected 100.")
+        if count_warnings:
+            logger.warning(
+                f"Universe JSON count mismatch in {self.json_path}: "
+                + "; ".join(count_warnings)
+                + " Proceeding with available stocks."
+            )
 
         if validation_errors:
-            error_msg = f"300-Stock Universe Validation Failed ({self.json_path}):\n" + "\n".join(f" - {err}" for err in validation_errors)
+            # Symbol/name/rank errors are harder failures — log them but still
+            # proceed with the valid records; don't crash the whole backend.
+            error_msg = (
+                f"300-Stock Universe validation issues ({self.json_path}):\n"
+                + "\n".join(f" - {err}" for err in validation_errors)
+            )
             logger.error(error_msg)
-            raise ValueError(error_msg)
+
+        # Only keep records with a valid (non-empty) symbol so the scanner
+        # doesn't receive incomplete entries even in partial-degrade mode.
+        records = [r for r in records if r.symbol]
 
         self._records = records
         self._symbol_map = {r.symbol: r for r in records}
+
 
     @property
     def large_cap_stocks(self) -> List[StockRecord]:

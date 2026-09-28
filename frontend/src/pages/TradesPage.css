@@ -1,0 +1,200 @@
+/* TradesPage.css — shared by TradesPage and OrdersPage */
+.trades-page {
+  padding: 24px 32px;
+  background: #0d0f14;
+  min-height: 100vh;
+  color: #e2e8f0;
+  font-family: 'Inter', sans-serif;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 28px;
+  gap: 16px;
+}
+
+.page-header h1 {
+  font-size: 1.75rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #a78bfa, #60a5fa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin: 0 0 4px 0;
+}
+
+.subtitle {
+  color: #64748b;
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.header-stats {
+  display: flex;
+  gap: 12px;
+}
+
+.stat-chip {
+  background: #1a1f2e;
+  border: 1px solid #2d3748;
+  border-radius: 10px;
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 100px;
+}
+
+.stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #64748b;
+}
+
+.stat-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.filter-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.filter-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid #2d3748;
+  background: #1a1f2e;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+
+.filter-btn:hover { border-color: #6366f1; color: #a5b4fc; }
+.filter-btn.active { background: #312e81; border-color: #6366f1; color: #c7d2fe; }
+
+.refresh-btn {
+  margin-left: auto;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid #2d3748;
+  background: transparent;
+  color: #60a5fa;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.refresh-btn:hover { background: #1e3a5f; }
+
+.trades-table-wrapper {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid #1e2535;
+}
+
+.trades-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.trades-table thead tr {
+  background: #141824;
+  border-bottom: 1px solid #1e2535;
+}
+
+.trades-table th {
+  padding: 12px 14px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.trades-table tbody tr {
+  border-bottom: 1px solid #1a1f2e;
+  transition: background 0.15s;
+}
+.trades-table tbody tr:hover { background: #181d2a; }
+.trades-table tbody tr:last-child { border-bottom: none; }
+
+.trades-table td {
+  padding: 11px 14px;
+  white-space: nowrap;
+  color: #cbd5e1;
+}
+
+.trade-id { font-family: monospace; font-size: 0.75rem; color: #64748b; }
+.symbol { font-weight: 600; color: #e2e8f0; }
+
+.direction.long  { color: #34d399; font-weight: 600; }
+.direction.short { color: #f87171; font-weight: 600; }
+
+.pnl-positive { color: #34d399 !important; font-weight: 600; }
+.pnl-negative { color: #f87171 !important; font-weight: 600; }
+
+.pnl-net { font-weight: 700; }
+.costs { color: #94a3b8; font-size: 0.78rem; }
+
+.status-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.badge-open      { background: #1c3a6e; color: #60a5fa; }
+.badge-closed    { background: #14332a; color: #34d399; }
+.badge-pending   { background: #3a2f10; color: #f59e0b; }
+.badge-cancelled { background: #2a2027; color: #94a3b8; }
+.badge-rejected  { background: #3a1515; color: #f87171; }
+
+.row-open td { opacity: 0.85; }
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 48px 0;
+  justify-content: center;
+  color: #64748b;
+}
+
+.spinner {
+  width: 20px; height: 20px;
+  border: 2px solid #2d3748;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-banner {
+  background: #3a1515;
+  border: 1px solid #7f1d1d;
+  color: #fca5a5;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 64px 0;
+  color: #64748b;
+}
+
+.empty-icon { font-size: 2.5rem; margin-bottom: 12px; }

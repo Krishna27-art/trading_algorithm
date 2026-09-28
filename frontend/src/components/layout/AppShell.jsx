@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { LayoutGrid, Radio, TrendingUp, History, Activity, Settings, LogOut, Menu, X } from 'lucide-react'
+import { LayoutGrid, Radio, TrendingUp, History, Activity, Settings, LogOut, Menu, X, BookOpen, ListOrdered } from 'lucide-react'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
   { id: 'signals', label: 'Signals', icon: Radio },
   { id: 'stocks', label: 'Stocks', icon: TrendingUp },
   { id: 'backtest', label: 'Backtest', icon: History },
+  { id: 'trades', label: 'Trades', icon: BookOpen },
+  { id: 'orders', label: 'Orders', icon: ListOrdered },
   { id: 'system', label: 'System', icon: Activity },
 ]
 

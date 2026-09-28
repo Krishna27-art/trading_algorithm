@@ -27,7 +27,7 @@ export function hasSharedSecret() {
   return Boolean(sharedSecret)
 }
 
-async function request(path, { method = 'GET', body, requireSecret = false, signal } = {}) {
+async function request(path, { method = 'GET', body, requireSecret = false, signal, timeoutMs = 10000 } = {}) {
   const headers = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (requireSecret) {
@@ -42,15 +42,26 @@ async function request(path, { method = 'GET', body, requireSecret = false, sign
   }
 
   let res
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort())
+  }
+
   try {
     res = await fetch(path, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal,
+      signal: controller.signal,
     })
   } catch (networkErr) {
+    if (networkErr.name === 'AbortError') {
+      throw new ApiError('Request timed out after 10s. Backend may be busy.', 0, networkErr.message)
+    }
     throw new ApiError('Cannot reach the backend. Is it running?', 0, networkErr.message)
+  } finally {
+    clearTimeout(timeoutId)
   }
 
   let payload = null

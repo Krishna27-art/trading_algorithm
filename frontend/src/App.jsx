@@ -8,6 +8,8 @@ import DashboardPage from './pages/DashboardPage'
 import LiveSignalsPage from './pages/LiveSignalsPage'
 import StocksPage from './pages/StocksPage'
 import BacktestPage from './pages/BacktestPage'
+import TradesPage from './pages/TradesPage'
+import OrdersPage from './pages/OrdersPage'
 import SystemStatusPage from './pages/SystemStatusPage'
 import { getKiteStatus, kiteLogout } from './api/auth'
 
@@ -21,6 +23,13 @@ export default function App() {
   useEffect(() => {
     let cancelled = false
 
+    // Safety fallback: if backend is unreachable or slow, don't keep user on loading spinner
+    const timeoutId = setTimeout(() => {
+      if (!cancelled) {
+        setAuthState('unauthenticated')
+      }
+    }, 3000)
+
     // Check for auth_error in query parameters if redirected from backend callback
     const urlParams = new URLSearchParams(window.location.search)
     const errParam = urlParams.get('auth_error')
@@ -31,6 +40,7 @@ export default function App() {
 
     getKiteStatus()
       .then((data) => {
+        clearTimeout(timeoutId)
         if (cancelled) return
         if (data && data.connected) {
           setUser(data)
@@ -40,14 +50,16 @@ export default function App() {
         }
       })
       .catch(() => {
+        clearTimeout(timeoutId)
         if (!cancelled) setAuthState('unauthenticated')
       })
     return () => {
       cancelled = true
+      clearTimeout(timeoutId)
     }
   }, [])
 
-  const handleContinueGuest = () => {
+  const handleContinueOffline = () => {
     setUser(null)
     setAuthState('guest')
   }
@@ -71,7 +83,7 @@ export default function App() {
           <p className="text-sm">Checking Kite session status…</p>
         </div>
       ) : authState === 'unauthenticated' ? (
-        <LoginPage onContinuePaper={handleContinueGuest} authError={authError} />
+        <LoginPage onContinueOffline={handleContinueOffline} authError={authError} />
       ) : (
         <AppShell
           active={activeTab}
@@ -84,6 +96,8 @@ export default function App() {
           {activeTab === 'signals' && <LiveSignalsPage isAuthenticated={authState === 'authenticated'} />}
           {activeTab === 'stocks' && <StocksPage isAuthenticated={authState === 'authenticated'} />}
           {activeTab === 'backtest' && <BacktestPage />}
+          {activeTab === 'trades' && <TradesPage />}
+          {activeTab === 'orders' && <OrdersPage />}
           {activeTab === 'system' && <SystemStatusPage />}
         </AppShell>
       )}

@@ -9,7 +9,9 @@ Usage:
 import webbrowser
 from urllib.parse import parse_qs, urlparse
 
-from broker.kite_adapter import KiteBrokerAdapter
+from kiteconnect import KiteConnect
+
+from broker.kite_adapter import save_session
 from config.settings import settings
 
 
@@ -32,8 +34,8 @@ def authenticate():
         print("[!] ERROR: KITE_API_SECRET is missing in .env file.")
         return None
 
-    adapter = KiteBrokerAdapter.get_instance()
-    login_url = adapter.get_login_url()
+    kite = KiteConnect(api_key=settings.kite_api_key)
+    login_url = kite.login_url()
 
     print("=" * 60)
     print("  ZERODHA KITE CONNECT - DAILY AUTHENTICATION")
@@ -59,14 +61,24 @@ def authenticate():
 
     print("\n[+] Exchanging request token for session access token...")
     try:
-        payload = adapter.generate_session_from_request_token(request_token)
-        user_name = payload.get("user_name", "Trader")
-        user_id = payload.get("user_id", "")
+        data = kite.generate_session(request_token, api_secret=settings.kite_api_secret)
+        user_name = data.get("user_name", "Trader")
+        user_id = data.get("user_id", "")
+        access_token = data.get("access_token", "")
+        public_token = data.get("public_token", "")
+
+        save_session(
+            api_key=settings.kite_api_key,
+            access_token=access_token,
+            user_id=user_id,
+            user_name=user_name,
+            public_token=public_token,
+        )
 
         print(f"\n[✓] Success! Authenticated as: {user_name} ({user_id})")
         print(f"[✓] Access token saved to '{settings.token_file.name}'")
         print("[✓] Valid for today's trading session.")
-        return payload.get("access_token")
+        return access_token
 
     except Exception as e:
         print(f"\n[!] Authentication failed: {e}")

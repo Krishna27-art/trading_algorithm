@@ -128,6 +128,9 @@ class PredictionService:
         current_ltp: Optional[float] = None,
         token: Optional[int] = None,
         stock_metric: Optional[Any] = None,
+        book_snapshot: Optional[Any] = None,
+        peer_context: Optional[Any] = None,
+        kite_client: Optional[Any] = None,
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
         """
         Runs all 6 strategies independently on the provided instrument data:
@@ -147,8 +150,12 @@ class PredictionService:
         cpr_pred = self._evaluate_cpr(inst, df_15m, ltp)
         dual_ema_pred = self._evaluate_dual_ema(inst, df_15m, ltp)
         apex_pred = self._evaluate_apex(inst, df_15m, ltp)
-        sector_impulse_pred = self._evaluate_sector_impulse(inst, df_15m, ltp)
-        ssf_l5_srm_pred = self._evaluate_ssf_l5_srm(inst, df_15m, ltp)
+        sector_impulse_pred = self._evaluate_sector_impulse(
+            inst, df_15m, ltp, peer_context=peer_context, kite_client=kite_client
+        )
+        ssf_l5_srm_pred = self._evaluate_ssf_l5_srm(
+            inst, df_15m, ltp, book_snapshot=book_snapshot
+        )
 
         predictions = {
             "orb": orb_pred,
@@ -385,20 +392,20 @@ class PredictionService:
         levels: Dict[str, Any] = {}
         if not today_df.empty:
             last_row = today_df.iloc[-1]
-            ind = strategy._current_indicators({
+            ind_curr, _ = strategy._current_indicators({
                 "datetime": last_row["datetime"],
                 "open": float(last_row["open"]),
                 "high": float(last_row["high"]),
                 "low": float(last_row["low"]),
                 "close": float(last_row["close"]),
             })
-            if ind is not None:
+            if ind_curr is not None:
                 levels = {
-                    "ema_fast": round(float(ind["ema9"]), 2),
-                    "ema_slow": round(float(ind["ema21"]), 2),
-                    "sma_trend": round(float(ind["sma200"]), 2),
-                    "atr_14": round(float(ind["atr14"]), 2),
-                    "buffer": round(float(strategy.buffer_gamma * ind["atr14"]), 2),
+                    "ema_fast": round(float(ind_curr["ema9"]), 2),
+                    "ema_slow": round(float(ind_curr["ema21"]), 2),
+                    "sma_trend": round(float(ind_curr["sma200"]), 2),
+                    "atr_14": round(float(ind_curr["atr14"]), 2),
+                    "buffer": round(float(strategy.buffer_gamma * ind_curr["atr14"]), 2),
                 }
 
         if last_signal:
@@ -511,8 +518,10 @@ class PredictionService:
         inst: InstrumentConfig,
         df_15m: pd.DataFrame,
         ltp: float,
+        peer_context: Optional[Any] = None,
+        kite_client: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
-        """Evaluates SectorImpulseStrategy."""
+        """Evaluates SectorImpulseStrategy with real lead-lag and sector modeling."""
         if df_15m.empty:
             return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
 
@@ -527,7 +536,24 @@ class PredictionService:
             else pd.DataFrame()
         )
 
-        strategy = SectorImpulseStrategy(inst, self.settings.strategy)
+        # Build or use provided PeerContext
+        ctx = peer_context
+        if ctx is None:
+            from data.sector_peer_manager import SectorPeerManager
+            ctx = SectorPeerManager.build_peer_context(
+                symbol=inst.symbol,
+                cache_dir=self.cache_dir,
+                kite_client=kite_client,
+            )
+
+        if ctx is None:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason="Sector leader / market index peer context unavailable for model fitting",
+                levels={},
+            )
+
+        strategy = SectorImpulseStrategy(inst, self.settings.strategy, ctx=ctx)
         strategy.seed_context(lookback_df)
         strategy.reset_session(latest_date)
 
@@ -578,7 +604,7 @@ class PredictionService:
                 )
 
         if strategy.model is None:
-            reason = f"Sector impulse: {strategy.disabled_reason}" if strategy.disabled_reason else "Sector peer context not available for fitting"
+            reason = f"Sector impulse: {strategy.disabled_reason}" if strategy.disabled_reason else "Sector peer context not eligible for fitting"
             return SingleStrategyPrediction(
                 status="NO_TRADE",
                 reason=reason,
@@ -596,8 +622,9 @@ class PredictionService:
         inst: InstrumentConfig,
         df_15m: pd.DataFrame,
         ltp: float,
+        book_snapshot: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
-        """Evaluates SsfL5SrmStrategy (regime & microstructure filters)."""
+        """Evaluates SsfL5SrmStrategy (regime & Level-5 microstructure order book)."""
         if df_15m.empty:
             return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
 
@@ -609,7 +636,7 @@ class PredictionService:
         strategy = SsfL5SrmStrategy(inst, self.settings.strategy)
         strategy.reset_session(latest_date)
 
-        last_signal: Optional[StrategySignal] = None
+        # Warm up regime detector with 15m intraday candles
         for i in range(len(today_df)):
             row = today_df.iloc[i]
             candle = {
@@ -621,41 +648,66 @@ class PredictionService:
                 "volume": int(row.get("volume", 0)),
             }
             vwap = float(row.get("vwap", row["close"]))
-            sig = strategy.on_candle(candle, vwap)
-            if sig:
-                last_signal = sig
+            strategy.on_candle(candle, vwap)
 
         levels: Dict[str, Any] = {
             "regime_ok": strategy.regime_ok,
             "bars_tracked": len(strategy._bars),
         }
-        if strategy.last_features:
-            for k, v in strategy.last_features.items():
-                if isinstance(v, (float, np.floating)):
-                    levels[k] = round(float(v), 3)
 
-        if last_signal:
-            if last_signal.action == SignalAction.BUY:
+        if book_snapshot is not None:
+            features = strategy._features(book_snapshot)
+            if features:
+                for k, v in features.items():
+                    if isinstance(v, (float, np.floating)):
+                        levels[k] = round(float(v), 3)
+
+            sig = strategy.on_book_update(book_snapshot)
+            if sig:
+                if sig.action == SignalAction.BUY:
+                    return SingleStrategyPrediction(
+                        status="SSF_LONG",
+                        direction="LONG",
+                        entry=sig.price,
+                        stop_loss=sig.stop_loss,
+                        target=sig.target,
+                        reason=sig.reason or "SSF Level-5 microprice long signal",
+                        levels=levels,
+                    )
+                elif sig.action == SignalAction.SELL:
+                    return SingleStrategyPrediction(
+                        status="SSF_SHORT",
+                        direction="SHORT",
+                        entry=sig.price,
+                        stop_loss=sig.stop_loss,
+                        target=sig.target,
+                        reason=sig.reason or "SSF Level-5 microprice short signal",
+                        levels=levels,
+                    )
+
+            if not strategy.regime_ok:
                 return SingleStrategyPrediction(
-                    status="SSF_LONG",
-                    direction="LONG",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "SSF Level-5 microprice long signal",
+                    status="NO_TRADE",
+                    reason="Regime filter inactive (Parkinson vol or fractal efficiency out of bounds)",
                     levels=levels,
                 )
-            elif last_signal.action == SignalAction.SELL:
+
+            blocked_reason = strategy._blocked(book_snapshot, features or {}) if features else None
+            if blocked_reason:
                 return SingleStrategyPrediction(
-                    status="SSF_SHORT",
-                    direction="SHORT",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "SSF Level-5 microprice short signal",
+                    status="NO_TRADE",
+                    reason=f"SSF conditions not met ({blocked_reason})",
                     levels=levels,
                 )
 
+            score_val = features.get("score", 0.0) if features else 0.0
+            return SingleStrategyPrediction(
+                status="WAITING",
+                reason=f"Awaiting SSF trigger threshold (composite score={score_val:.2f})",
+                levels=levels,
+            )
+
+        # If no book snapshot is provided
         if not strategy.regime_ok:
             return SingleStrategyPrediction(
                 status="NO_TRADE",
@@ -664,8 +716,8 @@ class PredictionService:
             )
 
         return SingleStrategyPrediction(
-            status="WAITING",
-            reason="Regime conditions met; awaiting L5 order book / futures tick update",
+            status="UNAVAILABLE",
+            reason="Real Level-5 order book depth not available (feed inactive)",
             levels=levels,
         )
 
@@ -680,21 +732,30 @@ class PredictionService:
         evaluable_count = sum(1 for p in predictions.values() if p.status not in ("UNAVAILABLE", "ERROR"))
         total = len(predictions)
 
-        if long_count >= 2 and short_count == 0:
+        if long_count >= 3 or (evaluable_count <= 3 and long_count >= 2 and short_count == 0):
             direction = "LONG"
             label = f"STRONG LONG ({long_count}/{total})"
-        elif short_count >= 2 and long_count == 0:
+        elif short_count >= 3 or (evaluable_count <= 3 and short_count >= 2 and long_count == 0):
             direction = "SHORT"
             label = f"STRONG SHORT ({short_count}/{total})"
         elif long_count > 0 and short_count > 0:
             direction = "DIVERGENT"
             label = f"DIVERGENT ({long_count}L / {short_count}S)"
+        elif long_count == 2 and short_count == 0:
+            direction = "LONG"
+            label = f"MODERATE LONG ({long_count}/{total})"
+        elif short_count == 2 and long_count == 0:
+            direction = "SHORT"
+            label = f"MODERATE SHORT ({short_count}/{total})"
         elif long_count == 1 and short_count == 0:
             direction = "LONG"
             label = f"MODERATE LONG ({long_count}/{total})"
         elif short_count == 1 and long_count == 0:
             direction = "SHORT"
             label = f"MODERATE SHORT ({short_count}/{total})"
+        elif evaluable_count == 0:
+            direction = "NEUTRAL"
+            label = "UNAVAILABLE"
         else:
             direction = "NEUTRAL"
             label = "NEUTRAL"

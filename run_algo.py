@@ -179,7 +179,9 @@ def run_predict(top_n: int = 5):
             })
             continue
 
-        preds, consensus = prediction_service.evaluate_symbol(symbol=sym, df_15m=df_15m, current_ltp=ltp, token=token)
+        preds, consensus = prediction_service.evaluate_symbol(
+            symbol=sym, df_15m=df_15m, current_ltp=ltp, token=token, kite_client=kite
+        )
         orb, cpr, ema, apex = preds["orb"], preds["cpr"], preds["dual_ema"], preds["apex"]
         sit, ssf = preds["sector_impulse"], preds["ssf_l5_srm"]
 
@@ -301,9 +303,11 @@ def build_backtester(strategy_name: str, instrument: InstrumentConfig):
             instrument=instrument, app_settings=settings,
         )
     elif name in ("sector_impulse", "sit"):
+        from data.sector_peer_manager import SectorPeerManager
         from strategy.sector_impulse_strategy import SectorImpulseStrategy
+        ctx_sit = SectorPeerManager.build_peer_context(instrument.symbol)
         return StrategyBacktester(
-            strategy_factory=lambda: SectorImpulseStrategy(instrument, settings.strategy),
+            strategy_factory=lambda: SectorImpulseStrategy(instrument, settings.strategy, ctx=ctx_sit),
             instrument=instrument, app_settings=settings,
         )
     elif name in ("ssf_l5_srm", "ssf"):

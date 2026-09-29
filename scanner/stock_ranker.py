@@ -328,36 +328,17 @@ class StockUniverseScanner:
         force_refresh: bool = False,
     ) -> Tuple[int, float]:
         if token is None:
-            return 1000000, 25.0
+            logger.warning(
+                f"No numerical instrument_token found for {symbol}. "
+                "Cannot compute historical context without fabricating data. Returning (0, 0.0)."
+            )
+            return 0, 0.0
 
         cache_path = self.cache_dir / f"{symbol}_daily_context.csv"
 
         try:
-            class SupportsCandlesWrapper:
-                def __init__(self, raw_kite: Any):
-                    self.raw = raw_kite
-
-                def get_historical_candles(
-                    self,
-                    instrument_token: int,
-                    from_date: str,
-                    to_date: str,
-                    interval: str = "day",
-                    continuous: bool = False,
-                    oi: bool = False,
-                ) -> List[dict]:
-                    return self.raw.historical_data(
-                        instrument_token=instrument_token,
-                        from_date=from_date,
-                        to_date=to_date,
-                        interval=interval,
-                        continuous=continuous,
-                        oi=oi,
-                    )
-
-            wrapper = SupportsCandlesWrapper(kite_client)
             df = HistoricalDataLoader.fetch_real_data(
-                kite_client=wrapper,
+                kite_client=kite_client,
                 instrument_token=token,
                 start_date=start_date,
                 end_date=end_date,

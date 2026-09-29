@@ -56,6 +56,7 @@ def test_event_engine_breakout_and_target_hit():
         lot_size=25,
         min_orb_range=40.0,
         max_orb_range=120.0,
+        max_risk_cap=150.0,
     )
     settings = AppSettings(
         risk=RiskConfig(initial_capital=500_000.0, risk_per_trade_pct=1.0, max_trades_per_day=3),

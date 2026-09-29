@@ -84,7 +84,7 @@ class PeerContext:
         """Aligned closes strictly before `ts` (leader volume kept)."""
         cut = pd.Timestamp(ts)
         out = pd.concat(
-            {k: v["close"] for k, v in self.frames.items()}, axis=1
+            {k: v["close"] for k, v in self.frames.items()}, axis=1, sort=False
         ).dropna()
         out["leader_vol"] = self.frames["leader"]["volume"].reindex(out.index) if "volume" in self.frames["leader"] else 0.0
         return out[out.index < cut]

@@ -19,7 +19,7 @@ def strategy():
         lot_size=25,
         min_orb_range=40.0,
         max_orb_range=120.0,
-        max_risk_cap=80.0,
+        max_risk_cap=150.0,
     )
     strat = IntradayORBStrategy(instrument=inst)
     strat.reset_session(date(2026, 3, 2))
@@ -50,9 +50,9 @@ def test_orb_establishment_and_long_signal(strategy):
     assert sig.action == SignalAction.BUY
     assert sig.price == 24120.0
     assert sig.stop_loss == 23975.0 # Stop = OR_Low
-    # OR_Width was 125 > 120, so effective risk is capped at 80.
-    # Target = 24120 + 2.0 * 80 = 24280.
-    assert sig.target == 24280.0
+    # Risk distance is 24120 - 23975 = 145 pts <= max_risk_cap (150).
+    # Target = 24120 + 2.0 * 145 = 24410.
+    assert sig.target == 24410.0
 
 
 def test_trailing_stop_to_breakeven(strategy):

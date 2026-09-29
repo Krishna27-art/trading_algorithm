@@ -3,8 +3,12 @@ Real-time tick-to-candle aggregator with VWAP calculation for WebSocket data fee
 """
 
 from datetime import datetime, time, timedelta
+import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 class Candle:
@@ -117,6 +121,7 @@ class MultiSymbolCandleAggregator:
     Manages CandleAggregator instances for multiple symbols/tokens simultaneously.
     Consumes live Zerodha KiteTicker ticks (from on_ticks callback) and routes them to
     their respective per-symbol CandleAggregators. Emits completed candles for strategy processing.
+    Also extracts and buffers Level-5 BookSnapshots for microstructure strategies like SSF-L5-SRM.
     """
 
     def __init__(
@@ -124,22 +129,27 @@ class MultiSymbolCandleAggregator:
         token_to_symbol_map: Dict[int, str],
         timeframe_minutes: int = 15,
         on_candle_close: Optional[Callable[[dict, float], None]] = None,
+        on_book_update: Optional[Callable[[str, Any], None]] = None,
     ):
         self.token_to_symbol_map = {int(k): str(v) for k, v in token_to_symbol_map.items()}
         self.timeframe_minutes = timeframe_minutes
         self.on_candle_close = on_candle_close
+        self.on_book_update = on_book_update
         self.aggregators: Dict[str, CandleAggregator] = {}
+        self.latest_book_snapshots: Dict[str, Any] = {}
         self.last_volume_by_token: Dict[int, int] = {}
+        self._lock = threading.Lock()
         self._init_aggregators()
 
     def _init_aggregators(self):
-        for token, symbol in self.token_to_symbol_map.items():
-            if symbol not in self.aggregators:
-                self.aggregators[symbol] = CandleAggregator(
-                    symbol=symbol,
-                    timeframe_minutes=self.timeframe_minutes,
-                    on_candle_close=self.on_candle_close,
-                )
+        with getattr(self, "_lock", threading.Lock()):
+            for token, symbol in self.token_to_symbol_map.items():
+                if symbol not in self.aggregators:
+                    self.aggregators[symbol] = CandleAggregator(
+                        symbol=symbol,
+                        timeframe_minutes=self.timeframe_minutes,
+                        on_candle_close=self.on_candle_close,
+                    )
 
     def process_ticks(self, ticks: Any):
         """
@@ -173,9 +183,10 @@ class MultiSymbolCandleAggregator:
             if last_qty is not None and last_qty > 0:
                 volume = int(last_qty)
             elif vol_traded is not None:
-                prev_vol = self.last_volume_by_token.get(int(token), 0)
-                volume = max(int(vol_traded) - prev_vol, 0) if prev_vol > 0 else 0
-                self.last_volume_by_token[int(token)] = int(vol_traded)
+                with self._lock:
+                    prev_vol = self.last_volume_by_token.get(int(token), 0)
+                    volume = max(int(vol_traded) - prev_vol, 0) if prev_vol > 0 else 0
+                    self.last_volume_by_token[int(token)] = int(vol_traded)
             else:
                 volume = 0
 
@@ -186,19 +197,57 @@ class MultiSymbolCandleAggregator:
                 try:
                     timestamp = datetime.fromisoformat(raw_ts)
                 except Exception:
+                    logger.warning(f"Could not parse tick timestamp '{raw_ts}' for token {token}, falling back to datetime.now()")
                     timestamp = datetime.now()
             else:
+                logger.warning(f"Tick missing timestamp for token {token}, falling back to datetime.now()")
                 timestamp = datetime.now()
 
-            agg = self.aggregators.get(symbol)
+            # 1. Update 15m candle aggregator
+            with self._lock:
+                agg = self.aggregators.get(symbol)
             if agg:
                 agg.process_tick(price=float(price), volume=volume, timestamp=timestamp)
 
+            # 2. Extract real Level-5 order book depth if present
+            depth = tick.get("depth")
+            if depth and isinstance(depth, dict):
+                buy_levels = depth.get("buy", [])
+                sell_levels = depth.get("sell", [])
+                if len(buy_levels) >= 5 and len(sell_levels) >= 5:
+                    try:
+                        from strategy.ssf_l5_srm_strategy import BookSnapshot
+                        bids = [(float(b["price"]), int(b["quantity"]), int(b.get("orders", 1))) for b in buy_levels[:5]]
+                        asks = [(float(a["price"]), int(a["quantity"]), int(a.get("orders", 1))) for a in sell_levels[:5]]
+                        snapshot = BookSnapshot(
+                            timestamp=timestamp,
+                            bids=bids,
+                            asks=asks,
+                            ltp=float(price),
+                            fut_ltp=float(tick.get("last_price")) if "FUT" in symbol else None,
+                            fut_oi=float(tick.get("oi")) if tick.get("oi") else None,
+                            circuit_lower=float(tick.get("lower_circuit_limit")) if tick.get("lower_circuit_limit") else None,
+                            circuit_upper=float(tick.get("upper_circuit_limit")) if tick.get("upper_circuit_limit") else None,
+                        )
+                        with self._lock:
+                            self.latest_book_snapshots[symbol] = snapshot
+                        if self.on_book_update:
+                            self.on_book_update(symbol, snapshot)
+                    except Exception as e:
+                        pass
+
     def get_symbol_dataframe(self, symbol: str) -> pd.DataFrame:
-        agg = self.aggregators.get(symbol)
+        with self._lock:
+            agg = self.aggregators.get(symbol)
         return agg.get_completed_dataframe() if agg else pd.DataFrame()
 
+    def get_latest_book_snapshot(self, symbol: str) -> Optional[Any]:
+        with self._lock:
+            return self.latest_book_snapshots.get(symbol)
+
     def reset_all_daily_sessions(self):
-        for agg in self.aggregators.values():
-            agg.reset_daily_session()
-        self.last_volume_by_token.clear()
+        with self._lock:
+            for agg in self.aggregators.values():
+                agg.reset_daily_session()
+            self.last_volume_by_token.clear()
+            self.latest_book_snapshots.clear()

@@ -36,10 +36,11 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     })
   }, [candidates, filter])
 
-  // Only show the auth-required banner when the endpoint explicitly says so
-  // AND the App-level auth check hasn't confirmed we're connected.
-  const showAuthRequired =
-    research.data?.status === 'AUTH_REQUIRED' && !isAuthenticated
+  const isAuthRequired =
+    research.data?.status === 'AUTH_REQUIRED' ||
+    (!isAuthenticated && (!research.data || !research.data.candidates || research.data.candidates.length === 0))
+
+  const isDataUnavailable = research.data?.status === 'DATA_UNAVAILABLE'
 
   const toggle = (symbol) => {
     setExpanded((prev) => {
@@ -67,6 +68,13 @@ export default function LiveSignalsPage({ isAuthenticated }) {
             ))}
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => research.refresh()}
+              disabled={research.status === 'loading'}
+              className="text-xs px-2.5 py-1 rounded border border-[var(--border-strong)] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors disabled:opacity-50"
+            >
+              {research.status === 'loading' ? 'Refreshing…' : 'Refresh'}
+            </button>
             {research.data && (
               <StatusPill tone={research.data.data_source === 'REAL_KITE' ? 'positive' : 'warning'}>
                 {research.data.data_source === 'REAL_KITE' ? 'Live Kite data' : research.data.data_source}
@@ -81,9 +89,19 @@ export default function LiveSignalsPage({ isAuthenticated }) {
         <Card><Loading label="Scanning 300-stock universe…" /></Card>
       ) : research.status === 'error' && !research.data ? (
         <Card><ErrorState error={research.error} onRetry={research.refresh} /></Card>
-      ) : showAuthRequired ? (
+      ) : isAuthRequired ? (
         <Card>
-          <EmptyState label="Live signals require a connected Kite session." hint={research.data.message} />
+          <EmptyState
+            label="Live signals require a connected Kite session."
+            hint={research.data?.message || 'Please log in with Kite Connect to stream real live predictions.'}
+          />
+        </Card>
+      ) : isDataUnavailable ? (
+        <Card>
+          <EmptyState
+            label="Market data is currently unavailable."
+            hint={research.data?.message || 'Real intraday candle data is currently unavailable from Kite.'}
+          />
         </Card>
       ) : (
         <>
@@ -91,7 +109,10 @@ export default function LiveSignalsPage({ isAuthenticated }) {
 
           {visible.length === 0 ? (
             <Card>
-              <EmptyState label={filter === 'all' ? 'No candidates scanned yet.' : `No active ${labelFor(filter)} signals right now.`} />
+              <EmptyState
+                label={filter === 'all' ? 'No candidates scanned yet.' : `No active ${labelFor(filter)} signals right now.`}
+                hint={research.data?.message}
+              />
             </Card>
           ) : (
             <div className="space-y-3">
@@ -255,12 +276,14 @@ function MiniStat({ label, value, tone }) {
 function dirTone(direction, status) {
   if (direction === 'LONG') return 'positive'
   if (direction === 'SHORT') return 'negative'
+  if (status === 'WAITING' || status === 'MONITORING') return 'accent'
   if (status === 'UNAVAILABLE' || status === 'ERROR') return 'warning'
   return 'neutral'
 }
 function chipTone(tone) {
   if (tone === 'positive') return 'text-[var(--positive)] bg-[var(--positive-dim)] border-[var(--positive)]/30'
   if (tone === 'negative') return 'text-[var(--negative)] bg-[var(--negative-dim)] border-[var(--negative)]/30'
+  if (tone === 'accent') return 'text-[var(--accent)] bg-[var(--accent-dim)] border-[var(--accent)]/30'
   if (tone === 'warning') return 'text-[var(--warning)] bg-[var(--warning-dim)] border-[var(--warning)]/30'
   return 'text-[var(--text-dim)] bg-white/[0.04] border-[var(--border-strong)]'
 }

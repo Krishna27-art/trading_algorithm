@@ -113,22 +113,22 @@ def test_dual_ema_calculates_indicators_from_dataframe_close():
     inst = _create_sample_instrument()
     strat = BufferedDualEMAStrategy(inst, settings.strategy, min_warmup_bars=10)
 
-    # 15 historical bars with steadily rising closes
+    # 205 historical bars with steadily rising closes to warm up SMA200
     rows = []
-    for i in range(15):
-        dt = datetime(2026, 9, 26, 9, 15) + timedelta(minutes=15 * i)
-        rows.append({"datetime": dt, "high": 100.0 + i, "low": 98.0 + i, "close": 99.0 + i, "volume": 1000})
+    for i in range(205):
+        dt = datetime(2026, 9, 20, 9, 15) + timedelta(minutes=15 * i)
+        rows.append({"datetime": dt, "high": 100.0 + i * 0.1, "low": 98.0 + i * 0.1, "close": 99.0 + i * 0.1, "volume": 1000})
 
     strat.seed_context(pd.DataFrame(rows))
     strat.reset_session(date(2026, 9, 27))
 
-    candle = {"datetime": datetime(2026, 9, 27, 9, 45), "high": 120.0, "low": 115.0, "close": 118.0, "volume": 2000}
-    ind = strat._current_indicators(candle)
+    candle = {"datetime": datetime(2026, 9, 27, 9, 45), "high": 130.0, "low": 125.0, "close": 128.0, "volume": 2000}
+    ind, _ = strat._current_indicators(candle)
 
     assert ind is not None
-    assert "ema9" in ind
-    assert "ema21" in ind
-    assert "sma200" in ind
+    assert "ema9" in ind.index
+    assert "ema21" in ind.index
+    assert "sma200" in ind.index
     assert ind["ema9"] > ind["ema21"]  # Trend should be upward
 
 
@@ -140,8 +140,8 @@ def test_apex_is_independent_and_does_not_consume_other_strategy_signals():
 
     # Prior bars
     prior_bars = pd.DataFrame([
-        {"datetime": datetime(2026, 9, 26, 9, 15), "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 5000},
-        {"datetime": datetime(2026, 9, 26, 15, 0), "open": 101.0, "high": 103.0, "low": 100.0, "close": 102.0, "volume": 5000},
+        {"datetime": datetime(2026, 9, 26, 9, 15) + timedelta(minutes=15 * i), "open": 100.0 + i, "high": 102.0 + i, "low": 99.0 + i, "close": 101.0 + i, "volume": 5000}
+        for i in range(20)
     ])
     apex.seed_context(prior_bars)
     apex.reset_session(today)
@@ -158,8 +158,8 @@ def test_apex_dynamic_reweighting_without_fabricated_zeros():
     apex = ApexAivemStrategy(inst, settings.strategy)
 
     prior_bars = pd.DataFrame([
-        {"datetime": datetime(2026, 9, 26, 9, 15), "open": 100.0, "high": 102.0, "low": 98.0, "close": 100.0, "volume": 1000}
-        for _ in range(20)
+        {"datetime": datetime(2026, 9, 26, 9, 15) + timedelta(minutes=15 * i), "open": 100.0, "high": 102.0, "low": 98.0, "close": 100.0, "volume": 1000}
+        for i in range(20)
     ])
     apex.seed_context(prior_bars)
     apex.reset_session(date(2026, 9, 27))

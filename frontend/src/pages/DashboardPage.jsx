@@ -182,5 +182,16 @@ function pnlTone(v) {
 }
 
 function strategyLabel(key) {
-  return { orb: 'ORB', cpr: 'CPR', dual_ema: 'Dual EMA', rm100: 'RM100', vrp: 'VRP' }[key] || key.toUpperCase()
+  return (
+    {
+      orb: 'ORB',
+      cpr: 'CPR',
+      dual_ema: 'Dual EMA',
+      apex: 'APEX-AIVEM',
+      sector_impulse: 'Sector Impulse',
+      ssf_l5_srm: 'SSF-L5-SRM',
+      rm100: 'RM100',
+      vrp: 'VRP',
+    }[key] || key.toUpperCase()
+  )
 }

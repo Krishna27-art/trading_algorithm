@@ -271,15 +271,18 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
         self,
         token_to_symbol: Dict[int, str],
         on_candle_close: Callable[[dict, float], None],
+        on_book_update: Optional[Callable[[str, Any], None]] = None,
         timeframe_minutes: int = 15,
     ) -> None:
         """
-        Fix 2.3: Start a real KiteTicker WebSocket connection.
+        Fix 2.3: Start a real KiteTicker WebSocket connection in MODE_FULL.
         Ticks are routed through MultiSymbolCandleAggregator which fires
-        on_candle_close(candle_dict, vwap) each time a 15-minute candle closes.
+        on_candle_close(candle_dict, vwap) on candle completions, and buffers
+        Level-5 BookSnapshots for microstructure strategies like SSF-L5-SRM.
 
         token_to_symbol: {instrument_token: "SYMBOL"} for all instruments to subscribe.
         on_candle_close: callback invoked when a candle completes.
+        on_book_update: optional callback invoked when a Level-5 depth tick arrives.
         """
         if not token_to_symbol:
             logger.warning(f"[{self.name}] start_market_stream called with no tokens.")
@@ -292,11 +295,12 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
         api_key = session["api_key"]
         access_token = session["access_token"]
 
-        # Build the candle aggregator
+        # Build the candle aggregator with Level-5 depth support
         self._aggregator = MultiSymbolCandleAggregator(
             token_to_symbol_map=token_to_symbol,
             timeframe_minutes=timeframe_minutes,
             on_candle_close=on_candle_close,
+            on_book_update=on_book_update,
         )
         self.tick_callback = on_candle_close
         tokens = list(token_to_symbol.keys())
@@ -314,7 +318,7 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
             ws.subscribe(tokens)
             ws.set_mode(ws.MODE_FULL, tokens)
             logger.info(
-                f"[{self.name}] KiteTicker connected — subscribed {len(tokens)} instruments "
+                f"[{self.name}] KiteTicker connected in MODE_FULL — subscribed {len(tokens)} instruments "
                 f"({', '.join(str(t) for t in tokens[:5])}{'...' if len(tokens) > 5 else ''})"
             )
 
@@ -336,6 +340,62 @@ class KiteBrokerAdapter(BaseBrokerAdapter):
         self.kws = kws
         kws.connect(threaded=True)
         logger.info(f"[{self.name}] KiteTicker stream started (threaded).")
+
+    def get_latest_book_snapshot(self, symbol: str) -> Optional[Any]:
+        """Returns the latest Level-5 BookSnapshot from active streaming aggregator, if available."""
+        if hasattr(self, "_aggregator") and self._aggregator:
+            return self._aggregator.get_latest_book_snapshot(symbol)
+        return None
+
+    @staticmethod
+    def make_book_snapshot_from_quote(
+        quote_dict: dict,
+        symbol: str,
+        timestamp: Optional[datetime] = None,
+    ) -> Optional[Any]:
+        """
+        Extracts real Level-5 order book depth from a Kite Connect quote() response.
+        Returns a valid BookSnapshot object for microstructure evaluation.
+        """
+        if not quote_dict or not isinstance(quote_dict, dict):
+            return None
+
+        depth = quote_dict.get("depth")
+        if not depth or not isinstance(depth, dict):
+            return None
+
+        buy_levels = depth.get("buy", [])
+        sell_levels = depth.get("sell", [])
+        if len(buy_levels) < 5 or len(sell_levels) < 5:
+            return None
+
+        from strategy.ssf_l5_srm_strategy import BookSnapshot
+
+        raw_ts = quote_dict.get("timestamp")
+        if isinstance(raw_ts, datetime):
+            ts = raw_ts
+        elif isinstance(raw_ts, str):
+            try:
+                ts = datetime.fromisoformat(raw_ts)
+            except Exception:
+                ts = timestamp or datetime.now()
+        else:
+            ts = timestamp or datetime.now()
+
+        bids = [(float(b["price"]), int(b["quantity"]), int(b.get("orders", 1))) for b in buy_levels[:5]]
+        asks = [(float(a["price"]), int(a["quantity"]), int(a.get("orders", 1))) for a in sell_levels[:5]]
+        ltp = float(quote_dict.get("last_price", 0.0))
+
+        return BookSnapshot(
+            timestamp=ts,
+            bids=bids,
+            asks=asks,
+            ltp=ltp,
+            fut_ltp=ltp if "FUT" in symbol else None,
+            fut_oi=float(quote_dict.get("oi")) if quote_dict.get("oi") else None,
+            circuit_lower=float(quote_dict.get("lower_circuit_limit")) if quote_dict.get("lower_circuit_limit") else None,
+            circuit_upper=float(quote_dict.get("upper_circuit_limit")) if quote_dict.get("upper_circuit_limit") else None,
+        )
 
     def stop_market_stream(self) -> None:
         """Gracefully close the KiteTicker WebSocket connection."""

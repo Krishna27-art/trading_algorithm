@@ -206,3 +206,61 @@ def test_prediction_service_all_six_strategies():
         assert hasattr(p, "stop_loss")
         assert hasattr(p, "target")
         assert hasattr(p, "reason")
+
+
+def test_consensus_with_unavailable_and_no_trade_strategies():
+    """Verifies 2 LONG + 4 NO_TRADE is labelled MODERATE LONG (2/6), not false strong consensus."""
+    preds_2_long_4_notrade = {
+        "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG"),
+        "cpr": SingleStrategyPrediction(status="BULLISH_EXPANSION", direction="LONG"),
+        "dual_ema": SingleStrategyPrediction(status="NO_TRADE"),
+        "apex": SingleStrategyPrediction(status="NO_TRADE"),
+        "sector_impulse": SingleStrategyPrediction(status="NO_TRADE"),
+        "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE"),
+    }
+    c1 = PredictionService.calculate_consensus(preds_2_long_4_notrade)
+    assert c1["direction"] == "LONG"
+    assert c1["agreeing_strategies"] == 2
+    assert c1["total_strategies"] == 6
+    assert c1["label"] == "MODERATE LONG (2/6)"
+
+    # All unavailable
+    preds_all_unavail = {
+        k: SingleStrategyPrediction(status="UNAVAILABLE", reason="feed offline")
+        for k in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]
+    }
+    c_unavail = PredictionService.calculate_consensus(preds_all_unavail)
+    assert c_unavail["direction"] == "NEUTRAL"
+    assert c_unavail["label"] == "UNAVAILABLE"
+    assert c_unavail["evaluable_strategies"] == 0
+
+
+def test_prediction_service_with_real_book_snapshot_and_peer_context():
+    """Verifies evaluate_symbol successfully incorporates BookSnapshot and PeerContext."""
+    from data.historical_loader import HistoricalDataLoader
+    from strategy.ssf_l5_srm_strategy import BookSnapshot
+    from strategy.sector_impulse_strategy import PeerContext
+
+    df_own = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=50, base_price=1000.0)
+    df_l = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=51, base_price=2500.0)
+    df_m = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=52, base_price=24000.0)
+    df_sec = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=53, base_price=5000.0)
+
+    ctx = PeerContext(leader=df_l, market=df_m, sector=df_sec)
+    snap = BookSnapshot(
+        timestamp=datetime.now(),
+        bids=[(999.0 - i * 0.05, 1000, 1) for i in range(5)],
+        asks=[(1001.0 + i * 0.05, 1000, 1) for i in range(5)],
+        ltp=1000.0,
+    )
+
+    preds, consensus = prediction_service.evaluate_symbol(
+        symbol="SBIN",
+        df_15m=df_own,
+        current_ltp=1000.0,
+        book_snapshot=snap,
+        peer_context=ctx,
+    )
+
+    assert preds["sector_impulse"].status in ("IMPULSE_LONG", "IMPULSE_SHORT", "MONITORING", "NO_TRADE")
+    assert preds["ssf_l5_srm"].status in ("SSF_LONG", "SSF_SHORT", "WAITING", "NO_TRADE")

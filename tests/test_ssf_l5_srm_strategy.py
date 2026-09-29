@@ -78,3 +78,123 @@ def test_select_candidates_ranks_and_trims():
     resid_var = {"A": 1.0, "B": 2.0, "C": 3.0}
     picked = select_candidates(basis_z, resid_var, universe_top=3, pick=2)
     assert picked == ["C", "B"]  # ranked by |basis_z| within the top-variance set
+
+
+def test_make_book_snapshot_from_quote():
+    """Verifies KiteBrokerAdapter parses real Kite quote depth into BookSnapshot."""
+    from broker.kite_adapter import KiteBrokerAdapter
+
+    quote_dict = {
+        "instrument_token": 779521,
+        "last_price": 780.50,
+        "oi": 15000000,
+        "lower_circuit_limit": 702.0,
+        "upper_circuit_limit": 858.0,
+        "timestamp": "2025-01-02T10:30:00",
+        "depth": {
+            "buy": [
+                {"price": 780.45, "quantity": 1000, "orders": 5},
+                {"price": 780.40, "quantity": 2500, "orders": 12},
+                {"price": 780.35, "quantity": 5000, "orders": 20},
+                {"price": 780.30, "quantity": 3000, "orders": 15},
+                {"price": 780.25, "quantity": 8000, "orders": 35},
+            ],
+            "sell": [
+                {"price": 780.55, "quantity": 1200, "orders": 6},
+                {"price": 780.60, "quantity": 2000, "orders": 10},
+                {"price": 780.65, "quantity": 4500, "orders": 18},
+                {"price": 780.70, "quantity": 6000, "orders": 22},
+                {"price": 780.75, "quantity": 7500, "orders": 30},
+            ],
+        },
+    }
+
+    snap = KiteBrokerAdapter.make_book_snapshot_from_quote(quote_dict, "SBIN")
+    assert snap is not None
+    assert isinstance(snap, BookSnapshot)
+    assert snap.ltp == 780.50
+    assert len(snap.bids) == 5
+    assert len(snap.asks) == 5
+    assert snap.bids[0] == (780.45, 1000, 5)
+    assert snap.asks[0] == (780.55, 1200, 6)
+    assert snap.circuit_lower == 702.0
+    assert snap.circuit_upper == 858.0
+
+
+def test_multi_symbol_candle_aggregator_buffers_and_dispatches_depth():
+    """Verifies MultiSymbolCandleAggregator extracts Level-5 depth from ticks and fires callback."""
+    from data.candle_aggregator import MultiSymbolCandleAggregator
+
+    received_snapshots = []
+
+    def on_book(sym: str, snap: BookSnapshot):
+        received_snapshots.append((sym, snap))
+
+    agg = MultiSymbolCandleAggregator(
+        token_to_symbol_map={779521: "SBIN"},
+        timeframe_minutes=15,
+        on_book_update=on_book,
+    )
+
+    tick = {
+        "instrument_token": 779521,
+        "last_price": 780.50,
+        "last_traded_quantity": 50,
+        "volume_traded": 100000,
+        "timestamp": datetime(2025, 1, 2, 10, 0),
+        "depth": {
+            "buy": [{"price": 780.0 - i * 0.05, "quantity": 100, "orders": 1} for i in range(5)],
+            "sell": [{"price": 780.1 + i * 0.05, "quantity": 100, "orders": 1} for i in range(5)],
+        },
+    }
+
+    agg.process_ticks([tick])
+
+    latest = agg.get_latest_book_snapshot("SBIN")
+    assert latest is not None
+    assert len(received_snapshots) == 1
+    assert received_snapshots[0][0] == "SBIN"
+    assert received_snapshots[0][1].ltp == 780.50
+
+
+def test_ssf_signal_generation_on_favorable_microstructure(strategy):
+    """Verifies SSF strategy generates BUY signal when regime is OK and order flow/basis triggers."""
+    strategy.regime_ok = True
+    t0 = datetime(2025, 1, 2, 10, 0)
+    strategy.reset_session(t0.date())
+    strategy.regime_ok = True
+
+    # Feed baseline snapshots to warm up Z-score buffers with realistic mid variation
+    for i in range(70):
+        ts = t0 + timedelta(seconds=i)
+        base = 100.0 + (i % 5) * 0.10
+        snap = BookSnapshot(
+            timestamp=ts,
+            bids=[(base - k * 0.05, 100, 1) for k in range(5)],
+            asks=[(base + 0.10 + k * 0.05, 100, 1) for k in range(5)],
+            ltp=base,
+            fut_ltp=base + 0.05,
+            fut_oi=100000.0 + (i % 10) * 50.0,
+            sector_ret_30m=0.001,
+            stock_ret_30m=0.001 + (i % 5) * 0.0002,
+        )
+        strategy.on_book_update(snap)
+
+    # Now create massive buying imbalance (MLOFI + positive basis + positive sector residual)
+    impulse_snap = BookSnapshot(
+        timestamp=t0 + timedelta(seconds=71),
+        bids=[(100.50 - k * 0.05, 5000, 10) for k in range(5)],  # Bid price & quantity surged
+        asks=[(100.55 + k * 0.05, 20, 1) for k in range(5)],
+        ltp=100.50,
+        fut_ltp=101.50,  # Futures surged
+        fut_oi=150000.0, # OI surged
+        sector_ret_30m=0.001,
+        stock_ret_30m=0.010, # Outperforming sector
+    )
+
+    sig = strategy.on_book_update(impulse_snap)
+    assert sig is not None
+    assert sig.action.value == "BUY"
+    assert sig.price == 100.50
+    assert sig.stop_loss < sig.price
+    assert sig.target > sig.price

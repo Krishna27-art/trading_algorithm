@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from fastapi import APIRouter, HTTPException, status
 
-from broker.kite_adapter import get_active_kite, get_active_kite_with_diagnostics
+from broker.kite_adapter import get_active_kite, get_active_kite_with_diagnostics, kite_broker_adapter
 
 logger = logging.getLogger("backend_api.signals")
 
@@ -280,12 +280,17 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
                 logger.warning(f"Real 15m intraday data unavailable for {sym} (Token {token}) — skipping.")
                 continue
 
+            # Extract real Level-5 depth snapshot if available from live stream or quote
+            book_snap = kite_broker_adapter.get_latest_book_snapshot(sym)
+
             preds, consensus = prediction_service.evaluate_symbol(
                 symbol=sym,
                 df_15m=df_15m,
                 current_ltp=ltp,
                 token=token,
                 stock_metric=item,
+                book_snapshot=book_snap,
+                kite_client=kite,
             )
 
             cand = CandidatePrediction(
@@ -452,15 +457,19 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
     rep_apex = bt_apex.run(df, initial_capital=settings.risk.initial_capital)
 
     # 5. Sector Impulse Backtest
+    from data.sector_peer_manager import SectorPeerManager
     from strategy.sector_impulse_strategy import SectorImpulseStrategy
+    ctx_sit = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
     bt_sit = StrategyBacktester(
-        strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy),
+        strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy, ctx=ctx_sit),
         instrument=inst,
         app_settings=settings,
     )
     rep_sit = bt_sit.run(df, initial_capital=settings.risk.initial_capital)
 
     # 6. SSF-L5-SRM Backtest
+    # Note: SSF-L5-SRM is an order-book tick strategy (Level-5 depth). 
+    # Backtesting on 15m OHLCV tests regime gate tracking; historical depth is not present in OHLCV.
     from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
     bt_ssf = StrategyBacktester(
         strategy_factory=lambda: SsfL5SrmStrategy(inst, settings.strategy),
@@ -706,9 +715,11 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             app_settings=settings,
         )
     elif strat_name in ("sector_impulse", "sit"):
+        from data.sector_peer_manager import SectorPeerManager
         from strategy.sector_impulse_strategy import SectorImpulseStrategy
+        ctx_sit = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
         backtester = StrategyBacktester(
-            strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy),
+            strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy, ctx=ctx_sit),
             instrument=inst,
             app_settings=settings,
         )
@@ -845,6 +856,7 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     change_pts = 0.0
     change_pct = 0.0
     chart_candles = []
+    q_data: dict = {}
 
     if is_test:
         ltp = 24000.0 if symbol == "NIFTY" else 2000.0
@@ -954,11 +966,17 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
         df_eval = pd.DataFrame(candle_dicts)
 
     from strategy.prediction_service import prediction_service
+    book_snap = kite_broker_adapter.get_latest_book_snapshot(target_inst.symbol)
+    if book_snap is None and q_data:
+        book_snap = kite_broker_adapter.make_book_snapshot_from_quote(q_data, target_inst.symbol)
+
     preds, consensus = prediction_service.evaluate_symbol(
         symbol=target_inst.symbol,
         df_15m=df_eval,
         current_ltp=ltp,
         token=token,
+        book_snapshot=book_snap,
+        kite_client=kite,
     )
 
     pred = preds.get(strat_name) or preds.get("orb")
@@ -975,21 +993,6 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     )
     strategy_has_direction = pred and pred.direction is not None
     strategy_confidence = 100.0 if strategy_has_direction else 0.0
-
-    active_signal = None
-    if pred and pred.direction:
-        active_signal = {
-            "type": "BUY" if pred.direction == "LONG" else "SELL",
-            "symbol": target_inst.symbol,
-            "trigger": pred.reason,
-            "entry": pred.entry or ltp,
-            "stop_loss": pred.stop_loss,
-            "target": pred.target,
-            "strategy_confidence": strategy_confidence,
-            "consensus_confidence": consensus_confidence,
-            # Keep legacy field so existing frontend code doesn't break
-            "confidence": consensus_confidence,
-        }
 
     # Fetch recent trades from DB
     db = DatabaseManager(settings.db_path)
@@ -1015,12 +1018,48 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
                 "unrealized_pnl": round(unrealized, 2),
             }
 
-    # Risk metrics
+    # Risk metrics & pre-trade risk validation
+    from risk.risk_manager import RiskManager
     capital = settings.risk.initial_capital
     daily_risk_limit = round(capital * settings.risk.max_daily_loss_pct, 2)
     today_str = now.strftime("%Y-%m-%d")
     trades_today = [t for t in trades if (t.get("entry_time") or "").startswith(today_str)]
     daily_realized = sum((t.get("pnl_net") or 0.0) for t in trades if (t.get("exit_time") or "").startswith(today_str))
+
+    risk_mgr = RiskManager(
+        risk_config=settings.risk,
+        max_portfolio_daily_trades=settings.strategy.max_trades_per_instrument_day,
+    )
+    risk_mgr.reset_daily_state(now.date())
+    for tr in trades_today:
+        sym = tr.get("symbol", target_inst.symbol)
+        risk_mgr.daily_trades_count[sym] = risk_mgr.daily_trades_count.get(sym, 0) + 1
+    risk_mgr.update_pnl(realized_pnl_delta=daily_realized, current_unrealized_pnl=0.0, capital=capital)
+
+    is_risk_approved, risk_reason = risk_mgr.validate_pre_trade(
+        symbol=target_inst.symbol,
+        current_time=cur_time,
+        quantity=target_inst.lot_size,
+        capital=capital,
+        has_open_position=bool(active_trade),
+    )
+
+    active_signal = None
+    if pred and pred.direction:
+        active_signal = {
+            "type": "BUY" if pred.direction == "LONG" else "SELL",
+            "symbol": target_inst.symbol,
+            "trigger": pred.reason,
+            "entry": pred.entry or ltp,
+            "stop_loss": pred.stop_loss,
+            "target": pred.target,
+            "strategy_confidence": strategy_confidence,
+            "consensus_confidence": consensus_confidence,
+            # Keep legacy field so existing frontend code doesn't break
+            "confidence": consensus_confidence,
+            "risk_approved": is_risk_approved,
+            "risk_rejection_reason": risk_reason if not is_risk_approved else None,
+        }
 
     return {
         "symbol": target_inst.symbol,

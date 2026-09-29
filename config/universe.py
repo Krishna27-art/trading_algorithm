@@ -397,9 +397,12 @@ def resolve_300_universe_tokens(
         force_refresh=force_refresh,
     )
 
-    # Fallback to _FALLBACK_NSE_TOKENS if offline
-    merged = dict(_FALLBACK_NSE_TOKENS)
-    merged.update(resolved_map)
+    # Prioritize dynamic resolved tokens; use _FALLBACK_NSE_TOKENS only for missing entries
+    merged = dict(resolved_map)
+    for sym, tok in _FALLBACK_NSE_TOKENS.items():
+        if sym not in merged:
+            logger.debug(f"Using static fallback token {tok} for {sym}")
+            merged[sym] = tok
     return merged
 
 

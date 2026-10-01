@@ -1,44 +1,171 @@
+
 """
-Unified Strategy Prediction Service.
+Unified live strategy prediction service.
 
-Executes the REAL strategy implementations:
-1. IntradayORBStrategy (strategy/orb_strategy.py)
-2. CPRRegimeBreakoutStrategy (strategy/cpr_strategy.py)
-3. BufferedDualEMAStrategy (strategy/dual_ema_strategy.py)
-4. ApexStrategy (strategy/apex_engine.py)
-5. SectorImpulseStrategy (strategy/sector_impulse_strategy.py)
-6. SsfL5SrmStrategy (strategy/ssf_l5_srm_strategy.py)
+Responsibilities
+----------------
+- Prepare only completed real 15-minute candles for live evaluation.
+- Preserve exchange/live VWAP when the upstream feed provides it.
+- Build instrument configuration from the actual market price.
+- Execute the repository's real strategy implementations.
+- Isolate strategy failures so one broken strategy cannot fabricate or suppress
+  the other strategies' real results.
+- Validate every directional signal before exposing it.
+- Compute transparent consensus using only live-enabled strategies.
+- Never place, modify, cancel, or simulate broker orders.
 
-Provides a single source of truth for live candidate predictions, consensus
-calculations, and key market insights across all 6 strategies.
+This module is a signal/decision-support layer only.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta
+import math
 from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 from config.settings import AppSettings, InstrumentConfig, settings
 from config.universe import create_instrument_config_for_equity
+from data.market_calendar import MarketCalendar
+from data.time_utils import now_ist_naive
 from indicators.vwap import calculate_session_vwap
 from strategy.apex_engine import ApexStrategy
 from strategy.base_strategy import SignalAction, StrategySignal
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
 from strategy.dual_ema_strategy import BufferedDualEMAStrategy
 from strategy.orb_strategy import IntradayORBStrategy
-from strategy.sector_impulse_strategy import SectorImpulseStrategy, SITConfig
-from strategy.ssf_l5_srm_strategy import BookSnapshot, SsfL5SrmStrategy, SSFConfig
+from strategy.sector_impulse_strategy import SectorImpulseStrategy
+from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
+
+
+STRATEGY_KEYS = (
+    "orb",
+    "cpr",
+    "dual_ema",
+    "apex",
+    "sector_impulse",
+    "ssf_l5_srm",
+)
+
+# These are the only strategies allowed to contribute to live consensus
+# in the current architecture. The other two remain visible but do not vote.
+LIVE_CONSENSUS_STRATEGIES = (
+    "orb",
+    "cpr",
+    "dual_ema",
+    "apex",
+)
+
+REQUIRED_CANDLE_COLUMNS = {
+    "datetime",
+    "open",
+    "high",
+    "low",
+    "close",
+}
+
+IST = "Asia/Kolkata"
+SESSION_OPEN = dt_time(9, 15)
+SESSION_CLOSE = dt_time(15, 30)
+DEFAULT_TIMEFRAME_MINUTES = 15
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    """Return a finite float or None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not math.isfinite(number):
+        return None
+
+    return number
+
+
+def _positive_number(value: Any) -> Optional[float]:
+    number = _finite_number(value)
+    if number is None or number <= 0:
+        return None
+    return number
+
+
+def _normalize_ist_naive(value: Any) -> Optional[datetime]:
+    """
+    Normalize a timestamp to Asia/Kolkata and return naive IST datetime.
+
+    Naive timestamps are treated as already-IST because the repository's
+    strategy layer uses naive IST datetimes by contract.
+    """
+    if value is None:
+        return None
+
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+
+    if pd.isna(ts):
+        return None
+
+    try:
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert(IST).tz_localize(None)
+    except (TypeError, ValueError):
+        return None
+
+    return ts.to_pydatetime()
+
+
+def _safe_scalar(value: Any) -> Any:
+    """
+    Recursively normalize common numpy/pandas values into JSON-safe scalars.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (np.integer,)):
+        return int(value)
+
+    if isinstance(value, (np.floating,)):
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, (str, int, bool)):
+        return value
+
+    if isinstance(value, dict):
+        return {
+            str(k): _safe_scalar(v)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [_safe_scalar(v) for v in value]
+
+    return value
 
 
 @dataclass
 class SingleStrategyPrediction:
-    status: str  # e.g. "LONG_BREAKOUT", "BULLISH_EXPANSION", "TRENDING_LONG", "NO_TRADE", "UNAVAILABLE", "ERROR"
-    direction: Optional[str] = None  # "LONG", "SHORT", or None
+    """
+    Public prediction object exposed to backend/frontend.
+    """
+
+    status: str
+    direction: Optional[str] = None
     entry: Optional[float] = None
     stop_loss: Optional[float] = None
     target: Optional[float] = None
@@ -47,39 +174,33 @@ class SingleStrategyPrediction:
     metrics: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        d: Dict[str, Any] = {"status": self.status}
-        if self.direction:
-            d["direction"] = self.direction
-        if self.entry is not None:
-            d["entry"] = round(float(self.entry), 2)
-        if self.stop_loss is not None:
-            d["stop_loss"] = round(float(self.stop_loss), 2)
-        if self.target is not None:
-            d["target"] = round(float(self.target), 2)
-        if self.reason:
-            d["reason"] = self.reason
-        clean_levels = {}
-        if self.levels:
-            for k, v in self.levels.items():
-                if isinstance(v, (np.floating, float)):
-                    clean_levels[k] = round(float(v), 2)
-                elif isinstance(v, (np.integer, int)):
-                    clean_levels[k] = int(v)
-                else:
-                    clean_levels[k] = v
-        d["levels"] = clean_levels
+        payload: Dict[str, Any] = {
+            "status": self.status,
+        }
 
-        clean_metrics = {}
-        if self.metrics:
-            for k, v in self.metrics.items():
-                if isinstance(v, (np.floating, float)):
-                    clean_metrics[k] = round(float(v), 4) if abs(float(v)) < 1.0 else round(float(v), 2)
-                elif isinstance(v, (np.integer, int)):
-                    clean_metrics[k] = int(v)
-                else:
-                    clean_metrics[k] = v
-        d["metrics"] = clean_metrics
-        return d
+        if self.direction is not None:
+            payload["direction"] = self.direction
+
+        if self.entry is not None:
+            payload["entry"] = round(float(self.entry), 2)
+
+        if self.stop_loss is not None:
+            payload["stop_loss"] = round(float(self.stop_loss), 2)
+
+        if self.target is not None:
+            payload["target"] = round(float(self.target), 2)
+
+        if self.reason:
+            payload["reason"] = str(self.reason)
+
+        payload["levels"] = _safe_scalar(
+            self.levels or {}
+        )
+        payload["metrics"] = _safe_scalar(
+            self.metrics or {}
+        )
+
+        return payload
 
 
 @dataclass
@@ -93,184 +214,96 @@ class CandidatePrediction:
     consensus: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
-        preds_dict = {k: (v.to_dict() if hasattr(v, "to_dict") else v) for k, v in self.predictions.items()}
+        predictions = {
+            key: (
+                value.to_dict()
+                if isinstance(
+                    value,
+                    SingleStrategyPrediction,
+                )
+                else _safe_scalar(value)
+            )
+            for key, value in self.predictions.items()
+        }
+
         return {
-            "rank": self.rank,
+            "rank": int(self.rank),
             "symbol": self.symbol,
-            "ltp": round(self.ltp, 2),
-            "momentum_score": round(self.momentum_score, 1),
+            "ltp": round(float(self.ltp), 2),
+            "momentum_score": round(
+                float(self.momentum_score),
+                1,
+            ),
             "universe_bias": self.universe_bias,
-            "predictions": preds_dict,
-            "strategies": preds_dict,  # Alias for frontend access
-            "consensus": self.consensus,
+            "predictions": predictions,
+            # Kept for frontend compatibility.
+            "strategies": predictions,
+            "consensus": _safe_scalar(
+                self.consensus
+            ),
         }
 
 
 class PredictionService:
     """
-    Evaluates all 6 intraday strategies independently across candidate instruments.
-    1. ORB            (Intraday Opening Range Breakout)
-    2. CPR            (Central Pivot Range Regime Breakout)
-    3. Dual-EMA       (Buffered Dual-EMA Trend)
-    4. APEX           (APEX-AIVEM Composite Score & Momentum Engine)
-    5. Sector Impulse (Sector Impulse Transmission - SIT)
-    6. SSF-L5-SRM     (Single-Stock Futures Lead-Lag & Level-5 Microprice Drift)
+    Single source of truth for strategy evaluation and consensus.
+
+    The service never manufactures a trading value. A missing required input
+    results in NO_TRADE, UNAVAILABLE, or ERROR.
     """
 
-    # Only strategies with a complete live signal path may vote in live consensus.
-    # SIT currently lacks a trustworthy live signal path for this application.
-    # SSF-L5-SRM requires the live Level-5/futures/sector feed path, which the
-    # /api/research/live request does not provide as a live signal engine.
-    LIVE_CONSENSUS_STRATEGIES = (
-        "orb",
-        "cpr",
-        "dual_ema",
-        "apex",
-    )
+    LIVE_CONSENSUS_STRATEGIES = LIVE_CONSENSUS_STRATEGIES
 
-    def __init__(self, app_settings: AppSettings = settings):
-        self.settings = app_settings
-        self.cache_dir = settings.base_dir / "data" / "cache"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def evaluate_symbol(
+    def __init__(
         self,
-        symbol: str,
-        df_15m: pd.DataFrame,
-        current_ltp: Optional[float] = None,
-        token: Optional[int] = None,
-        stock_metric: Optional[Any] = None,
-        book_snapshot: Optional[Any] = None,
-        peer_context: Optional[Any] = None,
-        kite_client: Optional[Any] = None,
-    ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
-        """
-        Runs all 6 strategies independently on the provided instrument data:
-        1. orb
-        2. cpr
-        3. dual_ema
-        4. apex
-        5. sector_impulse
-        6. ssf_l5_srm
-
-        Returns (predictions_map, consensus_dict).
-        """
-        # --------------------------------------------------------------
-        # LIVE DATA SAFETY
-        # --------------------------------------------------------------
-        # Never evaluate the forming candle and never allow yesterday's
-        # session to masquerade as today's live state.
-        df_15m = self._prepare_live_candles(
-            df_15m
+        app_settings: AppSettings = settings,
+    ):
+        self.settings = app_settings
+        self.cache_dir = (
+            self.settings.base_dir
+            / "data"
+            / "cache"
+        )
+        self.cache_dir.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
-        if df_15m.empty:
-            unavailable = {
-                key: SingleStrategyPrediction(
-                    status="NO_TRADE",
-                    reason=(
-                        "No completed 15-minute candle "
-                        "is available for the current IST session."
-                    ),
-                )
-                for key in (
-                    "orb",
-                    "cpr",
-                    "dual_ema",
-                    "apex",
-                    "sector_impulse",
-                    "ssf_l5_srm",
-                )
-            }
-
-            return (
-                unavailable,
-                self.calculate_consensus(unavailable),
-            )
-
-        inst = create_instrument_config_for_equity(
-            symbol,
-            token or 0,
-        )
-
-        ltp = (
-            current_ltp
-            if current_ltp is not None
-            else (
-                float(df_15m["close"].iloc[-1])
-                if not df_15m.empty
-                else 0.0
-            )
-        )
-
-        orb_pred = self._evaluate_orb(inst, df_15m, ltp)
-        cpr_pred = self._evaluate_cpr(inst, df_15m, ltp)
-        dual_ema_pred = self._evaluate_dual_ema(inst, df_15m, ltp)
-        apex_pred = self._evaluate_apex(inst, df_15m, ltp)
-        sector_impulse_pred = self._evaluate_sector_impulse(
-            inst, df_15m, ltp, peer_context=peer_context, kite_client=kite_client
-        )
-        ssf_l5_srm_pred = self._evaluate_ssf_l5_srm(
-            inst, df_15m, ltp, book_snapshot=book_snapshot
-        )
-
-        predictions = {
-            "orb": orb_pred,
-            "cpr": cpr_pred,
-            "dual_ema": dual_ema_pred,
-            "apex": apex_pred,
-            "sector_impulse": sector_impulse_pred,
-            "ssf_l5_srm": ssf_l5_srm_pred,
-        }
-
-        # Secondary live-price invalidation.
-        predictions = {
-            key: self._invalidate_price_breached_signal(
-                prediction=value,
-                current_ltp=ltp,
-            )
-            for key, value in predictions.items()
-        }
-
-        consensus = self.calculate_consensus(
-            predictions
-        )
-        return predictions, consensus
+    # ================================================================
+    # INPUT VALIDATION / PREPARATION
+    # ================================================================
 
     @staticmethod
-    def _latest_completed_15m_start(now_ist: datetime) -> Optional[datetime]:
+    def _latest_completed_15m_start(
+        now_ist: datetime,
+    ) -> Optional[datetime]:
         """
-        Return the start timestamp of the latest COMPLETED 15-minute candle.
+        Return the open timestamp of the latest fully completed 15m candle.
 
-        Zerodha 15-minute timestamps represent candle OPEN time:
-
-            09:15 -> 09:15-09:30
-            09:30 -> 09:30-09:45
-            09:45 -> 09:45-10:00
-            ...
-
-        Therefore:
-            09:20 -> no completed candle
-            09:30 -> 09:15 is the latest completed candle
-            10:07 -> 09:45 is the latest completed candle
-            14:07 -> 13:45 is the latest completed candle
-            15:30 -> 15:15 is the latest completed candle
+        At 10:07 -> 09:45
+        At 10:15 -> 10:00
+        At 15:30 -> 15:15
+        Before 09:30 -> None
         """
+        now = _normalize_ist_naive(now_ist)
 
-        now = now_ist.replace(tzinfo=None)
+        if now is None:
+            return None
 
-        session_open = datetime.combine(
+        session_start = datetime.combine(
             now.date(),
-            dt_time(9, 15),
+            SESSION_OPEN,
         )
-
         session_close = datetime.combine(
             now.date(),
-            dt_time(15, 30),
+            SESSION_CLOSE,
         )
 
-        first_completed = session_open + timedelta(
-            minutes=15
+        first_completed = (
+            session_start
+            + timedelta(
+                minutes=DEFAULT_TIMEFRAME_MINUTES
+            )
         )
 
         if now < first_completed:
@@ -282,61 +315,130 @@ class PredictionService:
         )
 
         elapsed_minutes = (
-            effective_now - session_open
+            effective_now - session_start
         ).total_seconds() / 60.0
 
         completed_bars = int(
-            elapsed_minutes // 15
+            elapsed_minutes
+            // DEFAULT_TIMEFRAME_MINUTES
         )
 
         if completed_bars <= 0:
             return None
 
-        return session_open + timedelta(
-            minutes=(completed_bars - 1) * 15
+        return session_start + timedelta(
+            minutes=(
+                completed_bars - 1
+            ) * DEFAULT_TIMEFRAME_MINUTES
         )
+
+    @staticmethod
+    def _validate_candle_dataframe(
+        data: pd.DataFrame,
+    ) -> bool:
+        if data is None or data.empty:
+            return False
+
+        if not REQUIRED_CANDLE_COLUMNS.issubset(
+            data.columns
+        ):
+            return False
+
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+        ]
+
+        for column in numeric_columns:
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        if "volume" in data.columns:
+            data["volume"] = pd.to_numeric(
+                data["volume"],
+                errors="coerce",
+            ).fillna(0.0)
+
+        valid = (
+            data["datetime"].notna()
+            & data["open"].notna()
+            & data["high"].notna()
+            & data["low"].notna()
+            & data["close"].notna()
+            & (data["open"] > 0)
+            & (data["high"] > 0)
+            & (data["low"] > 0)
+            & (data["close"] > 0)
+            & (data["high"] >= data["low"])
+            & (data["high"] >= data["open"])
+            & (data["high"] >= data["close"])
+            & (data["low"] <= data["open"])
+            & (data["low"] <= data["close"])
+        )
+
+        return bool(valid.all())
 
     def _prepare_live_candles(
         self,
         df_15m: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Prepare the dataframe used by the live prediction engine.
+        Return only today's completed IST-session candles.
 
-        Guarantees:
-        - timestamps are chronological
-        - forming candle is removed
-        - only candles up to the latest completed 15m bar are used
-        - the latest session must be today's IST session
+        No server clock, synthetic row, or forming candle is introduced.
         """
-
-        if df_15m is None or df_15m.empty:
+        if (
+            df_15m is None
+            or not isinstance(df_15m, pd.DataFrame)
+            or df_15m.empty
+        ):
             return pd.DataFrame()
 
         data = df_15m.copy()
 
-        if "datetime" not in data.columns:
+        if not REQUIRED_CANDLE_COLUMNS.issubset(
+            data.columns
+        ):
             return pd.DataFrame()
 
-        data["datetime"] = pd.to_datetime(
-            data["datetime"]
+        # Normalize each timestamp individually so mixed aware/naive
+        # timestamps cannot silently turn into UTC-based data.
+        data["datetime"] = data["datetime"].map(
+            _normalize_ist_naive
         )
 
-        # Normalize timezone-aware timestamps to IST naive timestamps.
-        if getattr(data["datetime"].dt, "tz", None) is not None:
-            data["datetime"] = (
-                data["datetime"]
-                .dt.tz_convert("Asia/Kolkata")
-                .dt.tz_localize(None)
-            )
+        data = data.dropna(
+            subset=["datetime"]
+        ).copy()
+
+        if data.empty:
+            return pd.DataFrame()
+
+        if not self._validate_candle_dataframe(
+            data
+        ):
+            return pd.DataFrame()
 
         data = data.sort_values(
             "datetime"
         ).reset_index(drop=True)
 
-        now_ist = datetime.now(
-            ZoneInfo("Asia/Kolkata")
-        )
+        # A timestamp identifies one source candle. Keep one observation.
+        data = data.drop_duplicates(
+            subset=["datetime"],
+            keep="last",
+        ).reset_index(drop=True)
+
+        now_ist = now_ist_naive()
+
+        if not MarketCalendar.is_trading_day(
+            now_ist.date()
+        ):
+            return pd.DataFrame()
 
         latest_completed = (
             self._latest_completed_15m_start(
@@ -347,88 +449,624 @@ class PredictionService:
         if latest_completed is None:
             return pd.DataFrame()
 
-        # Remove the currently-forming candle and anything after it.
+        today = now_ist.date()
+
         data = data[
-            data["datetime"] <= latest_completed
+            (data["datetime"].dt.date == today)
+            & (
+                data["datetime"].dt.time
+                >= SESSION_OPEN
+            )
+            & (
+                data["datetime"]
+                <= latest_completed
+            )
         ].copy()
 
         if data.empty:
             return pd.DataFrame()
 
-        # The live prediction engine must operate on today's session.
-        today = now_ist.date()
+        # The live system expects 15-minute source bars.
+        # Do not manufacture missing candles. Drop bars outside the
+        # expected grid instead of silently re-bucketing them.
+        session_open_dt = datetime.combine(
+            today,
+            SESSION_OPEN,
+        )
 
-        if data["datetime"].dt.date.max() != today:
-            return pd.DataFrame()
+        elapsed = (
+            data["datetime"]
+            - session_open_dt
+        ).dt.total_seconds()
 
-        return data.reset_index(drop=True)
+        grid_seconds = (
+            DEFAULT_TIMEFRAME_MINUTES
+            * 60
+        )
 
-    @staticmethod
-    def _invalidate_price_breached_signal(
-        prediction: SingleStrategyPrediction,
-        current_ltp: float,
-    ) -> SingleStrategyPrediction:
+        on_grid = (
+            elapsed >= 0
+        ) & (
+            elapsed
+            % grid_seconds
+            == 0
+        )
+
+        data = data[on_grid].copy()
+
+        return data.reset_index(
+            drop=True
+        )
+
+    def _prepare_data(
+        self,
+        df_15m: pd.DataFrame,
+    ) -> Tuple[
+        pd.DataFrame,
+        List[Tuple[date, pd.DataFrame]],
+    ]:
         """
-        Reject a directional signal when the current live LTP has already
-        crossed the signal's stop or target.
+        Prepare chronological strategy data.
+
+        Existing valid VWAP values are preserved. Missing VWAP values are
+        derived from the real OHLCV candles as an explicit fallback.
         """
-
-        if prediction.direction is None:
-            return prediction
-
-        if current_ltp is None or current_ltp <= 0:
-            return prediction
-
-        stop = prediction.stop_loss
-        target = prediction.target
-
         if (
-            prediction.direction == "LONG"
-            and (
-                (stop is not None and current_ltp <= stop)
-                or (target is not None and current_ltp >= target)
-            )
+            df_15m is None
+            or not isinstance(df_15m, pd.DataFrame)
+            or df_15m.empty
         ):
-            return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason=(
-                    "Signal expired: current LTP has already "
-                    "crossed the signal stop/target."
-                ),
-                levels=prediction.levels,
-                metrics=prediction.metrics,
-            )
+            return pd.DataFrame(), []
 
-        if (
-            prediction.direction == "SHORT"
-            and (
-                (stop is not None and current_ltp >= stop)
-                or (target is not None and current_ltp <= target)
-            )
-        ):
-            return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason=(
-                    "Signal expired: current LTP has already "
-                    "crossed the signal stop/target."
-                ),
-                levels=prediction.levels,
-                metrics=prediction.metrics,
-            )
-
-        return prediction
-
-    def _prepare_data(self, df_15m: pd.DataFrame) -> Tuple[pd.DataFrame, List[Tuple[date, pd.DataFrame]]]:
         data = df_15m.copy()
-        if "datetime" not in data.columns and isinstance(data.index, pd.DatetimeIndex):
+
+        if (
+            "datetime" not in data.columns
+            and isinstance(
+                data.index,
+                pd.DatetimeIndex,
+            )
+        ):
             data["datetime"] = data.index
-        data["datetime"] = pd.to_datetime(data["datetime"])
-        data.sort_values("datetime", inplace=True)
-        data["vwap"] = calculate_session_vwap(data).values
-        data["date"] = data["datetime"].dt.date
-        days = list(data.groupby("date"))
+
+        if "datetime" not in data.columns:
+            return pd.DataFrame(), []
+
+        data["datetime"] = data["datetime"].map(
+            _normalize_ist_naive
+        )
+
+        data = data.dropna(
+            subset=["datetime"]
+        ).copy()
+
+        required = {
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+        }
+
+        if not required.issubset(
+            data.columns
+        ):
+            return pd.DataFrame(), []
+
+        for column in (
+            "open",
+            "high",
+            "low",
+            "close",
+        ):
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        if "volume" not in data.columns:
+            data["volume"] = 0.0
+
+        data["volume"] = pd.to_numeric(
+            data["volume"],
+            errors="coerce",
+        ).fillna(0.0)
+
+        data = data.dropna(
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close",
+            ]
+        ).copy()
+
+        data = data[
+            (data["open"] > 0)
+            & (data["high"] > 0)
+            & (data["low"] > 0)
+            & (data["close"] > 0)
+            & (data["high"] >= data["low"])
+            & (data["high"] >= data["open"])
+            & (data["high"] >= data["close"])
+            & (data["low"] <= data["open"])
+            & (data["low"] <= data["close"])
+        ].copy()
+
+        data = data.sort_values(
+            "datetime"
+        )
+
+        data = data.drop_duplicates(
+            subset=["datetime"],
+            keep="last",
+        ).reset_index(drop=True)
+
+        if data.empty:
+            return pd.DataFrame(), []
+
+        derived_vwap = calculate_session_vwap(
+            data
+        )
+
+        if (
+            "vwap" not in data.columns
+        ):
+            data["vwap"] = derived_vwap.to_numpy()
+        else:
+            supplied_vwap = pd.to_numeric(
+                data["vwap"],
+                errors="coerce",
+            )
+
+            use_derived = (
+                supplied_vwap.isna()
+                | ~np.isfinite(
+                    supplied_vwap.to_numpy()
+                )
+                | (supplied_vwap <= 0)
+            )
+
+            data["vwap"] = supplied_vwap
+
+            data.loc[
+                use_derived,
+                "vwap",
+            ] = derived_vwap.loc[
+                data.index[
+                    use_derived
+                ]
+            ].to_numpy()
+
+        data["date"] = (
+            data["datetime"].dt.date
+        )
+
+        days = list(
+            data.groupby(
+                "date",
+                sort=True,
+            )
+        )
+
         return data, days
 
+    @staticmethod
+    def _resolve_ltp(
+        df_15m: pd.DataFrame,
+        current_ltp: Optional[float],
+    ) -> Optional[float]:
+        """
+        Use the actual supplied live LTP when valid.
+
+        When the caller does not provide one, the latest completed candle
+        close is used as a derived fallback from real market data. No constant
+        price is ever introduced.
+        """
+        supplied = _positive_number(
+            current_ltp
+        )
+
+        if supplied is not None:
+            return supplied
+
+        if (
+            df_15m is None
+            or df_15m.empty
+            or "close" not in df_15m.columns
+        ):
+            return None
+
+        return _positive_number(
+            df_15m["close"].iloc[-1]
+        )
+
+    @staticmethod
+    def _candle_dict(
+        row: pd.Series,
+    ) -> Dict[str, Any]:
+        return {
+            "datetime": row["datetime"],
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": max(
+                int(row.get("volume", 0)),
+                0,
+            ),
+        }
+
+    # ================================================================
+    # SIGNAL VALIDATION
+    # ================================================================
+
+    @staticmethod
+    def _validate_directional_signal(
+        signal: Optional[StrategySignal],
+        ltp: float,
+    ) -> Optional[str]:
+        """
+        Validate the economic geometry of a strategy signal.
+
+        LONG:
+            stop < entry < target
+
+        SHORT:
+            target < entry < stop
+
+        Also require positive finite values and a non-expired current LTP.
+        """
+        if signal is None:
+            return "NO_SIGNAL"
+
+        if signal.action not in {
+            SignalAction.BUY,
+            SignalAction.SELL,
+        }:
+            return "NON_DIRECTIONAL"
+
+        entry = _positive_number(
+            getattr(signal, "price", None)
+        )
+
+        stop = _positive_number(
+            getattr(signal, "stop_loss", None)
+        )
+
+        target = _positive_number(
+            getattr(signal, "target", None)
+        )
+
+        if (
+            entry is None
+            or stop is None
+            or target is None
+        ):
+            return (
+                "INVALID_SIGNAL_LEVELS"
+            )
+
+        direction = (
+            "LONG"
+            if signal.action == SignalAction.BUY
+            else "SHORT"
+        )
+
+        if direction == "LONG":
+            if not (
+                stop < entry < target
+            ):
+                return (
+                    "INVALID_LONG_LEVEL_ORDER"
+                )
+
+            if ltp <= stop:
+                return (
+                    "EXPIRED_LONG_STOP"
+                )
+
+            if ltp >= target:
+                return (
+                    "EXPIRED_LONG_TARGET"
+                )
+
+        else:
+            if not (
+                target < entry < stop
+            ):
+                return (
+                    "INVALID_SHORT_LEVEL_ORDER"
+                )
+
+            if ltp >= stop:
+                return (
+                    "EXPIRED_SHORT_STOP"
+                )
+
+            if ltp <= target:
+                return (
+                    "EXPIRED_SHORT_TARGET"
+                )
+
+        return None
+
+    @staticmethod
+    def _prediction_from_signal(
+        status: str,
+        signal: StrategySignal,
+        ltp: float,
+        default_reason: str,
+        levels: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> SingleStrategyPrediction:
+        validation_error = (
+            PredictionService
+            ._validate_directional_signal(
+                signal,
+                ltp,
+            )
+        )
+
+        if validation_error is not None:
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    f"Signal rejected: "
+                    f"{validation_error}."
+                ),
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        direction = (
+            "LONG"
+            if signal.action == SignalAction.BUY
+            else "SHORT"
+        )
+
+        return SingleStrategyPrediction(
+            status=status,
+            direction=direction,
+            entry=float(signal.price),
+            stop_loss=float(
+                signal.stop_loss
+            ),
+            target=float(
+                signal.target
+            ),
+            reason=(
+                signal.reason
+                or default_reason
+            ),
+            levels=levels or {},
+            metrics=metrics or {},
+        )
+
+    @staticmethod
+    def _error_prediction(
+        strategy_name: str,
+        exc: Exception,
+    ) -> SingleStrategyPrediction:
+        """
+        Convert a strategy exception into an explicit ERROR state.
+
+        ERROR never carries direction/entry/SL/target, therefore it cannot
+        accidentally vote in consensus.
+        """
+        return SingleStrategyPrediction(
+            status="ERROR",
+            reason=(
+                f"{strategy_name} evaluation failed: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            levels={},
+            metrics={},
+        )
+
+    # ================================================================
+    # PUBLIC EVALUATION
+    # ================================================================
+
+    def evaluate_symbol(
+        self,
+        symbol: str,
+        df_15m: pd.DataFrame,
+        current_ltp: Optional[float] = None,
+        token: Optional[int] = None,
+        stock_metric: Optional[Any] = None,
+        book_snapshot: Optional[Any] = None,
+        peer_context: Optional[Any] = None,
+        kite_client: Optional[Any] = None,
+    ) -> Tuple[
+        Dict[str, SingleStrategyPrediction],
+        Dict[str, Any],
+    ]:
+        """
+        Evaluate all six strategies independently.
+
+        One strategy failure never suppresses all other valid strategies.
+        """
+        clean_symbol = (
+            str(symbol).strip().upper()
+        )
+
+        live_df = self._prepare_live_candles(
+            df_15m
+        )
+
+        if live_df.empty:
+            predictions = {
+                key: SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "No completed 15-minute "
+                        "candle is available "
+                        "for today's IST session."
+                    ),
+                    levels={},
+                    metrics={},
+                )
+                for key in STRATEGY_KEYS
+            }
+
+            return (
+                predictions,
+                self.calculate_consensus(
+                    predictions
+                ),
+            )
+
+        ltp = self._resolve_ltp(
+            live_df,
+            current_ltp,
+        )
+
+        if ltp is None:
+            predictions = {
+                key: SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        "No valid real market LTP "
+                        "was supplied and no valid "
+                        "completed candle close exists."
+                    ),
+                    levels={},
+                    metrics={},
+                )
+                for key in STRATEGY_KEYS
+            }
+
+            return (
+                predictions,
+                self.calculate_consensus(
+                    predictions
+                ),
+            )
+
+        # Critical fix:
+        # the actual market price is passed into the equity configuration.
+        inst = create_instrument_config_for_equity(
+            clean_symbol,
+            token or 0,
+            current_price=ltp,
+        )
+
+        predictions: Dict[
+            str,
+            SingleStrategyPrediction,
+        ] = {}
+
+        # Each strategy is isolated.
+        # A failure becomes ERROR, not fake data and not a whole-request failure.
+        try:
+            predictions["orb"] = (
+                self._evaluate_orb(
+                    inst,
+                    live_df,
+                    ltp,
+                )
+            )
+        except Exception as exc:
+            predictions["orb"] = (
+                self._error_prediction(
+                    "ORB",
+                    exc,
+                )
+            )
+
+        try:
+            predictions["cpr"] = (
+                self._evaluate_cpr(
+                    inst,
+                    live_df,
+                    ltp,
+                )
+            )
+        except Exception as exc:
+            predictions["cpr"] = (
+                self._error_prediction(
+                    "CPR",
+                    exc,
+                )
+            )
+
+        try:
+            predictions["dual_ema"] = (
+                self._evaluate_dual_ema(
+                    inst,
+                    live_df,
+                    ltp,
+                )
+            )
+        except Exception as exc:
+            predictions["dual_ema"] = (
+                self._error_prediction(
+                    "Dual EMA",
+                    exc,
+                )
+            )
+
+        try:
+            predictions["apex"] = (
+                self._evaluate_apex(
+                    inst,
+                    live_df,
+                    ltp,
+                )
+            )
+        except Exception as exc:
+            predictions["apex"] = (
+                self._error_prediction(
+                    "APEX",
+                    exc,
+                )
+            )
+
+        try:
+            predictions["sector_impulse"] = (
+                self._evaluate_sector_impulse(
+                    inst,
+                    live_df,
+                    ltp,
+                    peer_context=peer_context,
+                    kite_client=kite_client,
+                )
+            )
+        except Exception as exc:
+            predictions["sector_impulse"] = (
+                self._error_prediction(
+                    "Sector Impulse",
+                    exc,
+                )
+            )
+
+        try:
+            predictions["ssf_l5_srm"] = (
+                self._evaluate_ssf_l5_srm(
+                    inst,
+                    live_df,
+                    ltp,
+                    book_snapshot=book_snapshot,
+                )
+            )
+        except Exception as exc:
+            predictions["ssf_l5_srm"] = (
+                self._error_prediction(
+                    "SSF-L5-SRM",
+                    exc,
+                )
+            )
+
+        consensus = self.calculate_consensus(
+            predictions
+        )
+
+        return predictions, consensus
+
+    # ================================================================
+    # ORB
+    # ================================================================
 
     def _evaluate_orb(
         self,
@@ -436,84 +1074,134 @@ class PredictionService:
         df_15m: pd.DataFrame,
         ltp: float,
     ) -> SingleStrategyPrediction:
-        """Evaluates actual IntradayORBStrategy on latest session."""
         if df_15m.empty:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No 15m candle data available.",
+            )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
+
         if not days:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No trading days found.",
+            )
 
         latest_date, today_df = days[-1]
-        strategy = IntradayORBStrategy(inst, self.settings.strategy)
-        strategy.reset_session(latest_date)
 
-        current_signal: Optional[StrategySignal] = None
-        for i in range(len(today_df)):
-            row = today_df.iloc[i]
-            candle = {
-                "datetime": row["datetime"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row.get("volume", 0)),
-            }
-            vwap = float(row.get("vwap", row["close"]))
-            sig = strategy.on_candle(candle, vwap)
-            if i == len(today_df) - 1:
-                current_signal = sig
+        strategy = IntradayORBStrategy(
+            inst,
+            self.settings.strategy,
+        )
+
+        strategy.reset_session(
+            latest_date
+        )
+
+        current_signal: Optional[
+            StrategySignal
+        ] = None
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                continue
+
+            current_signal = strategy.on_candle(
+                candle,
+                vwap,
+            )
 
         orb_info: Dict[str, Any] = {}
-        if strategy.orb:
+
+        if strategy.orb is not None:
             orb_info = {
-                "orb_high": round(strategy.orb.high, 2),
-                "orb_low": round(strategy.orb.low, 2),
-                "orb_width": round(strategy.orb.width, 2),
-                "is_valid_volatility": strategy.orb.is_valid_volatility,
+                "orb_high": round(
+                    float(strategy.orb.high),
+                    2,
+                ),
+                "orb_low": round(
+                    float(strategy.orb.low),
+                    2,
+                ),
+                "orb_width": round(
+                    float(strategy.orb.width),
+                    2,
+                ),
+                "is_valid_volatility": bool(
+                    strategy.orb.is_valid_volatility
+                ),
             }
 
-        if current_signal:
+        if current_signal is not None:
             if current_signal.action == SignalAction.BUY:
-                return SingleStrategyPrediction(
+                return self._prediction_from_signal(
                     status="LONG_BREAKOUT",
-                    direction="LONG",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "Price broke above 30m ORB High with VWAP confirmation",
-                    levels=orb_info,
-                )
-            elif current_signal.action == SignalAction.SELL:
-                return SingleStrategyPrediction(
-                    status="SHORT_BREAKDOWN",
-                    direction="SHORT",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "Price broke below 30m ORB Low with VWAP confirmation",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Price broke above the "
+                        "30-minute ORB High with "
+                        "VWAP confirmation."
+                    ),
                     levels=orb_info,
                 )
 
-        if not strategy.orb:
+            if current_signal.action == SignalAction.SELL:
+                return self._prediction_from_signal(
+                    status="SHORT_BREAKDOWN",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Price broke below the "
+                        "30-minute ORB Low with "
+                        "VWAP confirmation."
+                    ),
+                    levels=orb_info,
+                )
+
+        if strategy.orb is None:
             return SingleStrategyPrediction(
                 status="WAITING",
-                reason="Establishing 30-minute opening range (09:15 - 09:45 IST)",
+                reason=(
+                    "Establishing the 30-minute "
+                    "opening range (09:15-09:45 IST)."
+                ),
                 levels=orb_info,
             )
 
         if not strategy.orb.is_valid_volatility:
             return SingleStrategyPrediction(
                 status="NO_TRADE",
-                reason=f"Opening range width ({strategy.orb.width:.1f} pts) below volatility cutoff",
+                reason=(
+                    "Opening range failed the "
+                    "configured volatility filter."
+                ),
                 levels=orb_info,
             )
 
         return SingleStrategyPrediction(
             status="NO_TRADE",
-            reason=f"Price within opening range boundaries ({strategy.orb.low:.1f} - {strategy.orb.high:.1f})",
+            reason=(
+                "No valid ORB breakout signal "
+                "on the latest completed candle."
+            ),
             levels=orb_info,
         )
+
+    # ================================================================
+    # CPR
+    # ================================================================
 
     def _evaluate_cpr(
         self,
@@ -521,84 +1209,152 @@ class PredictionService:
         df_15m: pd.DataFrame,
         ltp: float,
     ) -> SingleStrategyPrediction:
-        """Evaluates actual CPRRegimeBreakoutStrategy."""
         if df_15m.empty:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No 15m candle data available.",
+            )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
+
         if len(days) < 2:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="Requires at least 2 sessions for prior-day CPR calculation")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    "Requires prior-session data "
+                    "for CPR calculation."
+                ),
+            )
 
-        # Prior days for seed_context
-        lookback_df = pd.concat([d for _, d in days[:-1]], ignore_index=True)
+        lookback_df = pd.concat(
+            [
+                day_df
+                for _, day_df in days[:-1]
+            ],
+            ignore_index=True,
+        )
+
         latest_date, today_df = days[-1]
 
-        strategy = CPRRegimeBreakoutStrategy(inst, self.settings.strategy)
-        strategy.seed_context(lookback_df)
-        strategy.reset_session(latest_date)
+        strategy = CPRRegimeBreakoutStrategy(
+            inst,
+            self.settings.strategy,
+        )
+
+        strategy.seed_context(
+            lookback_df
+        )
+        strategy.reset_session(
+            latest_date
+        )
+
+        current_signal: Optional[
+            StrategySignal
+        ] = None
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                continue
+
+            current_signal = strategy.on_candle(
+                candle,
+                vwap,
+            )
 
         cpr_levels: Dict[str, Any] = {}
+
         if strategy.pivots:
             cpr_levels = {
-                "pivot": round(strategy.pivots["P"], 2),
-                "bottom_central": round(strategy.pivots["BC"], 2),
-                "top_central": round(strategy.pivots["TC"], 2),
-                "r1": round(strategy.pivots["R1"], 2),
-                "s1": round(strategy.pivots["S1"], 2),
-                "cpr_width_pct": round(strategy.pivots["width_pct"], 2),
-                "regime": strategy.regime,
+                "pivot": round(
+                    float(strategy.pivots["P"]),
+                    2,
+                ),
+                "bottom_central": round(
+                    float(strategy.pivots["BC"]),
+                    2,
+                ),
+                "top_central": round(
+                    float(strategy.pivots["TC"]),
+                    2,
+                ),
+                "r1": round(
+                    float(strategy.pivots["R1"]),
+                    2,
+                ),
+                "s1": round(
+                    float(strategy.pivots["S1"]),
+                    2,
+                ),
+                "cpr_width_pct": round(
+                    float(
+                        strategy.pivots[
+                            "width_pct"
+                        ]
+                    ),
+                    2,
+                ),
+                "regime": _safe_scalar(
+                    strategy.regime
+                ),
             }
 
-        current_signal: Optional[StrategySignal] = None
-        for i in range(len(today_df)):
-            row = today_df.iloc[i]
-            candle = {
-                "datetime": row["datetime"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row.get("volume", 0)),
-            }
-            vwap = float(row.get("vwap", row["close"]))
-            sig = strategy.on_candle(candle, vwap)
-            if i == len(today_df) - 1:
-                current_signal = sig
-
-        if current_signal:
+        if current_signal is not None:
             if current_signal.action == SignalAction.BUY:
-                return SingleStrategyPrediction(
+                return self._prediction_from_signal(
                     status="BULLISH_EXPANSION",
-                    direction="LONG",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or f"Price above TC ({cpr_levels.get('top_central')}) during {strategy.regime} regime",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Valid CPR bullish breakout "
+                        "on the latest completed candle."
+                    ),
                     levels=cpr_levels,
                 )
-            elif current_signal.action == SignalAction.SELL:
-                return SingleStrategyPrediction(
+
+            if current_signal.action == SignalAction.SELL:
+                return self._prediction_from_signal(
                     status="BEARISH_EXPANSION",
-                    direction="SHORT",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or f"Price below BC ({cpr_levels.get('bottom_central')}) during {strategy.regime} regime",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Valid CPR bearish breakdown "
+                        "on the latest completed candle."
+                    ),
                     levels=cpr_levels,
                 )
 
         if strategy.regime == Regime.NEUTRAL:
             return SingleStrategyPrediction(
                 status="NO_TRADE",
-                reason="CPR neutral regime (width between 20th and 80th percentile)",
+                reason=(
+                    "CPR regime is neutral; "
+                    "no directional setup is active."
+                ),
                 levels=cpr_levels,
             )
 
         return SingleStrategyPrediction(
             status="NO_TRADE",
-            reason=f"No breakout trigger in {strategy.regime} CPR regime",
+            reason=(
+                "No valid CPR trigger on the "
+                "latest completed candle."
+            ),
             levels=cpr_levels,
         )
+
+    # ================================================================
+    # DUAL EMA
+    # ================================================================
 
     def _evaluate_dual_ema(
         self,
@@ -606,82 +1362,174 @@ class PredictionService:
         df_15m: pd.DataFrame,
         ltp: float,
     ) -> SingleStrategyPrediction:
-        """Evaluates actual BufferedDualEMAStrategy."""
         if df_15m.empty:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No 15m candle data available.",
+            )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
+
         if len(days) < 2:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="Requires prior sessions for SMA200 / EMA warm-up")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    "Requires prior-session data "
+                    "for SMA200/EMA warm-up."
+                ),
+            )
 
-        lookback_df = pd.concat([d for _, d in days[:-1]], ignore_index=True)
+        lookback_df = pd.concat(
+            [
+                day_df
+                for _, day_df in days[:-1]
+            ],
+            ignore_index=True,
+        )
+
         latest_date, today_df = days[-1]
 
-        strategy = BufferedDualEMAStrategy(inst, self.settings.strategy)
-        strategy.seed_context(lookback_df)
-        strategy.reset_session(latest_date)
+        strategy = BufferedDualEMAStrategy(
+            inst,
+            self.settings.strategy,
+        )
 
-        current_signal: Optional[StrategySignal] = None
-        for i in range(len(today_df)):
-            row = today_df.iloc[i]
-            candle = {
-                "datetime": row["datetime"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row.get("volume", 0)),
-            }
-            vwap = float(row.get("vwap", row["close"]))
-            sig = strategy.on_candle(candle, vwap)
-            if i == len(today_df) - 1:
-                current_signal = sig
+        strategy.seed_context(
+            lookback_df
+        )
+        strategy.reset_session(
+            latest_date
+        )
 
-        # Read the latest indicators already computed by on_candle().
-        # IMPORTANT: this is read-only and must never append another candle.
+        current_signal: Optional[
+            StrategySignal
+        ] = None
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                continue
+
+            current_signal = strategy.on_candle(
+                candle,
+                vwap,
+            )
+
         levels: Dict[str, Any] = {}
 
-        ind_curr, _ = strategy.latest_indicators()
+        current_indicators, _ = (
+            strategy.latest_indicators()
+        )
 
-        if ind_curr is not None:
+        if current_indicators is not None:
+            atr = _positive_number(
+                current_indicators["atr14"]
+            )
+
             levels = {
-                "ema_fast": round(float(ind_curr["ema9"]), 2),
-                "ema_slow": round(float(ind_curr["ema21"]), 2),
-                "sma_trend": round(float(ind_curr["sma200"]), 2),
-                "atr_14": round(float(ind_curr["atr14"]), 2),
+                "ema_fast": round(
+                    float(
+                        current_indicators[
+                            "ema9"
+                        ]
+                    ),
+                    2,
+                ),
+                "ema_slow": round(
+                    float(
+                        current_indicators[
+                            "ema21"
+                        ]
+                    ),
+                    2,
+                ),
+                "sma_trend": round(
+                    float(
+                        current_indicators[
+                            "sma200"
+                        ]
+                    ),
+                    2,
+                ),
+                "atr_14": round(
+                    float(
+                        current_indicators[
+                            "atr14"
+                        ]
+                    ),
+                    2,
+                ),
                 "buffer": round(
-                    float(strategy.buffer_gamma * ind_curr["atr14"]),
+                    float(
+                        strategy.buffer_gamma
+                        * (
+                            atr
+                            if atr is not None
+                            else 0.0
+                        )
+                    ),
                     2,
                 ),
             }
 
-        if current_signal:
+        if current_signal is not None:
             if current_signal.action == SignalAction.BUY:
-                return SingleStrategyPrediction(
+                return self._prediction_from_signal(
                     status="TRENDING_LONG",
-                    direction="LONG",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "EMA9 above EMA21 with buffer & price above SMA200",
-                    levels=levels,
-                )
-            elif current_signal.action == SignalAction.SELL:
-                return SingleStrategyPrediction(
-                    status="TRENDING_SHORT",
-                    direction="SHORT",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "EMA9 below EMA21 with buffer & price below SMA200",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Validated bullish Dual-EMA "
+                        "buffer crossover with SMA200 "
+                        "trend confirmation."
+                    ),
                     levels=levels,
                 )
 
+            if current_signal.action == SignalAction.SELL:
+                return self._prediction_from_signal(
+                    status="TRENDING_SHORT",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Validated bearish Dual-EMA "
+                        "buffer crossover with SMA200 "
+                        "trend confirmation."
+                    ),
+                    levels=levels,
+                )
+
+        if current_indicators is None:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "Insufficient valid history for "
+                    "the required SMA200/ATR14 warm-up."
+                ),
+                levels=levels,
+            )
+
         return SingleStrategyPrediction(
-            status="BUFFER_ZONE",
-            reason="Price within volatility buffer between EMA9 and EMA21 or contra-SMA200",
+            status="NO_TRADE",
+            reason=(
+                "No valid Dual-EMA crossover "
+                "signal on the latest completed candle."
+            ),
             levels=levels,
         )
+
+    # ================================================================
+    # APEX
+    # ================================================================
 
     def _evaluate_apex(
         self,
@@ -689,76 +1537,144 @@ class PredictionService:
         df_15m: pd.DataFrame,
         ltp: float,
     ) -> SingleStrategyPrediction:
-        """Evaluates actual ApexStrategy independently."""
         if df_15m.empty:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No 15m candle data available.",
+            )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
+
         if not days:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No trading days found.",
+            )
 
         latest_date, today_df = days[-1]
+
         lookback_df = (
-            df_15m.iloc[:-len(today_df)]
+            df_15m.iloc[
+                :-len(today_df)
+            ].copy()
             if len(days) > 1
             else pd.DataFrame()
         )
 
-        strategy = ApexStrategy(inst, self.settings.strategy)
-        strategy.seed_context(lookback_df)
-        strategy.reset_session(latest_date)
+        strategy = ApexStrategy(
+            inst,
+            self.settings.strategy,
+        )
 
-        current_signal: Optional[StrategySignal] = None
-        for i in range(len(today_df)):
-            row = today_df.iloc[i]
-            candle = {
-                "datetime": row["datetime"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row.get("volume", 0)),
-            }
-            vwap = float(row.get("vwap", row["close"]))
-            sig = strategy.on_candle(candle, vwap)
-            if i == len(today_df) - 1:
-                current_signal = sig
+        strategy.seed_context(
+            lookback_df
+        )
+        strategy.reset_session(
+            latest_date
+        )
 
-        analysis = strategy.last_analysis or {}
+        current_signal: Optional[
+            StrategySignal
+        ] = None
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                continue
+
+            current_signal = strategy.on_candle(
+                candle,
+                vwap,
+            )
+
+        analysis = (
+            getattr(
+                strategy,
+                "last_analysis",
+                None,
+            )
+            or {}
+        )
+
         levels = {
-            k: v for k, v in analysis.items()
-            if k not in ("status", "reason", "direction", "entry", "stop_loss", "target")
+            key: value
+            for key, value
+            in analysis.items()
+            if key not in {
+                "status",
+                "reason",
+                "direction",
+                "entry",
+                "stop_loss",
+                "target",
+            }
         }
 
-        if current_signal:
+        if current_signal is not None:
             if current_signal.action == SignalAction.BUY:
-                return SingleStrategyPrediction(
+                return self._prediction_from_signal(
                     status="APEX_LONG",
-                    direction="LONG",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "APEX composite score & confirmation long",
-                    levels=levels,
-                )
-            elif current_signal.action == SignalAction.SELL:
-                return SingleStrategyPrediction(
-                    status="APEX_SHORT",
-                    direction="SHORT",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "APEX composite score & confirmation short",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "APEX generated a validated "
+                        "bullish signal."
+                    ),
                     levels=levels,
                 )
 
-        status = analysis.get("status", "NO_TRADE")
-        reason = analysis.get("reason", "APEX criteria not met")
+            if current_signal.action == SignalAction.SELL:
+                return self._prediction_from_signal(
+                    status="APEX_SHORT",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "APEX generated a validated "
+                        "bearish signal."
+                    ),
+                    levels=levels,
+                )
+
+        status = str(
+            analysis.get(
+                "status",
+                "NO_TRADE",
+            )
+        )
+
+        reason = str(
+            analysis.get(
+                "reason",
+                "APEX criteria not met.",
+            )
+        )
+
+        if status in {
+            "LONG",
+            "SHORT",
+            "BUY",
+            "SELL",
+        }:
+            status = "NO_TRADE"
+
         return SingleStrategyPrediction(
             status=status,
             reason=reason,
             levels=levels,
         )
+
+    # ================================================================
+    # SECTOR IMPULSE
+    # ================================================================
 
     def _evaluate_sector_impulse(
         self,
@@ -768,101 +1684,203 @@ class PredictionService:
         peer_context: Optional[Any] = None,
         kite_client: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
-        """Evaluates SectorImpulseStrategy with real lead-lag and sector modeling."""
         if df_15m.empty:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No 15m candle data available.",
+            )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
+
         if not days:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No trading days found.",
+            )
 
         latest_date, today_df = days[-1]
+
         lookback_df = (
-            df_15m.iloc[:-len(today_df)]
+            df_15m.iloc[
+                :-len(today_df)
+            ].copy()
             if len(days) > 1
             else pd.DataFrame()
         )
 
-        # Build or use provided PeerContext
         ctx = peer_context
+
         if ctx is None:
-            from data.sector_peer_manager import SectorPeerManager
-            ctx = SectorPeerManager.build_peer_context(
-                symbol=inst.symbol,
-                cache_dir=self.cache_dir,
-                kite_client=kite_client,
-            )
+            try:
+                from data.sector_peer_manager import (
+                    SectorPeerManager,
+                )
+
+                ctx = (
+                    SectorPeerManager.build_peer_context(
+                        symbol=inst.symbol,
+                        cache_dir=self.cache_dir,
+                        kite_client=kite_client,
+                    )
+                )
+            except Exception as exc:
+                return SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        "Sector peer context unavailable: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    levels={},
+                )
 
         if ctx is None:
             return SingleStrategyPrediction(
                 status="UNAVAILABLE",
-                reason="Sector leader / market index peer context unavailable for model fitting",
+                reason=(
+                    "Sector leader/index peer context "
+                    "is unavailable."
+                ),
                 levels={},
             )
 
-        strategy = SectorImpulseStrategy(inst, self.settings.strategy, ctx=ctx)
-        strategy.seed_context(lookback_df)
-        strategy.reset_session(latest_date)
+        strategy = SectorImpulseStrategy(
+            inst,
+            self.settings.strategy,
+            ctx=ctx,
+        )
 
-        current_signal: Optional[StrategySignal] = None
-        for i in range(len(today_df)):
-            row = today_df.iloc[i]
-            candle = {
-                "datetime": row["datetime"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row.get("volume", 0)),
-            }
-            vwap = float(row.get("vwap", row["close"]))
-            sig = strategy.on_candle(candle, vwap)
-            if i == len(today_df) - 1:
-                current_signal = sig
+        strategy.seed_context(
+            lookback_df
+        )
+        strategy.reset_session(
+            latest_date
+        )
+
+        current_signal: Optional[
+            StrategySignal
+        ] = None
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                continue
+
+            current_signal = strategy.on_candle(
+                candle,
+                vwap,
+            )
+
+        model = getattr(
+            strategy,
+            "model",
+            None,
+        )
 
         levels: Dict[str, Any] = {}
-        if strategy.model:
+
+        if model:
+            rho = _finite_number(
+                model.get("rho")
+            )
+            mkt_sig = _finite_number(
+                model.get("mkt_sig")
+            )
+
             levels = {
-                "lead_lag_k": strategy.model.get("k"),
-                "rho": round(float(strategy.model.get("rho", 0.0)), 3),
-                "mkt_sig": round(float(strategy.model.get("mkt_sig", 0.0)), 4),
+                "lead_lag_k": _safe_scalar(
+                    model.get("k")
+                ),
+                "rho": (
+                    round(rho, 3)
+                    if rho is not None
+                    else None
+                ),
+                "mkt_sig": (
+                    round(mkt_sig, 4)
+                    if mkt_sig is not None
+                    else None
+                ),
             }
 
-        if current_signal:
+        if current_signal is not None:
             if current_signal.action == SignalAction.BUY:
-                return SingleStrategyPrediction(
+                return self._prediction_from_signal(
                     status="IMPULSE_LONG",
-                    direction="LONG",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "Sector impulse transmission long breakout",
-                    levels=levels,
-                )
-            elif current_signal.action == SignalAction.SELL:
-                return SingleStrategyPrediction(
-                    status="IMPULSE_SHORT",
-                    direction="SHORT",
-                    entry=current_signal.price,
-                    stop_loss=current_signal.stop_loss,
-                    target=current_signal.target,
-                    reason=current_signal.reason or "Sector impulse transmission short breakdown",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Sector impulse strategy "
+                        "generated a validated LONG signal."
+                    ),
                     levels=levels,
                 )
 
-        if strategy.model is None:
-            reason = f"Sector impulse: {strategy.disabled_reason}" if strategy.disabled_reason else "Sector peer context not eligible for fitting"
+            if current_signal.action == SignalAction.SELL:
+                return self._prediction_from_signal(
+                    status="IMPULSE_SHORT",
+                    signal=current_signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "Sector impulse strategy "
+                        "generated a validated SHORT signal."
+                    ),
+                    levels=levels,
+                )
+
+        if model is None:
+            disabled_reason = getattr(
+                strategy,
+                "disabled_reason",
+                None,
+            )
+
+            reason = (
+                str(disabled_reason)
+                if disabled_reason
+                else (
+                    "Sector impulse model is "
+                    "not currently eligible."
+                )
+            )
+
             return SingleStrategyPrediction(
                 status="NO_TRADE",
                 reason=reason,
                 levels=levels,
             )
 
+        rho = _finite_number(
+            model.get("rho")
+        )
+
+        rho_text = (
+            f"{rho:.2f}"
+            if rho is not None
+            else "N/A"
+        )
+
         return SingleStrategyPrediction(
             status="MONITORING",
-            reason=f"Monitoring sector impulse transmission (k={strategy.model.get('k')}, rho={strategy.model.get('rho', 0.0):.2f})",
+            reason=(
+                "Monitoring sector impulse "
+                f"transmission (k={model.get('k')}, "
+                f"rho={rho_text})."
+            ),
             levels=levels,
         )
+
+    # ================================================================
+    # SSF-L5-SRM
+    # ================================================================
 
     def _evaluate_ssf_l5_srm(
         self,
@@ -871,229 +1889,499 @@ class PredictionService:
         ltp: float,
         book_snapshot: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
-        """Evaluates SsfL5SrmStrategy (regime & Level-5 microstructure order book)."""
         if df_15m.empty:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No 15m candle data available")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No 15m candle data available.",
+            )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
+
         if not days:
-            return SingleStrategyPrediction(status="NO_TRADE", reason="No trading days found in dataset")
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="No trading days found.",
+            )
 
         latest_date, today_df = days[-1]
-        strategy = SsfL5SrmStrategy(inst, self.settings.strategy)
-        strategy.reset_session(latest_date)
 
-        # Warm up regime detector with 15m intraday candles
-        for i in range(len(today_df)):
-            row = today_df.iloc[i]
-            candle = {
-                "datetime": row["datetime"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row.get("volume", 0)),
-            }
-            vwap = float(row.get("vwap", row["close"]))
-            strategy.on_candle(candle, vwap)
+        strategy = SsfL5SrmStrategy(
+            inst,
+            self.settings.strategy,
+        )
+
+        strategy.reset_session(
+            latest_date
+        )
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                continue
+
+            strategy.on_candle(
+                candle,
+                vwap,
+            )
+
+        regime_ok = bool(
+            getattr(
+                strategy,
+                "regime_ok",
+                False,
+            )
+        )
+
+        bars = getattr(
+            strategy,
+            "_bars",
+            [],
+        )
 
         levels: Dict[str, Any] = {
-            "regime_ok": strategy.regime_ok,
-            "bars_tracked": len(strategy._bars),
+            "regime_ok": regime_ok,
+            "bars_tracked": len(bars),
         }
 
         if book_snapshot is not None:
-            features = strategy._features(book_snapshot)
-            if features:
-                for k, v in features.items():
-                    if isinstance(v, (float, np.floating)):
-                        levels[k] = round(float(v), 3)
-
-            sig = strategy.on_book_update(book_snapshot)
-            if sig:
-                if sig.action == SignalAction.BUY:
-                    return SingleStrategyPrediction(
-                        status="SSF_LONG",
-                        direction="LONG",
-                        entry=sig.price,
-                        stop_loss=sig.stop_loss,
-                        target=sig.target,
-                        reason=sig.reason or "SSF Level-5 microprice long signal",
-                        levels=levels,
-                    )
-                elif sig.action == SignalAction.SELL:
-                    return SingleStrategyPrediction(
-                        status="SSF_SHORT",
-                        direction="SHORT",
-                        entry=sig.price,
-                        stop_loss=sig.stop_loss,
-                        target=sig.target,
-                        reason=sig.reason or "SSF Level-5 microprice short signal",
-                        levels=levels,
-                    )
-
-            if not strategy.regime_ok:
+            try:
+                features = strategy._features(
+                    book_snapshot
+                )
+            except Exception as exc:
                 return SingleStrategyPrediction(
-                    status="NO_TRADE",
-                    reason="Regime filter inactive (Parkinson vol or fractal efficiency out of bounds)",
+                    status="ERROR",
+                    reason=(
+                        "SSF-L5-SRM feature calculation "
+                        f"failed: {type(exc).__name__}: {exc}"
+                    ),
                     levels=levels,
                 )
 
-            blocked_reason = strategy._blocked(book_snapshot, features or {}) if features else None
+            if features:
+                for key, value in features.items():
+                    number = _finite_number(
+                        value
+                    )
+                    if number is not None:
+                        levels[key] = round(
+                            number,
+                            3,
+                        )
+
+            try:
+                signal = strategy.on_book_update(
+                    book_snapshot
+                )
+            except Exception as exc:
+                return SingleStrategyPrediction(
+                    status="ERROR",
+                    reason=(
+                        "SSF-L5-SRM book evaluation "
+                        f"failed: {type(exc).__name__}: {exc}"
+                    ),
+                    levels=levels,
+                )
+
+            if signal is not None:
+                if signal.action == SignalAction.BUY:
+                    return self._prediction_from_signal(
+                        status="SSF_LONG",
+                        signal=signal,
+                        ltp=ltp,
+                        default_reason=(
+                            "SSF Level-5 microstructure "
+                            "generated a validated LONG signal."
+                        ),
+                        levels=levels,
+                    )
+
+                if signal.action == SignalAction.SELL:
+                    return self._prediction_from_signal(
+                        status="SSF_SHORT",
+                        signal=signal,
+                        ltp=ltp,
+                        default_reason=(
+                            "SSF Level-5 microstructure "
+                            "generated a validated SHORT signal."
+                        ),
+                        levels=levels,
+                    )
+
+            if not regime_ok:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "SSF regime filter is inactive."
+                    ),
+                    levels=levels,
+                )
+
+            blocked_reason = None
+
+            if features:
+                try:
+                    blocked_reason = (
+                        strategy._blocked(
+                            book_snapshot,
+                            features,
+                        )
+                    )
+                except Exception as exc:
+                    return SingleStrategyPrediction(
+                        status="ERROR",
+                        reason=(
+                            "SSF-L5-SRM block evaluation "
+                            f"failed: {type(exc).__name__}: {exc}"
+                        ),
+                        levels=levels,
+                    )
+
             if blocked_reason:
                 return SingleStrategyPrediction(
                     status="NO_TRADE",
-                    reason=f"SSF conditions not met ({blocked_reason})",
+                    reason=(
+                        "SSF conditions not met "
+                        f"({blocked_reason})."
+                    ),
                     levels=levels,
                 )
 
-            score_val = features.get("score", 0.0) if features else 0.0
+            score = (
+                _finite_number(
+                    features.get("score")
+                )
+                if features
+                else 0.0
+            )
+
+            score_text = (
+                f"{score:.2f}"
+                if score is not None
+                else "0.00"
+            )
+
             return SingleStrategyPrediction(
                 status="WAITING",
-                reason=f"Awaiting SSF trigger threshold (composite score={score_val:.2f})",
+                reason=(
+                    "Awaiting SSF trigger threshold "
+                    f"(composite score={score_text})."
+                ),
                 levels=levels,
             )
 
-        # If no book snapshot is provided
-        if not strategy.regime_ok:
+        if not regime_ok:
             return SingleStrategyPrediction(
                 status="NO_TRADE",
-                reason="Regime filter inactive (Parkinson vol or fractal efficiency out of bounds)",
+                reason=(
+                    "SSF regime filter is inactive."
+                ),
                 levels=levels,
             )
 
         return SingleStrategyPrediction(
             status="UNAVAILABLE",
-            reason="Real Level-5 order book depth not available (feed inactive)",
+            reason=(
+                "Real Level-5 order-book depth "
+                "is not available."
+            ),
             levels=levels,
         )
+
+    # ================================================================
+    # SIGNAL EXPIRATION
+    # ================================================================
+
+    @staticmethod
+    def _invalidate_price_breached_signal(
+        prediction: SingleStrategyPrediction,
+        current_ltp: float,
+    ) -> SingleStrategyPrediction:
+        """
+        Reject any directional signal whose current real LTP has already
+        crossed its stop or target.
+        """
+        if (
+            prediction.direction is None
+            or current_ltp is None
+            or current_ltp <= 0
+        ):
+            return prediction
+
+        stop = _positive_number(
+            prediction.stop_loss
+        )
+        target = _positive_number(
+            prediction.target
+        )
+
+        if (
+            stop is None
+            or target is None
+        ):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    "Directional signal has "
+                    "invalid stop/target levels."
+                ),
+                levels=prediction.levels,
+                metrics=prediction.metrics,
+            )
+
+        if prediction.direction == "LONG":
+            if current_ltp <= stop:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "Signal expired: live LTP "
+                        "already crossed the stop."
+                    ),
+                    levels=prediction.levels,
+                    metrics=prediction.metrics,
+                )
+
+            if current_ltp >= target:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "Signal expired: live LTP "
+                        "already crossed the target."
+                    ),
+                    levels=prediction.levels,
+                    metrics=prediction.metrics,
+                )
+
+        elif prediction.direction == "SHORT":
+            if current_ltp >= stop:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "Signal expired: live LTP "
+                        "already crossed the stop."
+                    ),
+                    levels=prediction.levels,
+                    metrics=prediction.metrics,
+                )
+
+            if current_ltp <= target:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "Signal expired: live LTP "
+                        "already crossed the target."
+                    ),
+                    levels=prediction.levels,
+                    metrics=prediction.metrics,
+                )
+
+        return prediction
+
+    # ================================================================
+    # CONSENSUS
+    # ================================================================
 
     @classmethod
     def calculate_consensus(
         cls,
-        predictions: Dict[str, SingleStrategyPrediction],
+        predictions: Dict[
+            str,
+            SingleStrategyPrediction,
+        ],
     ) -> Dict[str, Any]:
         """
-        Calculate live consensus using only strategies that are explicitly
-        enabled for live voting.
+        Transparent equal-vote consensus.
 
-        All strategy predictions remain available to the caller, but strategies
-        outside LIVE_CONSENSUS_STRATEGIES do not contribute to:
-          - long/short vote counts
-          - evaluable strategy count
-          - consensus denominator
-          - consensus label
+        Important:
+        - ERROR and UNAVAILABLE strategies do not vote.
+        - NO_TRADE strategies are evaluable but do not cast a direction vote.
+        - Excluded strategies never enter the live denominator.
+        - The denominator for agreement percentage is directional voters,
+          while total_strategies remains the number of live-enabled models.
         """
         live_predictions = {
             name: prediction
-            for name, prediction in predictions.items()
+            for name, prediction
+            in predictions.items()
             if name in cls.LIVE_CONSENSUS_STRATEGIES
         }
 
         excluded_strategies = sorted(
             name
             for name in predictions
-            if name not in cls.LIVE_CONSENSUS_STRATEGIES
+            if name
+            not in cls.LIVE_CONSENSUS_STRATEGIES
         )
 
-        long_count = sum(
-            1
-            for prediction in live_predictions.values()
-            if prediction.direction == "LONG"
-        )
-
-        short_count = sum(
-            1
-            for prediction in live_predictions.values()
-            if prediction.direction == "SHORT"
+        total_live = len(
+            live_predictions
         )
 
         evaluable_count = sum(
             1
-            for prediction in live_predictions.values()
-            if prediction.status not in ("UNAVAILABLE", "ERROR")
+            for prediction
+            in live_predictions.values()
+            if prediction.status
+            not in {
+                "UNAVAILABLE",
+                "ERROR",
+            }
         )
 
-        total = len(live_predictions)
+        long_count = sum(
+            1
+            for prediction
+            in live_predictions.values()
+            if prediction.direction == "LONG"
+            and prediction.status
+            not in {
+                "UNAVAILABLE",
+                "ERROR",
+            }
+        )
 
-        if total == 0:
+        short_count = sum(
+            1
+            for prediction
+            in live_predictions.values()
+            if prediction.direction == "SHORT"
+            and prediction.status
+            not in {
+                "UNAVAILABLE",
+                "ERROR",
+            }
+        )
+
+        directional_count = (
+            long_count
+            + short_count
+        )
+
+        if evaluable_count == 0:
             return {
                 "direction": "NEUTRAL",
                 "agreeing_strategies": 0,
-                "total_strategies": 0,
+                "total_strategies": total_live,
                 "evaluable_strategies": 0,
+                "directional_strategies": 0,
                 "consensus_agreement_pct": None,
                 "label": "UNAVAILABLE",
-                "consensus_strategies": [],
+                "consensus_strategies": list(
+                    cls.LIVE_CONSENSUS_STRATEGIES
+                ),
                 "excluded_strategies": excluded_strategies,
             }
 
-        if long_count >= 3 or (
-            evaluable_count <= 3
-            and long_count >= 2
-            and short_count == 0
-        ):
-            direction = "LONG"
-            label = f"STRONG LONG ({long_count}/{total})"
+        if directional_count == 0:
+            return {
+                "direction": "NEUTRAL",
+                "agreeing_strategies": 0,
+                "total_strategies": total_live,
+                "evaluable_strategies": evaluable_count,
+                "directional_strategies": 0,
+                "consensus_agreement_pct": None,
+                "label": "NEUTRAL",
+                "consensus_strategies": list(
+                    cls.LIVE_CONSENSUS_STRATEGIES
+                ),
+                "excluded_strategies": excluded_strategies,
+            }
 
-        elif short_count >= 3 or (
-            evaluable_count <= 3
-            and short_count >= 2
-            and long_count == 0
-        ):
-            direction = "SHORT"
-            label = f"STRONG SHORT ({short_count}/{total})"
-
-        elif long_count > 0 and short_count > 0:
+        if long_count > 0 and short_count > 0:
             direction = "DIVERGENT"
-            label = f"DIVERGENT ({long_count}L / {short_count}S)"
+            agreeing = max(
+                long_count,
+                short_count,
+            )
+            label = (
+                f"DIVERGENT "
+                f"({long_count}L / "
+                f"{short_count}S)"
+            )
 
-        elif long_count == 2 and short_count == 0:
+        elif long_count > 0:
             direction = "LONG"
-            label = f"MODERATE LONG ({long_count}/{total})"
+            agreeing = long_count
 
-        elif short_count == 2 and long_count == 0:
-            direction = "SHORT"
-            label = f"MODERATE SHORT ({short_count}/{total})"
+            if (
+                long_count == evaluable_count
+                and long_count >= 3
+            ):
+                strength = "STRONG"
+            elif long_count >= 2:
+                strength = "MODERATE"
+            else:
+                strength = "WEAK"
 
-        elif long_count == 1 and short_count == 0:
-            direction = "LONG"
-            label = f"MODERATE LONG ({long_count}/{total})"
-
-        elif short_count == 1 and long_count == 0:
-            direction = "SHORT"
-            label = f"MODERATE SHORT ({short_count}/{total})"
-
-        elif evaluable_count == 0:
-            direction = "NEUTRAL"
-            label = "UNAVAILABLE"
+            label = (
+                f"{strength} LONG "
+                f"({long_count}/{evaluable_count})"
+            )
 
         else:
-            direction = "NEUTRAL"
-            label = "NEUTRAL"
+            direction = "SHORT"
+            agreeing = short_count
 
-        agreeing_strategies = max(long_count, short_count)
-        consensus_agreement_pct = (
-            round((agreeing_strategies / total) * 100.0, 1)
-            if total > 0
-            else None
+            if (
+                short_count == evaluable_count
+                and short_count >= 3
+            ):
+                strength = "STRONG"
+            elif short_count >= 2:
+                strength = "MODERATE"
+            else:
+                strength = "WEAK"
+
+            label = (
+                f"{strength} SHORT "
+                f"({short_count}/{evaluable_count})"
+            )
+
+        agreement_pct = round(
+            (
+                agreeing
+                / directional_count
+            )
+            * 100.0,
+            1,
         )
 
         return {
             "direction": direction,
-            "agreeing_strategies": agreeing_strategies,
-            "total_strategies": total,
+            "agreeing_strategies": agreeing,
+            "total_strategies": total_live,
             "evaluable_strategies": evaluable_count,
-            "consensus_agreement_pct": consensus_agreement_pct,
+            "directional_strategies": directional_count,
+            "consensus_agreement_pct": agreement_pct,
             "label": label,
-            "consensus_strategies": list(cls.LIVE_CONSENSUS_STRATEGIES),
+            "consensus_strategies": list(
+                cls.LIVE_CONSENSUS_STRATEGIES
+            ),
             "excluded_strategies": excluded_strategies,
         }
 
+    # ================================================================
+    # INSIGHTS
+    # ================================================================
+
     @staticmethod
-    def extract_key_insights(candidates: List[CandidatePrediction]) -> Dict[str, Any]:
+    def extract_key_insights(
+        candidates: List[CandidatePrediction],
+    ) -> Dict[str, Any]:
         """
-        Derives Top Long, Top Short, Strongest Consensus, and Divergent Signals.
+        Return only directional consensus insights.
+
+        Neutral/unavailable candidates are never presented as top long/short
+        or strongest directional consensus.
         """
         if not candidates:
             return {
@@ -1103,25 +2391,89 @@ class PredictionService:
                 "divergent_signals": [],
             }
 
-        # 1. Top Long Opportunity
-        long_candidates = [c for c in candidates if c.consensus.get("direction") == "LONG"]
-        top_long = max(long_candidates, key=lambda c: (c.consensus.get("agreeing_strategies", 0), c.momentum_score), default=None)
+        long_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.consensus.get(
+                "direction"
+            ) == "LONG"
+        ]
 
-        # 2. Top Short Opportunity
-        short_candidates = [c for c in candidates if c.consensus.get("direction") == "SHORT"]
-        top_short = max(short_candidates, key=lambda c: (c.consensus.get("agreeing_strategies", 0), c.momentum_score), default=None)
+        short_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.consensus.get(
+                "direction"
+            ) == "SHORT"
+        ]
 
-        # 3. Strongest Consensus
-        strongest = max(candidates, key=lambda c: (c.consensus.get("agreeing_strategies", 0), c.momentum_score), default=None)
+        directional_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.consensus.get(
+                "direction"
+            )
+            in {"LONG", "SHORT"}
+        ]
 
-        # 4. Divergent Signals
-        divergents = [c.to_dict() for c in candidates if c.consensus.get("direction") == "DIVERGENT" or c.consensus.get("label", "").startswith("DIVERGENT")]
+        def consensus_key(
+            candidate: CandidatePrediction,
+        ) -> Tuple[int, float]:
+            return (
+                int(
+                    candidate.consensus.get(
+                        "agreeing_strategies",
+                        0,
+                    )
+                ),
+                float(
+                    candidate.momentum_score
+                ),
+            )
+
+        top_long = max(
+            long_candidates,
+            key=consensus_key,
+            default=None,
+        )
+
+        top_short = max(
+            short_candidates,
+            key=consensus_key,
+            default=None,
+        )
+
+        strongest = max(
+            directional_candidates,
+            key=consensus_key,
+            default=None,
+        )
+
+        divergent = [
+            candidate.to_dict()
+            for candidate in candidates
+            if candidate.consensus.get(
+                "direction"
+            ) == "DIVERGENT"
+        ]
 
         return {
-            "top_long": top_long.to_dict() if top_long else None,
-            "top_short": top_short.to_dict() if top_short else None,
-            "strongest_consensus": strongest.to_dict() if strongest else None,
-            "divergent_signals": divergents,
+            "top_long": (
+                top_long.to_dict()
+                if top_long is not None
+                else None
+            ),
+            "top_short": (
+                top_short.to_dict()
+                if top_short is not None
+                else None
+            ),
+            "strongest_consensus": (
+                strongest.to_dict()
+                if strongest is not None
+                else None
+            ),
+            "divergent_signals": divergent,
         }
 
 

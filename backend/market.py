@@ -13,6 +13,7 @@ from fastapi import APIRouter
 
 from broker.kite_adapter import get_active_kite_with_diagnostics
 from config.universe import StockUniverse, resolve_universe_tokens
+from data.time_utils import now_ist_iso
 
 logger = logging.getLogger("backend_api.market")
 
@@ -27,7 +28,7 @@ def get_market_prices() -> Dict[str, Any]:
     Loads the master 300-stock universe, resolves instrument tokens, and fetches
     real quotes in batches of 150 from Zerodha Kite Connect.
     """
-    now_iso = datetime.now().isoformat()
+    now_iso = now_ist_iso()
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
 
     if not kite:

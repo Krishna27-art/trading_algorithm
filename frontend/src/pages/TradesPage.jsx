@@ -52,7 +52,7 @@ const TradesPage = () => {
       <div className="page-header">
         <div>
           <h1>Trade Journal</h1>
-          <p className="subtitle">All backtest and live strategy trade records</p>
+          <p className="subtitle">Live strategy trade records</p>
         </div>
         <div className="header-stats">
           <div className="stat-chip">
@@ -92,7 +92,7 @@ const TradesPage = () => {
       {!loading && !error && filtered.length === 0 && (
         <div className="empty-state">
           <div className="empty-icon">📋</div>
-          <p>No trades found. Run a backtest or connect Kite to populate the trade journal.</p>
+          <p>No live trades recorded yet. Backtest results are kept separate from the live journal.</p>
         </div>
       )}
 

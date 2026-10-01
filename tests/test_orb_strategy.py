@@ -77,3 +77,98 @@ def test_time_square_off_at_1430(strategy):
     assert sig is not None
     assert sig.action == SignalAction.EXIT
     assert sig.reason == "TIME_SQUARE_OFF"
+
+
+def test_equity_orb_rejects_trade_when_actual_stop_risk_exceeds_cap():
+    inst = InstrumentConfig(
+        symbol="TESTEQ",
+        exchange="NSE",
+        instrument_type=InstrumentType.EQUITY,
+        lot_size=1,
+        tick_size=0.05,
+        min_orb_range=1.0,
+        max_orb_range=100.0,
+        max_risk_cap=80.0,
+        equity_orb_max_risk_pct=0.004,  # 0.40% explicitly configured
+    )
+
+    strategy = IntradayORBStrategy(instrument=inst)
+    strategy.reset_session(date(2026, 3, 2))
+
+    c1 = {
+        "datetime": datetime(2026, 3, 2, 9, 15),
+        "open": 5000.0,
+        "high": 5040.0,
+        "low": 4990.0,
+        "close": 5035.0,
+    }
+
+    c2 = {
+        "datetime": datetime(2026, 3, 2, 9, 30),
+        "open": 5035.0,
+        "high": 5055.0,
+        "low": 4990.0,
+        "close": 5045.0,
+    }
+
+    strategy.on_candle(c1, vwap=5020.0)
+    strategy.on_candle(c2, vwap=5035.0)
+
+    breakout = {
+        "datetime": datetime(2026, 3, 2, 9, 45),
+        "open": 5045.0,
+        "high": 5060.0,
+        "low": 5040.0,
+        "close": 5055.0,
+    }
+
+    sig = strategy.on_candle(breakout, vwap=5040.0)
+
+    # Entry 5055 - ORB low 4990 = 65.
+    # 0.40% of 5055 = 20.22.
+    # Actual stop risk is too large, so no trade is allowed.
+    assert sig is None
+
+
+def test_equity_orb_target_uses_actual_accepted_risk():
+    from indicators.orb import OpeningRange
+
+    inst = InstrumentConfig(
+        symbol="TESTEQ",
+        exchange="NSE",
+        instrument_type=InstrumentType.EQUITY,
+        lot_size=1,
+        tick_size=0.05,
+        min_orb_range=1.0,
+        max_orb_range=100.0,
+        max_risk_cap=80.0,
+        equity_orb_max_risk_pct=0.02,
+    )
+
+    strategy = IntradayORBStrategy(instrument=inst)
+    strategy.reset_session(date(2026, 3, 2))
+
+    strategy.orb = OpeningRange(
+        high=1010.0,
+        low=1000.0,
+        width=10.0,
+        is_valid_volatility=True,
+    )
+
+    candle = {
+        "datetime": datetime(2026, 3, 2, 10, 0),
+        "open": 1010.0,
+        "high": 1025.0,
+        "low": 1008.0,
+        "close": 1015.0,
+    }
+
+    sig = strategy._entry_signal(candle, vwap=1005.0)
+
+    assert sig is not None
+    assert sig.stop_loss == 1000.0
+
+    # Actual risk = 1015 - 1000 = 15
+    # Target = 1015 + 2 * 15 = 1045
+    assert sig.target == 1045.0
+

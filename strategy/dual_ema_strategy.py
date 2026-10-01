@@ -576,6 +576,46 @@ class BufferedDualEMAStrategy(BaseStrategy):
 
         return current, previous
 
+    def latest_indicators(
+        self,
+    ) -> Tuple[
+        Optional[pd.Series],
+        Optional[pd.Series],
+    ]:
+        """
+        Return the latest already-ingested indicator values without
+        appending or mutating any candle state.
+
+        This is read-only and is intended for display/telemetry paths.
+        """
+        combined = self._combined_bars()
+
+        if combined.empty:
+            return None, None
+
+        indicators = _compute_indicators(combined)
+
+        if indicators.empty:
+            return None, None
+
+        current = indicators.iloc[-1]
+
+        previous = (
+            indicators.iloc[-2]
+            if len(indicators) >= 2
+            else None
+        )
+
+        if (
+            pd.isna(current["ema9"])
+            or pd.isna(current["ema21"])
+            or pd.isna(current["sma200"])
+            or pd.isna(current["atr14"])
+        ):
+            return None, previous
+
+        return current, previous
+
     # ------------------------------------------------------------------
     # RISK / PRICE VALIDATION
     # ------------------------------------------------------------------
@@ -615,13 +655,8 @@ class BufferedDualEMAStrategy(BaseStrategy):
             self.instrument.instrument_type
             == InstrumentType.EQUITY
         ):
-            risk_pct = float(
-                getattr(
-                    self.instrument,
-                    "equity_orb_max_risk_pct",
-                    0.0040,
-                )
-            )
+            pct = self.instrument.equity_orb_max_risk_pct
+            risk_pct = float(pct) if (pct is not None and pct > 0) else 0.0040
 
             return max(
                 entry_price * risk_pct,

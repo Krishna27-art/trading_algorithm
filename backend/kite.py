@@ -70,7 +70,7 @@ def kite_callback(
     frontend_url = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
 
     if auth_status != "success" or not request_token:
-        logger.error(f"Kite callback rejected: status={auth_status}, request_token={request_token}")
+        logger.error("Kite callback rejected: missing or invalid callback parameters")
         return RedirectResponse(
             url=f"{frontend_url}?auth_error=Kite+login+was+cancelled+or+failed.",
             status_code=307,
@@ -107,11 +107,10 @@ def kite_callback(
         )
         return RedirectResponse(url=frontend_url, status_code=307)
 
-    except Exception as e:
-        logger.error(f"Failed to generate Kite session token: {e}")
-        err_msg = quote(str(e))
+    except Exception:
+        logger.exception("Failed to generate Kite session token")
         return RedirectResponse(
-            url=f"{frontend_url}?auth_error=Authentication+failed:+{err_msg}",
+            url=f"{frontend_url}?auth_error=Authentication+failed.",
             status_code=307,
         )
 

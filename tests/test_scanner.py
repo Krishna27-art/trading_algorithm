@@ -2,6 +2,7 @@
 Unit Tests for NIFTY 50 Universe Scanner and Explainable Stock Ranker.
 """
 
+from datetime import date
 from pathlib import Path
 import pytest
 
@@ -11,6 +12,7 @@ from config.universe import (
     resolve_universe_tokens,
 )
 from config.settings import InstrumentType
+from data.historical_loader import HistoricalDataLoader
 from scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
 
 
@@ -24,12 +26,38 @@ def test_universe_constituent_count_and_resolution():
     assert "TCS" in universe.all_symbols
     assert "HDFCBANK" in universe.all_symbols
 
-    tokens = resolve_universe_tokens()
-    assert len(tokens) >= 280
-    for sym in ["RELIANCE", "TCS", "HDFCBANK"]:
-        assert sym in tokens
-        assert isinstance(tokens[sym], int)
-        assert tokens[sym] > 0
+
+def test_universe_token_resolution_uses_kite_master(tmp_path):
+    from data.instrument_resolver import InstrumentResolver
+
+    class FakeKite:
+        def instruments(self, exchange):
+            return [
+                {
+                    "tradingsymbol": "RELIANCE",
+                    "instrument_token": 738561,
+                },
+                {
+                    "tradingsymbol": "TCS",
+                    "instrument_token": 2953217,
+                },
+            ]
+
+    resolver = InstrumentResolver(cache_dir=tmp_path)
+
+    tokens, unresolved = resolver.resolve_universe(
+        symbols=["RELIANCE", "TCS"],
+        kite_client=FakeKite(),
+        cache_path=tmp_path / "universe_300_tokens.json",
+        force_refresh=True,
+    )
+
+    assert tokens == {
+        "RELIANCE": 738561,
+        "TCS": 2953217,
+    }
+
+    assert unresolved == []
 
 
 
@@ -68,7 +96,7 @@ def test_explainable_score_computation():
 
 def test_scanner_synthetic_execution_and_ranking():
     scanner = NiftyUniverseScanner()
-    top_5, data_source = scanner.scan_universe(kite_client=None, top_n=5)
+    top_5, data_source = scanner.scan_universe(kite_client=None, top_n=5, allow_synthetic=True)
 
     assert data_source == "SYNTHETIC"
     assert len(top_5) == 5
@@ -91,7 +119,7 @@ def test_scanner_synthetic_execution_and_ranking():
 
 def test_scanner_instrument_config_factory():
     scanner = NiftyUniverseScanner()
-    top_picks, _ = scanner.scan_universe(kite_client=None, top_n=3)
+    top_picks, _ = scanner.scan_universe(kite_client=None, top_n=3, allow_synthetic=True)
     configs = scanner.get_top_instrument_configs(top_picks)
 
     assert len(configs) == 3
@@ -121,15 +149,26 @@ def test_create_instrument_config_for_equity():
     assert cfg.max_risk_cap == 12.0
 
 
-def test_fastapi_scanner_and_multi_symbol_endpoints():
+def test_fastapi_scanner_and_multi_symbol_endpoints(monkeypatch):
     from backend.signals import get_strategy_telemetry, get_universe_scan, trigger_backtest
+    from data.historical_loader import HistoricalDataLoader
 
+    # Unauthenticated scanner returns AUTH_REQUIRED
     scan_res = get_universe_scan(top_n=5)
-    assert scan_res["status"] == "success"
-    assert scan_res["count"] == 5
-    assert len(scan_res["candidates"]) == 5
-    assert scan_res["candidates"][0]["rank"] == 1
-    assert "total_score" in scan_res["candidates"][0]
+    assert scan_res["status"] == "AUTH_REQUIRED"
+    assert scan_res["data_source"] == "NONE"
+
+    # Backtest with mocked/fixture data
+    df_fixture = HistoricalDataLoader.generate_synthetic_nifty_data(days=10, base_price=2000.0)
+    monkeypatch.setattr(
+        HistoricalDataLoader,
+        "load_cached_data_with_validation",
+        staticmethod(lambda path: (df_fixture, {})),
+    )
+    monkeypatch.setattr(
+        "pathlib.Path.exists",
+        lambda self: True,
+    )
 
     bt_res = trigger_backtest(days=10, symbol="RELIANCE")
     assert bt_res["success"] is True
@@ -137,7 +176,8 @@ def test_fastapi_scanner_and_multi_symbol_endpoints():
 
     tel_res = get_strategy_telemetry(symbol="TCS")
     assert tel_res["symbol"] == "TCS"
-    assert len(tel_res["chart_candles"]) > 0
+    assert tel_res["authenticated"] is False
+    assert tel_res["data_source"] == "NONE"
 
 
 def test_scanner_fails_closed_without_kite():
@@ -200,7 +240,7 @@ def test_liquidity_filter_layer():
 
 def test_scanning_pipeline_summary_counters():
     scanner = NiftyUniverseScanner()
-    candidates, data_source = scanner.scan_universe(kite_client=None, top_n=10)
+    candidates, data_source = scanner.scan_universe(kite_client=None, top_n=10, allow_synthetic=True)
 
     summary = scanner.last_pipeline_summary
     assert summary["universe_count"] == 300
@@ -298,9 +338,205 @@ def test_scanner_uses_300_stocks_without_nifty50_fallback():
     scanner = StockUniverseScanner()
     assert len(scanner.universe.all_stocks) == 300
 
-    candidates, data_source = scanner.scan_universe(kite_client=None, top_n=5)
+    candidates, data_source = scanner.scan_universe(kite_client=None, top_n=5, allow_synthetic=True)
     assert scanner.last_pipeline_summary["universe_count"] == 300
     assert len(candidates) == 5
+
+
+def test_latest_completed_trading_day_handles_weekend():
+    scanner = NiftyUniverseScanner()
+
+    # Regular Monday -> previous completed trading day is Friday.
+    result = (
+        scanner._latest_completed_trading_day(
+            date(2026, 10, 12)
+        )
+    )
+
+    assert result == date(
+        2026, 10, 9
+    )
+
+    # Monday after Friday holiday (Oct 2 Gandhi Jayanti) -> Thursday.
+    result_holiday = (
+        scanner._latest_completed_trading_day(
+            date(2026, 10, 5)
+        )
+    )
+
+    assert result_holiday == date(
+        2026, 10, 1
+    )
+
+
+def test_scanner_uses_cached_daily_context_only(
+    tmp_path,
+    monkeypatch,
+):
+    import pandas as pd
+    from datetime import datetime
+
+    scanner = NiftyUniverseScanner(
+        cache_dir=tmp_path
+    )
+
+    cache_file = (
+        tmp_path
+        / "TEST_daily_context.csv"
+    )
+
+    df = pd.DataFrame([
+        {
+            "datetime": datetime(
+                2026, 10, 1
+            ),
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "close": 102.0,
+            "volume": 100000,
+        }
+        for _ in range(20)
+    ])
+
+    # Make timestamps unique.
+    df["datetime"] = pd.date_range(
+        "2026-09-04",
+        periods=20,
+        freq="D",
+    )
+
+    HistoricalDataLoader.save_with_metadata(
+        df,
+        cache_file,
+        {
+            "symbol": "TEST",
+            "instrument_token": 123,
+            "interval": "day",
+        },
+    )
+
+    def fail_if_network_called(*args, **kwargs):
+        raise AssertionError(
+            "Scanner must not call Kite Historical API."
+        )
+
+    monkeypatch.setattr(
+        HistoricalDataLoader,
+        "fetch_real_data",
+        fail_if_network_called,
+    )
+
+    result = (
+        scanner._load_cached_historical_context(
+            symbol="TEST",
+            target_date=date(
+                2026, 9, 23
+            ),
+        )
+    )
+
+    assert result is not None
+    avg_volume, atr = result
+    assert avg_volume > 0
+    assert atr > 0
+
+
+def test_missing_daily_context_returns_unavailable(
+    tmp_path,
+):
+    scanner = NiftyUniverseScanner(
+        cache_dir=tmp_path
+    )
+
+    result = (
+        scanner._load_cached_historical_context(
+            symbol="DOES_NOT_EXIST",
+            target_date=date(
+                2026, 10, 1
+            ),
+        )
+    )
+
+    assert result is None
+
+
+def test_missing_historical_context_is_not_ranked():
+    scanner = NiftyUniverseScanner()
+
+    result = scanner._get_historical_context(
+        kite_client=object(),
+        symbol="TEST",
+        token=None,
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 30),
+        force_refresh=False,
+    )
+
+    assert result == (0, 0.0)
+
+
+def test_liquidity_filter_rejects_missing_average_volume():
+    from scanner.liquidity_filter import (
+        LiquidityFilter,
+        LiquidityStatus,
+    )
+
+    lfilter = LiquidityFilter()
+
+    result = lfilter.evaluate_stock({
+        "symbol": "TEST",
+        "ltp": 1000.0,
+        "volume": 2_000_000,
+        "avg_volume_20d": 0,
+    })
+
+    assert (
+        result.status
+        == LiquidityStatus.DATA_UNAVAILABLE
+    )
+
+    assert result.is_tradable is False
+
+
+def test_liquidity_filter_does_not_use_current_volume_as_history():
+    from scanner.liquidity_filter import (
+        LiquidityFilter,
+        LiquidityStatus,
+    )
+
+    lfilter = LiquidityFilter()
+
+    result = lfilter.evaluate_stock({
+        "symbol": "TEST",
+        "ltp": 1000.0,
+        "volume": 2_000_000,
+        # Historical baseline intentionally absent.
+    })
+
+    assert (
+        result.status
+        == LiquidityStatus.DATA_UNAVAILABLE
+    )
+
+    assert result.is_tradable is False
+
+
+def test_missing_history_context_returns_none():
+    scanner = NiftyUniverseScanner()
+
+    assert (
+        scanner._get_historical_context(
+            kite_client=object(),
+            symbol="TEST",
+            token=None,
+            start_date=date(2026, 9, 1),
+            end_date=date(2026, 9, 30),
+        )
+        == (0, 0.0)
+    )
+
+
 
 
 

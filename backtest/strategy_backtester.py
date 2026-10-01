@@ -54,7 +54,7 @@ class StrategyBacktester:
         app_settings: AppSettings = settings,
         context_lookback_days: int = 30,
         db: Optional[DatabaseManager] = None,
-        persist_trades: bool = True,
+        persist_trades: bool = False,
     ):
         """
         strategy_factory: a zero-arg callable returning a FRESH BaseStrategy
@@ -62,10 +62,10 @@ class StrategyBacktester:
         RollingWalkForwardValidator can build an independent strategy per fold
         with no state bleeding across folds.
 
-        db: optional DatabaseManager for persisting trades. Defaults to
-        DatabaseManager(app_settings.db_path) when persist_trades=True.
+        db: optional DatabaseManager for persisting trades. Persistence is opt-in.
 
-        persist_trades: set False in unit tests to skip DB I/O.
+        persist_trades: when False, the backtest is fully in-memory and does not
+        write simulated trades to the live trade journal.
         """
         self.strategy_factory = strategy_factory
         self.instrument = instrument

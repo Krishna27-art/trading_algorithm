@@ -37,7 +37,7 @@ without peeking ahead.
 from __future__ import annotations
 
 import time as _time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, List, Optional, Protocol
 
@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from data.market_calendar import MarketCalendar
+from data.time_utils import now_ist_iso, now_ist_naive
 from monitoring.logger import logger
 
 # Kite's documented max days per request, by interval. Pulling a wider range
@@ -222,7 +223,7 @@ class HistoricalDataLoader:
                 "start_date": str(start_date),
                 "end_date": str(end_date),
                 "source": "Zerodha Kite Connect Historical API",
-                "downloaded_timestamp": datetime.now().isoformat(),
+                "downloaded_timestamp": now_ist_iso(),
                 "candle_count": len(df),
                 "trading_days": int(df["datetime"].dt.date.nunique()),
             }
@@ -319,6 +320,275 @@ class HistoricalDataLoader:
                 logger.warning(f"Could not load metadata from {meta_path}: {e}")
 
         return df, meta
+
+    @staticmethod
+    def get_latest_completed_candle_start(
+        now: datetime,
+        interval_minutes: int = 15,
+        session_open: time = time(9, 15),
+        session_close: time = time(15, 30),
+    ) -> Optional[datetime]:
+        """
+        Return the start timestamp of the latest COMPLETED intraday candle.
+
+        Kite 15-minute candles are timestamped by candle start:
+            09:15 -> candle covering 09:15-09:30
+            09:30 -> candle covering 09:30-09:45
+            ...
+
+        Therefore at:
+            10:07 -> latest completed candle starts at 09:45
+            10:15 -> latest completed candle starts at 10:00
+            14:07 -> latest completed candle starts at 13:45
+            15:30 -> latest completed candle starts at 15:15
+
+        The currently-forming candle is NEVER considered completed.
+        """
+
+        if interval_minutes <= 0:
+            raise ValueError("interval_minutes must be > 0")
+
+        now = now.replace(tzinfo=None)
+
+        session_start = datetime.combine(now.date(), session_open)
+        session_end = datetime.combine(now.date(), session_close)
+
+        # No completed 15m candle exists before 09:30.
+        first_completed = session_start + timedelta(
+            minutes=interval_minutes
+        )
+
+        if now < first_completed:
+            return None
+
+        effective_now = min(now, session_end)
+
+        elapsed_minutes = (
+            effective_now - session_start
+        ).total_seconds() / 60.0
+
+        completed_bars = int(
+            elapsed_minutes // interval_minutes
+        )
+
+        if completed_bars <= 0:
+            return None
+
+        return session_start + timedelta(
+            minutes=(completed_bars - 1) * interval_minutes
+        )
+
+    @staticmethod
+    def load_or_refresh_intraday_cache(
+        kite_client: Any,
+        instrument_token: int,
+        cache_path: Path,
+        now: Optional[datetime] = None,
+        lookback_days: int = 45,
+        interval: str = "15minute",
+        request_pause_seconds: float = 0.35,
+    ) -> pd.DataFrame:
+        """
+        Load a 15-minute intraday dataset and incrementally refresh it.
+
+        Rules:
+        1. Historical cache is preserved.
+        2. Only today's data is fetched after the initial cache exists.
+        3. Refresh happens only when the cache is behind the latest
+           completed candle.
+        4. The currently-forming candle is excluded.
+        5. Duplicate candle timestamps are replaced by the newest Kite data.
+        6. No synthetic/fallback candles are generated.
+        """
+
+        if interval != "15minute":
+            raise ValueError(
+                "load_or_refresh_intraday_cache currently supports "
+                "interval='15minute' only."
+            )
+
+        if kite_client is None:
+            raise RuntimeError(
+                "Kite client is required for live intraday data."
+            )
+
+        now = (now or now_ist_naive()).replace(tzinfo=None)
+        today = now.date()
+
+        latest_completed = (
+            HistoricalDataLoader.get_latest_completed_candle_start(
+                now=now,
+                interval_minutes=15,
+            )
+        )
+
+        # Before the first completed 15m candle, do not expose a previous
+        # day's dataset as today's live intraday state.
+        if latest_completed is None:
+            return pd.DataFrame(
+                columns=[
+                    "datetime",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ]
+            )
+
+        cached = pd.DataFrame()
+
+        if cache_path.exists():
+            try:
+                cached, _ = (
+                    HistoricalDataLoader
+                    .load_cached_data_with_validation(cache_path)
+                )
+
+                if not cached.empty:
+                    cached["datetime"] = pd.to_datetime(
+                        cached["datetime"]
+                    ).dt.tz_localize(None)
+
+                    cached = cached.sort_values(
+                        "datetime"
+                    ).reset_index(drop=True)
+
+            except Exception as exc:
+                logger.warning(
+                    f"Invalid intraday cache {cache_path}: {exc}. "
+                    "Rebuilding from Kite."
+                )
+                cached = pd.DataFrame()
+
+        # Never expose future/forming candles from cache.
+        if not cached.empty:
+            cached = cached[
+                cached["datetime"] <= latest_completed
+            ].copy()
+
+            cached = cached.sort_values(
+                "datetime"
+            ).drop_duplicates(
+                subset="datetime",
+                keep="last",
+            ).reset_index(drop=True)
+
+        # Existing cache is already caught up.
+        if (
+            not cached.empty
+            and cached["datetime"].max() >= latest_completed
+        ):
+            return cached
+
+        # First download: get enough prior history for CPR / EMA warm-up.
+        #
+        # Later refreshes: ONLY request today's intraday candles.
+        if cached.empty:
+            start_date = today - timedelta(
+                days=int(lookback_days)
+            )
+        else:
+            start_date = today
+
+        logger.info(
+            f"Refreshing intraday cache for token "
+            f"{instrument_token}: {start_date} -> {today}, "
+            f"latest completed candle={latest_completed}"
+        )
+
+        fresh = HistoricalDataLoader.fetch_real_data(
+            kite_client=kite_client,
+            instrument_token=instrument_token,
+            start_date=start_date,
+            end_date=today,
+            interval=interval,
+            cache_path=None,
+            force_refresh=True,
+            request_pause_seconds=request_pause_seconds,
+        )
+
+        if fresh.empty:
+            raise RuntimeError(
+                f"Kite returned no intraday candles for "
+                f"token {instrument_token} on {today}."
+            )
+
+        fresh["datetime"] = pd.to_datetime(
+            fresh["datetime"]
+        ).dt.tz_localize(None)
+
+        # Remove the currently-forming candle.
+        fresh = fresh[
+            fresh["datetime"] <= latest_completed
+        ].copy()
+
+        if cached.empty:
+            merged = fresh.copy()
+        else:
+            merged = pd.concat(
+                [cached, fresh],
+                ignore_index=True,
+            )
+
+        if merged.empty:
+            raise RuntimeError(
+                f"No completed intraday candles available for "
+                f"token {instrument_token}."
+            )
+
+        # Fresh Kite rows replace cached rows having the same timestamp.
+        merged = (
+            merged
+            .drop_duplicates(
+                subset="datetime",
+                keep="last",
+            )
+            .sort_values("datetime")
+            .reset_index(drop=True)
+        )
+
+        # Final safety boundary.
+        merged = merged[
+            merged["datetime"] <= latest_completed
+        ].reset_index(drop=True)
+
+        is_valid, errors = (
+            HistoricalDataLoader.validate_candles(merged)
+        )
+
+        if not is_valid:
+            raise ValueError(
+                "Refreshed intraday cache failed validation: "
+                + "; ".join(errors)
+            )
+
+        metadata = {
+            "symbol": cache_path.stem.split("_")[0],
+            "instrument_token": instrument_token,
+            "interval": interval,
+            "start_date": str(
+                merged["datetime"].dt.date.min()
+            ),
+            "end_date": str(
+                merged["datetime"].dt.date.max()
+            ),
+            "source": "Zerodha Kite Connect Historical API",
+            "downloaded_timestamp": now_ist_iso(),
+            "latest_completed_candle": latest_completed.isoformat(),
+            "candle_count": len(merged),
+            "trading_days": int(
+                merged["datetime"].dt.date.nunique()
+            ),
+        }
+
+        HistoricalDataLoader.save_with_metadata(
+            merged,
+            cache_path,
+            metadata,
+        )
+
+        return merged
 
     @staticmethod
     def generate_synthetic_nifty_data(

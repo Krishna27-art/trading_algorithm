@@ -364,10 +364,10 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
         tick_size = max(float(getattr(self.instrument, "tick_size", 0.05)), 0.000001)
 
         if self.instrument.instrument_type == InstrumentType.EQUITY:
-            pct = float(
-                getattr(self.instrument, "equity_orb_max_risk_pct", 0.0040)
-            )
-            return max(entry_price * pct, tick_size)
+            pct = self.instrument.equity_orb_max_risk_pct
+            if pct is None or pct <= 0:
+                pct = 0.0040
+            return max(entry_price * float(pct), tick_size)
 
         configured_cap = float(
             getattr(self.instrument, "max_risk_cap", 0.0)

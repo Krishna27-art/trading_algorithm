@@ -16,8 +16,9 @@ calculations, and key market insights across all 6 strategies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -116,6 +117,17 @@ class PredictionService:
     6. SSF-L5-SRM     (Single-Stock Futures Lead-Lag & Level-5 Microprice Drift)
     """
 
+    # Only strategies with a complete live signal path may vote in live consensus.
+    # SIT currently lacks a trustworthy live signal path for this application.
+    # SSF-L5-SRM requires the live Level-5/futures/sector feed path, which the
+    # /api/research/live request does not provide as a live signal engine.
+    LIVE_CONSENSUS_STRATEGIES = (
+        "orb",
+        "cpr",
+        "dual_ema",
+        "apex",
+    )
+
     def __init__(self, app_settings: AppSettings = settings):
         self.settings = app_settings
         self.cache_dir = settings.base_dir / "data" / "cache"
@@ -143,8 +155,53 @@ class PredictionService:
 
         Returns (predictions_map, consensus_dict).
         """
-        inst = create_instrument_config_for_equity(symbol, token or 0)
-        ltp = current_ltp or (float(df_15m["close"].iloc[-1]) if not df_15m.empty else 0.0)
+        # --------------------------------------------------------------
+        # LIVE DATA SAFETY
+        # --------------------------------------------------------------
+        # Never evaluate the forming candle and never allow yesterday's
+        # session to masquerade as today's live state.
+        df_15m = self._prepare_live_candles(
+            df_15m
+        )
+
+        if df_15m.empty:
+            unavailable = {
+                key: SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        "No completed 15-minute candle "
+                        "is available for the current IST session."
+                    ),
+                )
+                for key in (
+                    "orb",
+                    "cpr",
+                    "dual_ema",
+                    "apex",
+                    "sector_impulse",
+                    "ssf_l5_srm",
+                )
+            }
+
+            return (
+                unavailable,
+                self.calculate_consensus(unavailable),
+            )
+
+        inst = create_instrument_config_for_equity(
+            symbol,
+            token or 0,
+        )
+
+        ltp = (
+            current_ltp
+            if current_ltp is not None
+            else (
+                float(df_15m["close"].iloc[-1])
+                if not df_15m.empty
+                else 0.0
+            )
+        )
 
         orb_pred = self._evaluate_orb(inst, df_15m, ltp)
         cpr_pred = self._evaluate_cpr(inst, df_15m, ltp)
@@ -166,8 +223,200 @@ class PredictionService:
             "ssf_l5_srm": ssf_l5_srm_pred,
         }
 
-        consensus = self.calculate_consensus(predictions)
+        # Secondary live-price invalidation.
+        predictions = {
+            key: self._invalidate_price_breached_signal(
+                prediction=value,
+                current_ltp=ltp,
+            )
+            for key, value in predictions.items()
+        }
+
+        consensus = self.calculate_consensus(
+            predictions
+        )
         return predictions, consensus
+
+    @staticmethod
+    def _latest_completed_15m_start(now_ist: datetime) -> Optional[datetime]:
+        """
+        Return the start timestamp of the latest COMPLETED 15-minute candle.
+
+        Zerodha 15-minute timestamps represent candle OPEN time:
+
+            09:15 -> 09:15-09:30
+            09:30 -> 09:30-09:45
+            09:45 -> 09:45-10:00
+            ...
+
+        Therefore:
+            09:20 -> no completed candle
+            09:30 -> 09:15 is the latest completed candle
+            10:07 -> 09:45 is the latest completed candle
+            14:07 -> 13:45 is the latest completed candle
+            15:30 -> 15:15 is the latest completed candle
+        """
+
+        now = now_ist.replace(tzinfo=None)
+
+        session_open = datetime.combine(
+            now.date(),
+            dt_time(9, 15),
+        )
+
+        session_close = datetime.combine(
+            now.date(),
+            dt_time(15, 30),
+        )
+
+        first_completed = session_open + timedelta(
+            minutes=15
+        )
+
+        if now < first_completed:
+            return None
+
+        effective_now = min(
+            now,
+            session_close,
+        )
+
+        elapsed_minutes = (
+            effective_now - session_open
+        ).total_seconds() / 60.0
+
+        completed_bars = int(
+            elapsed_minutes // 15
+        )
+
+        if completed_bars <= 0:
+            return None
+
+        return session_open + timedelta(
+            minutes=(completed_bars - 1) * 15
+        )
+
+    def _prepare_live_candles(
+        self,
+        df_15m: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Prepare the dataframe used by the live prediction engine.
+
+        Guarantees:
+        - timestamps are chronological
+        - forming candle is removed
+        - only candles up to the latest completed 15m bar are used
+        - the latest session must be today's IST session
+        """
+
+        if df_15m is None or df_15m.empty:
+            return pd.DataFrame()
+
+        data = df_15m.copy()
+
+        if "datetime" not in data.columns:
+            return pd.DataFrame()
+
+        data["datetime"] = pd.to_datetime(
+            data["datetime"]
+        )
+
+        # Normalize timezone-aware timestamps to IST naive timestamps.
+        if getattr(data["datetime"].dt, "tz", None) is not None:
+            data["datetime"] = (
+                data["datetime"]
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.tz_localize(None)
+            )
+
+        data = data.sort_values(
+            "datetime"
+        ).reset_index(drop=True)
+
+        now_ist = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        )
+
+        latest_completed = (
+            self._latest_completed_15m_start(
+                now_ist
+            )
+        )
+
+        if latest_completed is None:
+            return pd.DataFrame()
+
+        # Remove the currently-forming candle and anything after it.
+        data = data[
+            data["datetime"] <= latest_completed
+        ].copy()
+
+        if data.empty:
+            return pd.DataFrame()
+
+        # The live prediction engine must operate on today's session.
+        today = now_ist.date()
+
+        if data["datetime"].dt.date.max() != today:
+            return pd.DataFrame()
+
+        return data.reset_index(drop=True)
+
+    @staticmethod
+    def _invalidate_price_breached_signal(
+        prediction: SingleStrategyPrediction,
+        current_ltp: float,
+    ) -> SingleStrategyPrediction:
+        """
+        Reject a directional signal when the current live LTP has already
+        crossed the signal's stop or target.
+        """
+
+        if prediction.direction is None:
+            return prediction
+
+        if current_ltp is None or current_ltp <= 0:
+            return prediction
+
+        stop = prediction.stop_loss
+        target = prediction.target
+
+        if (
+            prediction.direction == "LONG"
+            and (
+                (stop is not None and current_ltp <= stop)
+                or (target is not None and current_ltp >= target)
+            )
+        ):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    "Signal expired: current LTP has already "
+                    "crossed the signal stop/target."
+                ),
+                levels=prediction.levels,
+                metrics=prediction.metrics,
+            )
+
+        if (
+            prediction.direction == "SHORT"
+            and (
+                (stop is not None and current_ltp >= stop)
+                or (target is not None and current_ltp <= target)
+            )
+        ):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    "Signal expired: current LTP has already "
+                    "crossed the signal stop/target."
+                ),
+                levels=prediction.levels,
+                metrics=prediction.metrics,
+            )
+
+        return prediction
 
     def _prepare_data(self, df_15m: pd.DataFrame) -> Tuple[pd.DataFrame, List[Tuple[date, pd.DataFrame]]]:
         data = df_15m.copy()
@@ -199,7 +448,7 @@ class PredictionService:
         strategy = IntradayORBStrategy(inst, self.settings.strategy)
         strategy.reset_session(latest_date)
 
-        last_signal: Optional[StrategySignal] = None
+        current_signal: Optional[StrategySignal] = None
         for i in range(len(today_df)):
             row = today_df.iloc[i]
             candle = {
@@ -212,8 +461,8 @@ class PredictionService:
             }
             vwap = float(row.get("vwap", row["close"]))
             sig = strategy.on_candle(candle, vwap)
-            if sig:
-                last_signal = sig
+            if i == len(today_df) - 1:
+                current_signal = sig
 
         orb_info: Dict[str, Any] = {}
         if strategy.orb:
@@ -224,25 +473,25 @@ class PredictionService:
                 "is_valid_volatility": strategy.orb.is_valid_volatility,
             }
 
-        if last_signal:
-            if last_signal.action == SignalAction.BUY:
+        if current_signal:
+            if current_signal.action == SignalAction.BUY:
                 return SingleStrategyPrediction(
                     status="LONG_BREAKOUT",
                     direction="LONG",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "Price broke above 30m ORB High with VWAP confirmation",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "Price broke above 30m ORB High with VWAP confirmation",
                     levels=orb_info,
                 )
-            elif last_signal.action == SignalAction.SELL:
+            elif current_signal.action == SignalAction.SELL:
                 return SingleStrategyPrediction(
                     status="SHORT_BREAKDOWN",
                     direction="SHORT",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "Price broke below 30m ORB Low with VWAP confirmation",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "Price broke below 30m ORB Low with VWAP confirmation",
                     levels=orb_info,
                 )
 
@@ -300,7 +549,7 @@ class PredictionService:
                 "regime": strategy.regime,
             }
 
-        last_signal: Optional[StrategySignal] = None
+        current_signal: Optional[StrategySignal] = None
         for i in range(len(today_df)):
             row = today_df.iloc[i]
             candle = {
@@ -313,28 +562,28 @@ class PredictionService:
             }
             vwap = float(row.get("vwap", row["close"]))
             sig = strategy.on_candle(candle, vwap)
-            if sig:
-                last_signal = sig
+            if i == len(today_df) - 1:
+                current_signal = sig
 
-        if last_signal:
-            if last_signal.action == SignalAction.BUY:
+        if current_signal:
+            if current_signal.action == SignalAction.BUY:
                 return SingleStrategyPrediction(
                     status="BULLISH_EXPANSION",
                     direction="LONG",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or f"Price above TC ({cpr_levels.get('top_central')}) during {strategy.regime} regime",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or f"Price above TC ({cpr_levels.get('top_central')}) during {strategy.regime} regime",
                     levels=cpr_levels,
                 )
-            elif last_signal.action == SignalAction.SELL:
+            elif current_signal.action == SignalAction.SELL:
                 return SingleStrategyPrediction(
                     status="BEARISH_EXPANSION",
                     direction="SHORT",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or f"Price below BC ({cpr_levels.get('bottom_central')}) during {strategy.regime} regime",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or f"Price below BC ({cpr_levels.get('bottom_central')}) during {strategy.regime} regime",
                     levels=cpr_levels,
                 )
 
@@ -372,7 +621,7 @@ class PredictionService:
         strategy.seed_context(lookback_df)
         strategy.reset_session(latest_date)
 
-        last_signal: Optional[StrategySignal] = None
+        current_signal: Optional[StrategySignal] = None
         for i in range(len(today_df)):
             row = today_df.iloc[i]
             candle = {
@@ -385,48 +634,46 @@ class PredictionService:
             }
             vwap = float(row.get("vwap", row["close"]))
             sig = strategy.on_candle(candle, vwap)
-            if sig:
-                last_signal = sig
+            if i == len(today_df) - 1:
+                current_signal = sig
 
-        # Get latest computed indicator values from strategy warm buffer
+        # Read the latest indicators already computed by on_candle().
+        # IMPORTANT: this is read-only and must never append another candle.
         levels: Dict[str, Any] = {}
-        if not today_df.empty:
-            last_row = today_df.iloc[-1]
-            ind_curr, _ = strategy._current_indicators({
-                "datetime": last_row["datetime"],
-                "open": float(last_row["open"]),
-                "high": float(last_row["high"]),
-                "low": float(last_row["low"]),
-                "close": float(last_row["close"]),
-            })
-            if ind_curr is not None:
-                levels = {
-                    "ema_fast": round(float(ind_curr["ema9"]), 2),
-                    "ema_slow": round(float(ind_curr["ema21"]), 2),
-                    "sma_trend": round(float(ind_curr["sma200"]), 2),
-                    "atr_14": round(float(ind_curr["atr14"]), 2),
-                    "buffer": round(float(strategy.buffer_gamma * ind_curr["atr14"]), 2),
-                }
 
-        if last_signal:
-            if last_signal.action == SignalAction.BUY:
+        ind_curr, _ = strategy.latest_indicators()
+
+        if ind_curr is not None:
+            levels = {
+                "ema_fast": round(float(ind_curr["ema9"]), 2),
+                "ema_slow": round(float(ind_curr["ema21"]), 2),
+                "sma_trend": round(float(ind_curr["sma200"]), 2),
+                "atr_14": round(float(ind_curr["atr14"]), 2),
+                "buffer": round(
+                    float(strategy.buffer_gamma * ind_curr["atr14"]),
+                    2,
+                ),
+            }
+
+        if current_signal:
+            if current_signal.action == SignalAction.BUY:
                 return SingleStrategyPrediction(
                     status="TRENDING_LONG",
                     direction="LONG",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "EMA9 above EMA21 with buffer & price above SMA200",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "EMA9 above EMA21 with buffer & price above SMA200",
                     levels=levels,
                 )
-            elif last_signal.action == SignalAction.SELL:
+            elif current_signal.action == SignalAction.SELL:
                 return SingleStrategyPrediction(
                     status="TRENDING_SHORT",
                     direction="SHORT",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "EMA9 below EMA21 with buffer & price below SMA200",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "EMA9 below EMA21 with buffer & price below SMA200",
                     levels=levels,
                 )
 
@@ -461,7 +708,7 @@ class PredictionService:
         strategy.seed_context(lookback_df)
         strategy.reset_session(latest_date)
 
-        last_signal: Optional[StrategySignal] = None
+        current_signal: Optional[StrategySignal] = None
         for i in range(len(today_df)):
             row = today_df.iloc[i]
             candle = {
@@ -474,8 +721,8 @@ class PredictionService:
             }
             vwap = float(row.get("vwap", row["close"]))
             sig = strategy.on_candle(candle, vwap)
-            if sig:
-                last_signal = sig
+            if i == len(today_df) - 1:
+                current_signal = sig
 
         analysis = strategy.last_analysis or {}
         levels = {
@@ -483,25 +730,25 @@ class PredictionService:
             if k not in ("status", "reason", "direction", "entry", "stop_loss", "target")
         }
 
-        if last_signal:
-            if last_signal.action == SignalAction.BUY:
+        if current_signal:
+            if current_signal.action == SignalAction.BUY:
                 return SingleStrategyPrediction(
                     status="APEX_LONG",
                     direction="LONG",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "APEX composite score & confirmation long",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "APEX composite score & confirmation long",
                     levels=levels,
                 )
-            elif last_signal.action == SignalAction.SELL:
+            elif current_signal.action == SignalAction.SELL:
                 return SingleStrategyPrediction(
                     status="APEX_SHORT",
                     direction="SHORT",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "APEX composite score & confirmation short",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "APEX composite score & confirmation short",
                     levels=levels,
                 )
 
@@ -557,7 +804,7 @@ class PredictionService:
         strategy.seed_context(lookback_df)
         strategy.reset_session(latest_date)
 
-        last_signal: Optional[StrategySignal] = None
+        current_signal: Optional[StrategySignal] = None
         for i in range(len(today_df)):
             row = today_df.iloc[i]
             candle = {
@@ -570,8 +817,8 @@ class PredictionService:
             }
             vwap = float(row.get("vwap", row["close"]))
             sig = strategy.on_candle(candle, vwap)
-            if sig:
-                last_signal = sig
+            if i == len(today_df) - 1:
+                current_signal = sig
 
         levels: Dict[str, Any] = {}
         if strategy.model:
@@ -581,25 +828,25 @@ class PredictionService:
                 "mkt_sig": round(float(strategy.model.get("mkt_sig", 0.0)), 4),
             }
 
-        if last_signal:
-            if last_signal.action == SignalAction.BUY:
+        if current_signal:
+            if current_signal.action == SignalAction.BUY:
                 return SingleStrategyPrediction(
                     status="IMPULSE_LONG",
                     direction="LONG",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "Sector impulse transmission long breakout",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "Sector impulse transmission long breakout",
                     levels=levels,
                 )
-            elif last_signal.action == SignalAction.SELL:
+            elif current_signal.action == SignalAction.SELL:
                 return SingleStrategyPrediction(
                     status="IMPULSE_SHORT",
                     direction="SHORT",
-                    entry=last_signal.price,
-                    stop_loss=last_signal.stop_loss,
-                    target=last_signal.target,
-                    reason=last_signal.reason or "Sector impulse transmission short breakdown",
+                    entry=current_signal.price,
+                    stop_loss=current_signal.stop_loss,
+                    target=current_signal.target,
+                    reason=current_signal.reason or "Sector impulse transmission short breakdown",
                     levels=levels,
                 )
 
@@ -721,51 +968,126 @@ class PredictionService:
             levels=levels,
         )
 
-    @staticmethod
-    def calculate_consensus(predictions: Dict[str, SingleStrategyPrediction]) -> Dict[str, Any]:
+    @classmethod
+    def calculate_consensus(
+        cls,
+        predictions: Dict[str, SingleStrategyPrediction],
+    ) -> Dict[str, Any]:
         """
-        Computes consensus direction, count of agreeing strategies, and human-readable label
-        dynamically across all evaluated strategies.
-        """
-        long_count = sum(1 for p in predictions.values() if p.direction == "LONG")
-        short_count = sum(1 for p in predictions.values() if p.direction == "SHORT")
-        evaluable_count = sum(1 for p in predictions.values() if p.status not in ("UNAVAILABLE", "ERROR"))
-        total = len(predictions)
+        Calculate live consensus using only strategies that are explicitly
+        enabled for live voting.
 
-        if long_count >= 3 or (evaluable_count <= 3 and long_count >= 2 and short_count == 0):
+        All strategy predictions remain available to the caller, but strategies
+        outside LIVE_CONSENSUS_STRATEGIES do not contribute to:
+          - long/short vote counts
+          - evaluable strategy count
+          - consensus denominator
+          - consensus label
+        """
+        live_predictions = {
+            name: prediction
+            for name, prediction in predictions.items()
+            if name in cls.LIVE_CONSENSUS_STRATEGIES
+        }
+
+        excluded_strategies = sorted(
+            name
+            for name in predictions
+            if name not in cls.LIVE_CONSENSUS_STRATEGIES
+        )
+
+        long_count = sum(
+            1
+            for prediction in live_predictions.values()
+            if prediction.direction == "LONG"
+        )
+
+        short_count = sum(
+            1
+            for prediction in live_predictions.values()
+            if prediction.direction == "SHORT"
+        )
+
+        evaluable_count = sum(
+            1
+            for prediction in live_predictions.values()
+            if prediction.status not in ("UNAVAILABLE", "ERROR")
+        )
+
+        total = len(live_predictions)
+
+        if total == 0:
+            return {
+                "direction": "NEUTRAL",
+                "agreeing_strategies": 0,
+                "total_strategies": 0,
+                "evaluable_strategies": 0,
+                "consensus_agreement_pct": None,
+                "label": "UNAVAILABLE",
+                "consensus_strategies": [],
+                "excluded_strategies": excluded_strategies,
+            }
+
+        if long_count >= 3 or (
+            evaluable_count <= 3
+            and long_count >= 2
+            and short_count == 0
+        ):
             direction = "LONG"
             label = f"STRONG LONG ({long_count}/{total})"
-        elif short_count >= 3 or (evaluable_count <= 3 and short_count >= 2 and long_count == 0):
+
+        elif short_count >= 3 or (
+            evaluable_count <= 3
+            and short_count >= 2
+            and long_count == 0
+        ):
             direction = "SHORT"
             label = f"STRONG SHORT ({short_count}/{total})"
+
         elif long_count > 0 and short_count > 0:
             direction = "DIVERGENT"
             label = f"DIVERGENT ({long_count}L / {short_count}S)"
+
         elif long_count == 2 and short_count == 0:
             direction = "LONG"
             label = f"MODERATE LONG ({long_count}/{total})"
+
         elif short_count == 2 and long_count == 0:
             direction = "SHORT"
             label = f"MODERATE SHORT ({short_count}/{total})"
+
         elif long_count == 1 and short_count == 0:
             direction = "LONG"
             label = f"MODERATE LONG ({long_count}/{total})"
+
         elif short_count == 1 and long_count == 0:
             direction = "SHORT"
             label = f"MODERATE SHORT ({short_count}/{total})"
+
         elif evaluable_count == 0:
             direction = "NEUTRAL"
             label = "UNAVAILABLE"
+
         else:
             direction = "NEUTRAL"
             label = "NEUTRAL"
 
+        agreeing_strategies = max(long_count, short_count)
+        consensus_agreement_pct = (
+            round((agreeing_strategies / total) * 100.0, 1)
+            if total > 0
+            else None
+        )
+
         return {
             "direction": direction,
-            "agreeing_strategies": max(long_count, short_count),
+            "agreeing_strategies": agreeing_strategies,
             "total_strategies": total,
             "evaluable_strategies": evaluable_count,
+            "consensus_agreement_pct": consensus_agreement_pct,
             "label": label,
+            "consensus_strategies": list(cls.LIVE_CONSENSUS_STRATEGIES),
+            "excluded_strategies": excluded_strategies,
         }
 
     @staticmethod

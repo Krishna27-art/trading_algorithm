@@ -60,62 +60,7 @@ def get_universe(
     return fallback
 
 
-# Static reference tokens for offline fallback
-_FALLBACK_NSE_TOKENS: Dict[str, int] = {
-    "ADANIENT": 6401,
-    "ADANIPORTS": 3861249,
-    "APOLLOHOSP": 40193,
-    "ASIANPAINT": 60417,
-    "AXISBANK": 1510401,
-    "BAJAJ-AUTO": 4267265,
-    "BAJFINANCE": 81153,
-    "BAJAJFINSV": 4268801,
-    "BEL": 98049,
-    "BPCL": 134657,
-    "BHARTIARTL": 2714625,
-    "BRITANNIA": 140033,
-    "CIPLA": 177665,
-    "COALINDIA": 5215745,
-    "DRREDDY": 225537,
-    "EICHERMOT": 232961,
-    "GRASIM": 315393,
-    "HCLTECH": 1850625,
-    "HDFCBANK": 341249,
-    "HDFCLIFE": 119553,
-    "HEROMOTOCO": 345089,
-    "HINDALCO": 348929,
-    "HINDUNILVR": 356865,
-    "ICICIBANK": 1270529,
-    "ITC": 424961,
-    "INDUSINDBK": 1346049,
-    "INFY": 408065,
-    "JSWSTEEL": 3001089,
-    "KOTAKBANK": 492033,
-    "LT": 2939649,
-    "M&M": 519937,
-    "MARUTI": 2815745,
-    "NESTLEIND": 4598529,
-    "NTPC": 2977281,
-    "ONGC": 633601,
-    "POWERGRID": 3834113,
-    "RELIANCE": 738561,
-    "SBILIFE": 5582849,
-    "SHRIRAMFIN": 1102337,
-    "SBIN": 779521,
-    "SUNPHARMA": 857857,
-    "TCS": 2953217,
-    "TATACONSUM": 878593,
-    "TATAMOTORS": 884737,
-    "TMPV": 884737,
-    "ETERNAL": 1304833,
-    "ASHOKLEY": 54273,
-    "TATASTEEL": 895745,
-    "TECHM": 3465729,
-    "TITAN": 897537,
-    "TRENT": 5048577,
-    "ULTRACEMCO": 2952193,
-    "WIPRO": 969473,
-}
+
 
 
 def create_instrument_config_for_equity(
@@ -313,22 +258,33 @@ class StockUniverse:
         """Lookup StockRecord by tradingsymbol."""
         return self._symbol_map.get(symbol.strip().upper())
 
-    def get_token(self, symbol: str, token_map: Optional[Dict[str, int]] = None) -> Optional[int]:
-        """Lookup numeric Kite instrument token by tradingsymbol."""
+    def get_token(
+        self,
+        symbol: str,
+        token_map: Optional[Dict[str, int]] = None,
+    ) -> Optional[int]:
+        """
+        Return a token only from an already validated runtime token_map.
+
+        This method intentionally does NOT read the disk cache directly.
+        Token-cache validation belongs exclusively to InstrumentResolver.
+        """
         sym = symbol.strip().upper()
-        if token_map and sym in token_map:
-            return token_map[sym]
-        if sym in self._tokens_cache:
-            return self._tokens_cache[sym]
-        if not self._tokens_cache and DEFAULT_300_CACHE_FILE.exists():
+
+        if token_map is not None:
+            raw_token = token_map.get(sym)
+
+            if raw_token is None:
+                return None
+
             try:
-                with open(DEFAULT_300_CACHE_FILE, "r", encoding="utf-8") as f:
-                    cached = json.load(f)
-                    self._tokens_cache = {k.strip().upper(): int(v) for k, v in cached.items() if v is not None}
-                return self._tokens_cache.get(sym)
-            except Exception:
-                pass
-        return None
+                token = int(raw_token)
+            except (TypeError, ValueError):
+                return None
+
+            return token if token > 0 else None
+
+        return self._tokens_cache.get(sym)
 
     def print_startup_summary(self, token_map: Dict[str, int]) -> Dict[str, Any]:
         """
@@ -383,27 +339,30 @@ def resolve_300_universe_tokens(
     force_refresh: bool = False,
 ) -> Dict[str, int]:
     """
-    Resolves Kite instrument tokens for all 300 stocks in the scanning universe
-    using instrument_resolver.
+    Resolve tokens for the complete 300-stock universe through
+    InstrumentResolver.
+
+    No hardcoded token fallback is permitted.
     """
     from data.instrument_resolver import instrument_resolver
 
     universe = StockUniverse()
     symbols = [r.symbol for r in universe.all_stocks]
-    resolved_map, _ = instrument_resolver.resolve_universe(
+
+    resolved_map, unresolved = instrument_resolver.resolve_universe(
         symbols=symbols,
         kite_client=kite_client,
         cache_path=cache_path,
         force_refresh=force_refresh,
     )
 
-    # Prioritize dynamic resolved tokens; use _FALLBACK_NSE_TOKENS only for missing entries
-    merged = dict(resolved_map)
-    for sym, tok in _FALLBACK_NSE_TOKENS.items():
-        if sym not in merged:
-            logger.debug(f"Using static fallback token {tok} for {sym}")
-            merged[sym] = tok
-    return merged
+    if unresolved:
+        logger.error(
+            f"Failed to resolve {len(unresolved)} NSE universe tokens. "
+            f"Missing symbols: {unresolved}"
+        )
+
+    return resolved_map
 
 
 def resolve_universe_tokens(
@@ -413,3 +372,4 @@ def resolve_universe_tokens(
 ) -> Dict[str, int]:
     """Compatibility alias delegating to resolve_300_universe_tokens."""
     return resolve_300_universe_tokens(kite_client=kite_client, cache_path=cache_path, force_refresh=force_refresh)
+

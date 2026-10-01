@@ -20,6 +20,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, status
 
 from broker.kite_adapter import get_active_kite, get_active_kite_with_diagnostics, kite_broker_adapter
+from data.time_utils import now_ist_iso, now_ist_naive, today_ist
 
 logger = logging.getLogger("backend_api.signals")
 
@@ -78,7 +79,7 @@ def get_strategy_state(strategy: Optional[str] = None):
     from config.settings import settings
     from data.market_calendar import MarketCalendar
 
-    now = datetime.now()
+    now = now_ist_naive()
     phase = MarketCalendar.get_session_phase(now.time()).value
     strat_key = (strategy or settings.active_strategy or "cpr").lower()
     strat_meta = STRATEGY_REGISTRY.get(strat_key, STRATEGY_REGISTRY["cpr"])
@@ -111,13 +112,17 @@ def get_strategy_state(strategy: Optional[str] = None):
 
 @router.get("/api/strategy/trades")
 def get_strategy_trades():
-    """Fetches all executed trades from SQLite journal."""
+    """Fetches live executed trades from the SQLite journal."""
     from database.db import DatabaseManager
     from config.settings import settings
 
     db = DatabaseManager(settings.db_path)
-    trades = db.get_all_trades()
-    return {"trades": trades, "count": len(trades)}
+    trades = db.get_live_trades()
+
+    return {
+        "trades": trades,
+        "count": len(trades),
+    }
 
 
 @router.get("/api/strategy/scanner")
@@ -131,10 +136,9 @@ def get_universe_scan(
     """
     from scanner.stock_ranker import StockUniverseScanner
 
-    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     kite = get_active_kite()
 
-    if not kite and not is_test:
+    if not kite:
         return {
             "status": "AUTH_REQUIRED",
             "data_source": "NONE",
@@ -142,7 +146,7 @@ def get_universe_scan(
             "candidates": [],
             "count": 0,
             "top_n": top_n,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_ist_iso(),
         }
 
     try:
@@ -151,13 +155,13 @@ def get_universe_scan(
             kite_client=kite,
             top_n=top_n,
             force_refresh_history=refresh,
-            allow_synthetic=is_test,
+            allow_synthetic=False,
         )
         summary = getattr(scanner, "last_pipeline_summary", {})
         return {
             "status": "success",
             "data_source": data_source,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_ist_iso(),
             "count": len(ranked),
             "top_n": top_n,
             "pipeline_summary": {
@@ -200,10 +204,9 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
     from scanner.stock_ranker import StockUniverseScanner
     from strategy.prediction_service import CandidatePrediction, prediction_service
 
-    now = datetime.now()
+    now = now_ist_naive()
     cur_time = now.time()
     is_open = (dt_time(9, 15) <= cur_time <= dt_time(15, 30)) and MarketCalendar.is_trading_day(now.date())
-    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
 
     if not kite:
@@ -234,7 +237,7 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
         ranked_metrics, data_source_label = scanner.scan_universe(
             kite_client=kite,
             top_n=top_n,
-            allow_synthetic=is_test,
+            allow_synthetic=False,
         )
 
         candidates: List[CandidatePrediction] = []
@@ -247,33 +250,26 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
             ltp = item.ltp
             df_15m = None
 
-            # 1. Try reading cached 15m intraday file ONLY if it covers today's session
             cache_file = cache_dir / f"{sym}_15m.csv"
-            if cache_file.exists():
-                try:
-                    cached_df, _ = HistoricalDataLoader.load_cached_data_with_validation(cache_file)
-                    if not cached_df.empty and cached_df["datetime"].dt.date.max() >= today:
-                        df_15m = cached_df
-                except Exception:
-                    df_15m = None
 
-            # 2. If kite is connected and cache does not cover today, fetch real historical 15m bars from Kite
-            if (df_15m is None or df_15m.empty) and kite and token:
-                try:
-                    start_d = today - timedelta(days=45)  # 45 calendar days ≈ 30 trading sessions
-                    # CPR needs 20 prior sessions for its width-percentile regime distribution.
-                    # Dual-EMA needs ~200 15m bars for SMA200 warm-up. 45 days covers both.
-                    df_15m = HistoricalDataLoader.fetch_real_data(
+            try:
+                df_15m = (
+                    HistoricalDataLoader
+                    .load_or_refresh_intraday_cache(
                         kite_client=kite,
                         instrument_token=token,
-                        start_date=start_d,
-                        end_date=today,
-                        interval="15minute",
                         cache_path=cache_file,
+                        now=now,
+                        lookback_days=45,
+                        interval="15minute",
                     )
-                except Exception as e:
-                    logger.debug(f"Could not load 15m bars for {sym} from Kite: {e}")
-                    df_15m = None
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Could not load fresh 15m bars for "
+                    f"{sym} from Kite: {e}"
+                )
+                df_15m = None
 
             # In production: if real intraday data is unavailable, skip candidate or mark unavailable (never fake data)
             if df_15m is None or df_15m.empty:
@@ -394,7 +390,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
             fetch_error = f"Unable to resolve numerical instrument_token for {inst.symbol} from Kite instrument master."
         else:
             try:
-                today = datetime.now().date()
+                today = today_ist()
                 start_d = today - timedelta(days=int(days * 1.5))
                 df = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite,
@@ -408,26 +404,22 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
                 fetch_error = str(e)
                 df = None
 
-    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     if df is None:
-        if is_test:
-            data_source = "SYNTHETIC_TEST"
-            df = HistoricalDataLoader.generate_synthetic_nifty_data(
-                start_date=datetime(2025, 1, 1),
-                days=days,
-                base_price=base_p,
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Historical data unavailable for {inst.symbol} (Token: {token}): {fetch_error or 'Kite returned zero candles.'}",
-            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Historical data unavailable for {inst.symbol} "
+                f"(Token: {token}): "
+                f"{fetch_error or 'Kite returned zero candles.'}"
+            ),
+        )
 
     # 1. ORB Backtest
     bt_orb = StrategyBacktester(
         strategy_factory=lambda: IntradayORBStrategy(inst, settings.strategy),
         instrument=inst,
         app_settings=settings,
+        persist_trades=False,
     )
     rep_orb = bt_orb.run(df, initial_capital=settings.risk.initial_capital)
 
@@ -436,6 +428,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
         strategy_factory=lambda: CPRRegimeBreakoutStrategy(inst, settings.strategy),
         instrument=inst,
         app_settings=settings,
+        persist_trades=False,
     )
     rep_cpr = bt_cpr.run(df, initial_capital=settings.risk.initial_capital)
 
@@ -444,6 +437,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
         strategy_factory=lambda: BufferedDualEMAStrategy(inst, settings.strategy),
         instrument=inst,
         app_settings=settings,
+        persist_trades=False,
     )
     rep_dual = bt_dual.run(df, initial_capital=settings.risk.initial_capital)
 
@@ -453,6 +447,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
         strategy_factory=lambda: ApexStrategy(inst, settings.strategy),
         instrument=inst,
         app_settings=settings,
+        persist_trades=False,
     )
     rep_apex = bt_apex.run(df, initial_capital=settings.risk.initial_capital)
 
@@ -464,6 +459,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
         strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy, ctx=ctx_sit),
         instrument=inst,
         app_settings=settings,
+        persist_trades=False,
     )
     rep_sit = bt_sit.run(df, initial_capital=settings.risk.initial_capital)
 
@@ -475,6 +471,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
         strategy_factory=lambda: SsfL5SrmStrategy(inst, settings.strategy),
         instrument=inst,
         app_settings=settings,
+        persist_trades=False,
     )
     rep_ssf = bt_ssf.run(df, initial_capital=settings.risk.initial_capital)
 
@@ -625,7 +622,6 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
 
     # 1. Validate Kite session
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
-    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
     # 2. Resolve authoritative instrument token
     if symbol and symbol != "NIFTY":
@@ -662,7 +658,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             fetch_error = f"Unable to resolve numerical instrument_token for {inst.symbol} from Kite instrument master."
         else:
             try:
-                today = datetime.now().date()
+                today = today_ist()
                 start_d = today - timedelta(days=int(days * 1.5))
                 df = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite,
@@ -679,18 +675,14 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
 
     # 5. Handle fallback in test or raise error
     if df is None:
-        if is_test:
-            data_source = "SYNTHETIC_TEST"
-            df = HistoricalDataLoader.generate_synthetic_nifty_data(
-                start_date=datetime(2025, 1, 1),
-                days=days,
-                base_price=base_p,
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Historical data unavailable for {inst.symbol} (Token: {token}): {fetch_error or 'Kite returned zero candles.'}",
-            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Historical data unavailable for {inst.symbol} "
+                f"(Token: {token}): "
+                f"{fetch_error or 'Kite returned zero candles.'}"
+            ),
+        )
 
     # 6. Instantiate strategy backtester
     if strat_name == "cpr":
@@ -699,6 +691,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             strategy_factory=lambda: CPRRegimeBreakoutStrategy(inst, settings.strategy),
             instrument=inst,
             app_settings=settings,
+            persist_trades=False,
         )
     elif strat_name == "dual_ema":
         from strategy.dual_ema_strategy import BufferedDualEMAStrategy
@@ -706,6 +699,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             strategy_factory=lambda: BufferedDualEMAStrategy(inst, settings.strategy),
             instrument=inst,
             app_settings=settings,
+            persist_trades=False,
         )
     elif strat_name == "apex":
         from strategy.apex_engine import ApexStrategy
@@ -713,6 +707,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             strategy_factory=lambda: ApexStrategy(inst, settings.strategy),
             instrument=inst,
             app_settings=settings,
+            persist_trades=False,
         )
     elif strat_name in ("sector_impulse", "sit"):
         from data.sector_peer_manager import SectorPeerManager
@@ -722,6 +717,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             strategy_factory=lambda: SectorImpulseStrategy(inst, settings.strategy, ctx=ctx_sit),
             instrument=inst,
             app_settings=settings,
+            persist_trades=False,
         )
     elif strat_name in ("ssf_l5_srm", "ssf"):
         from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
@@ -729,6 +725,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             strategy_factory=lambda: SsfL5SrmStrategy(inst, settings.strategy),
             instrument=inst,
             app_settings=settings,
+            persist_trades=False,
         )
     else:
         from strategy.orb_strategy import IntradayORBStrategy
@@ -736,6 +733,7 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
             strategy_factory=lambda: IntradayORBStrategy(inst, settings.strategy),
             instrument=inst,
             app_settings=settings,
+            persist_trades=False,
         )
 
     report = backtester.run(df, initial_capital=settings.risk.initial_capital)
@@ -810,16 +808,15 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
         target_inst.instrument_token = token
         quote_key = "NSE:NIFTY 50"
 
-    now = datetime.now()
+    now = now_ist_naive()
     cur_time = now.time()
     phase = MarketCalendar.get_session_phase(cur_time)
     is_open = (time(9, 15) <= cur_time <= time(15, 30)) and MarketCalendar.is_trading_day(now.date())
 
     kite = get_active_kite()
-    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
-    # If unauthenticated and not testing, return status message
-    if not kite and not is_test:
+    # If unauthenticated, return status message
+    if not kite:
         return {
             "symbol": target_inst.symbol,
             "strategy": strat_name,
@@ -857,11 +854,6 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     change_pct = 0.0
     chart_candles = []
     q_data: dict = {}
-
-    if is_test:
-        ltp = 24000.0 if symbol == "NIFTY" else 2000.0
-        open_p = ltp
-        current_vwap = ltp
 
     if kite:
         try:
@@ -922,22 +914,6 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
         except Exception as e:
             logger.warning(f"Kite live quote/candles fetch failed: {e}")
 
-    # If test mode and empty, generate sample bars so tests pass
-    if not chart_candles and is_test:
-        from data.historical_loader import HistoricalDataLoader
-        df_sample = HistoricalDataLoader.generate_synthetic_nifty_data(days=1, seed=42, base_price=ltp)
-        for _, row in df_sample.iterrows():
-            chart_candles.append({
-                "time": row["datetime"].strftime("%H:%M"),
-                "date": row["datetime"].strftime("%Y-%m-%d"),
-                "open": round(row["open"], 2),
-                "high": round(row["high"], 2),
-                "low": round(row["low"], 2),
-                "close": round(row["close"], 2),
-                "volume": int(row["volume"]),
-                "vwap": round(row["close"], 2),
-            })
-
     # Evaluate real strategy logic via PredictionService
     df_eval = pd.DataFrame()
     if chart_candles:
@@ -983,20 +959,17 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     strategy_levels = pred.levels if pred and pred.levels else {}
     algo_state = pred.status.replace("_", " ") if pred else "SCANNING"
 
-    # Fix 3.7: Separate strategy-specific confidence from consensus confidence.
-    # consensus_confidence = fraction of all evaluated strategies that agree.
-    # strategy_confidence = selected strategy's signal strength (direction set = 100%, no direction = 0%).
-    total_strategies = max(consensus.get("total_strategies", len(preds)), 1)
-    consensus_confidence = round(
-        (consensus.get("agreeing_strategies", 1) / total_strategies) * 100.0,
-        1,
-    )
-    strategy_has_direction = pred and pred.direction is not None
-    strategy_confidence = 100.0 if strategy_has_direction else 0.0
+    # Consensus agreement is a vote fraction, not a probability.
+    consensus_agreement_pct = consensus.get("consensus_agreement_pct")
+
+    # This field describes whether the selected strategy currently has a
+    # directional output. It is not a probability and should not be labeled
+    # as confidence.
+    strategy_has_direction = bool(pred and pred.direction is not None)
 
     # Fetch recent trades from DB
     db = DatabaseManager(settings.db_path)
-    trades = db.get_all_trades()
+    trades = db.get_live_trades()
     active_trade = None
     if trades and not trades[0].get("exit_price"):
         t = trades[0]
@@ -1053,10 +1026,7 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
             "entry": pred.entry or ltp,
             "stop_loss": pred.stop_loss,
             "target": pred.target,
-            "strategy_confidence": strategy_confidence,
-            "consensus_confidence": consensus_confidence,
-            # Keep legacy field so existing frontend code doesn't break
-            "confidence": consensus_confidence,
+            "consensus_agreement_pct": consensus_agreement_pct,
             "risk_approved": is_risk_approved,
             "risk_rejection_reason": risk_reason if not is_risk_approved else None,
         }
@@ -1064,7 +1034,7 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
     return {
         "symbol": target_inst.symbol,
         "strategy": strat_name,
-        "data_source": "REAL_KITE" if kite else ("SYNTHETIC_TEST" if is_test else "NONE"),
+        "data_source": "REAL_KITE" if kite else "NONE",
         "authenticated": bool(kite),
         "current_price": ltp,
         "price_change_pts": change_pts,

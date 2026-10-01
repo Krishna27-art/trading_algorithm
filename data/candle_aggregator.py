@@ -8,6 +8,8 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
+from data.time_utils import now_ist_naive
+
 logger = logging.getLogger(__name__)
 
 
@@ -197,11 +199,17 @@ class MultiSymbolCandleAggregator:
                 try:
                     timestamp = datetime.fromisoformat(raw_ts)
                 except Exception:
-                    logger.warning(f"Could not parse tick timestamp '{raw_ts}' for token {token}, falling back to datetime.now()")
-                    timestamp = datetime.now()
+                    logger.warning(
+                        f"Could not parse tick timestamp '{raw_ts}' for token {token}; "
+                        "falling back to current Asia/Kolkata time."
+                    )
+                    timestamp = now_ist_naive()
             else:
-                logger.warning(f"Tick missing timestamp for token {token}, falling back to datetime.now()")
-                timestamp = datetime.now()
+                logger.warning(
+                    f"Tick missing timestamp for token {token}; "
+                    "falling back to current Asia/Kolkata time."
+                )
+                timestamp = now_ist_naive()
 
             # 1. Update 15m candle aggregator
             with self._lock:

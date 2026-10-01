@@ -57,3 +57,9 @@ app.include_router(signals_router)
 app.include_router(positions_router)
 app.include_router(stream_router)
 app.include_router(system_router)
+
+from scanner.history_context_warmer import (
+    start_daily_history_warmer,
+)
+
+start_daily_history_warmer()

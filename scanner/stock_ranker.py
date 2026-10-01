@@ -9,6 +9,7 @@ Applies a separate Liquidity Filter layer, computes explainable ranking signals
 
 from __future__ import annotations
 
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,7 @@ from config.universe import (
 )
 from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver
+from data.market_calendar import MarketCalendar
 from monitoring.logger import logger
 from scanner.liquidity_filter import LiquidityFilter, LiquidityFilterResult, LiquidityStatus
 
@@ -83,6 +85,11 @@ class StockUniverseScanner:
             cache_path=self.cache_dir / "universe_300_tokens.json",
             force_refresh=force_refresh,
         )
+        if self.unresolved_symbols:
+            logger.error(
+                f"Token resolution incomplete: "
+                f"{len(self.unresolved_symbols)} symbols unresolved."
+            )
         self.universe.print_startup_summary(self.token_map)
         return self.token_map
 
@@ -131,7 +138,7 @@ class StockUniverseScanner:
         kite_client: Optional[Any] = None,
         top_n: int = 5,
         force_refresh_history: bool = False,
-        allow_synthetic: bool = True,
+        allow_synthetic: bool = False,
     ) -> Tuple[List[StockRankingMetrics], str]:
         self.resolve_tokens(kite_client=kite_client, force_refresh=False)
 
@@ -148,6 +155,24 @@ class StockUniverseScanner:
                 is_live_connected = False
 
         if is_live_connected and client is not None:
+            if force_refresh_history:
+                from scanner.history_context_warmer import (
+                    daily_history_context_warmer,
+                )
+
+                latest_context_date = (
+                    self._latest_completed_trading_day(
+                        datetime.now().date()
+                    )
+                )
+
+                threading.Thread(
+                    target=daily_history_context_warmer.refresh,
+                    args=(client, latest_context_date),
+                    name="manual-daily-history-refresh",
+                    daemon=True,
+                ).start()
+
             try:
                 metrics = self._scan_real_kite(client, force_refresh_history)
                 return self._rank_and_truncate(metrics, top_n), "REAL"
@@ -164,6 +189,99 @@ class StockUniverseScanner:
 
         metrics = self._scan_synthetic(seed=42)
         return self._rank_and_truncate(metrics, top_n), "SYNTHETIC"
+
+    def _load_cached_historical_context(
+        self,
+        symbol: str,
+        target_date: date,
+    ) -> Optional[Tuple[int, float]]:
+        """
+        Read daily scanner context from the local cache only.
+
+        This method MUST NOT call Kite.
+
+        Returns:
+            (avg_volume_20d, atr_14)
+            or None when usable cached history is unavailable.
+        """
+
+        cache_path = (
+            self.cache_dir
+            / f"{symbol}_daily_context.csv"
+        )
+
+        if not cache_path.exists():
+            return None
+
+        try:
+            df, _ = (
+                HistoricalDataLoader
+                .load_cached_data_with_validation(
+                    cache_path
+                )
+            )
+
+            if df.empty:
+                return None
+
+            df["datetime"] = pd.to_datetime(
+                df["datetime"]
+            )
+
+            df = df[
+                df["datetime"].dt.date <= target_date
+            ].copy()
+
+            if len(df) < 20:
+                return None
+
+            latest_date = (
+                df["datetime"]
+                .dt.date
+                .max()
+            )
+
+            if latest_date < target_date:
+                return None
+
+            recent_20 = df.sort_values("datetime").tail(20)
+            avg_vol = float(recent_20["volume"].mean())
+            atr = self.calculate_atr_from_candles(
+                recent_20,
+                period=14,
+            )
+
+            if avg_vol <= 0 or atr <= 0:
+                return None
+
+            return (
+                int(round(avg_vol)),
+                max(atr, 1.0),
+            )
+
+        except Exception as exc:
+            logger.warning(
+                f"Invalid daily context cache for "
+                f"{symbol}: {exc}"
+            )
+            return None
+
+    @staticmethod
+    def _latest_completed_trading_day(
+        today: date,
+    ) -> date:
+        """
+        Return the latest NSE trading day strictly before today.
+        """
+
+        candidate = today - timedelta(days=1)
+
+        while not MarketCalendar.is_trading_day(
+            candidate
+        ):
+            candidate -= timedelta(days=1)
+
+        return candidate
 
     def _scan_real_kite(
         self,
@@ -188,7 +306,11 @@ class StockUniverseScanner:
                 logger.warning(f"Error fetching quote batch [{i}:{i+batch_size}]: {e}")
 
         today = datetime.now().date()
-        history_start = today - timedelta(days=40)
+        latest_context_date = (
+            self._latest_completed_trading_day(
+                today
+            )
+        )
         results: List[StockRankingMetrics] = []
 
         tradable_cnt = 0
@@ -213,7 +335,27 @@ class StockUniverseScanner:
                 )
                 continue
 
-            token = self.token_map.get(sym) or q_data.get("instrument_token")
+            token = self.token_map.get(sym)
+
+            if token is None:
+                results.append(
+                    StockRankingMetrics(
+                        symbol=sym,
+                        name=record.name,
+                        category=record.category,
+                        token=None,
+                        ltp=ltp,
+                        prev_close=prev_close,
+                        open_price=open_p,
+                        volume=volume,
+                        liquidity_status=LiquidityStatus.DATA_UNAVAILABLE.value,
+                        rejection_reasons=[
+                            "No validated NSE instrument token available"
+                        ],
+                    )
+                )
+                continue
+
             ltp = float(q_data.get("last_price", 0.0))
             ohlc = q_data.get("ohlc", {})
             open_p = float(ohlc.get("open", ltp))
@@ -221,18 +363,37 @@ class StockUniverseScanner:
             volume = int(q_data.get("volume", 0))
             vwap = float(q_data.get("average_price", ltp)) or ltp
 
-            try:
-                avg_vol_20d, atr_14 = self._get_historical_context(
-                    kite_client=kite,
+            cached_context = (
+                self._load_cached_historical_context(
                     symbol=sym,
-                    token=token,
-                    start_date=history_start,
-                    end_date=today - timedelta(days=1),
-                    force_refresh=force_refresh_history,
+                    target_date=latest_context_date,
                 )
-            except Exception as e:
-                logger.warning(f"Could not load history context for {sym}: {e}")
-                avg_vol_20d, atr_14 = volume, 0.0
+            )
+
+            if cached_context is None:
+                results.append(
+                    StockRankingMetrics(
+                        symbol=sym,
+                        name=record.name,
+                        category=record.category,
+                        token=token,
+                        ltp=ltp,
+                        prev_close=prev_close,
+                        open_price=open_p,
+                        volume=volume,
+                        liquidity_status=(
+                            LiquidityStatus.DATA_UNAVAILABLE.value
+                        ),
+                        rejection_reasons=[
+                            "Daily historical context cache "
+                            "not warmed for latest completed "
+                            "trading day"
+                        ],
+                    )
+                )
+                continue
+
+            avg_vol_20d, atr_14 = cached_context
 
             raw_eval_dict = {
                 "symbol": sym,
@@ -268,7 +429,29 @@ class StockUniverseScanner:
             setup_cnt += 1
 
             gap_pct = round(((open_p - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
-            rvol = round(volume / avg_vol_20d, 2) if avg_vol_20d > 0 else 1.0
+            rvol = round(volume / avg_vol_20d, 2)
+
+            if atr_14 <= 0:
+                results.append(
+                    StockRankingMetrics(
+                        symbol=sym,
+                        name=record.name,
+                        category=record.category,
+                        token=token,
+                        ltp=ltp,
+                        prev_close=prev_close,
+                        open_price=open_p,
+                        volume=volume,
+                        liquidity_status=(
+                            LiquidityStatus.DATA_UNAVAILABLE.value
+                        ),
+                        rejection_reasons=[
+                            "Historical ATR-14 unavailable"
+                        ],
+                    )
+                )
+                continue
+
             atr_pct = round((atr_14 / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
             vwap_dist_pct = round(((ltp - vwap) / vwap) * 100.0, 2) if vwap > 0 else 0.0
 
@@ -330,7 +513,7 @@ class StockUniverseScanner:
         if token is None:
             logger.warning(
                 f"No numerical instrument_token found for {symbol}. "
-                "Cannot compute historical context without fabricating data. Returning (0, 0.0)."
+                "Historical context unavailable; stock will not be ranked."
             )
             return 0, 0.0
 
@@ -346,10 +529,24 @@ class StockUniverseScanner:
                 cache_path=cache_path,
                 force_refresh=force_refresh,
             )
-            if len(df) >= 5:
-                avg_vol = int(df["volume"].tail(20).mean())
-                atr = self.calculate_atr_from_candles(df.tail(20), period=14)
-                return max(avg_vol, 1000), max(atr, 1.0)
+            if df is not None and len(df) >= 20:
+                recent_20 = df.sort_values("datetime").tail(20)
+                avg_vol = float(recent_20["volume"].mean())
+                atr = self.calculate_atr_from_candles(recent_20, period=14)
+
+                if avg_vol <= 0:
+                    logger.warning(
+                        f"Invalid 20-day average volume for {symbol}: {avg_vol}"
+                    )
+                    return 0, 0.0
+
+                return int(round(avg_vol)), max(atr, 1.0)
+
+            logger.warning(
+                f"Insufficient full-session history for {symbol}: "
+                f"{len(df) if df is not None else 0} daily bars available, 20 required"
+            )
+            return 0, 0.0
         except Exception as e:
             logger.warning(f"Could not load historical context for {symbol}: {e}")
 

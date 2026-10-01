@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config.settings import settings
 
@@ -26,6 +26,9 @@ CANONICAL_INDEX_TOKENS = {
     "INDIAVIX": 264969,
 }
 
+UNIVERSE_TOKEN_CACHE_VERSION = 1
+UNIVERSE_TOKEN_CACHE_TTL = timedelta(hours=24)
+
 
 class InstrumentResolver:
     """
@@ -36,6 +39,7 @@ class InstrumentResolver:
         self.cache_dir = cache_dir or (settings.base_dir / "data" / "cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._memory_cache: Dict[str, Dict[str, Any]] = {}
+        self._memory_cache_loaded_at: Dict[str, datetime] = {}
 
     def _get_cache_path(self, exchange: str) -> Path:
         return self.cache_dir / f"instruments_{exchange.lower()}.json"
@@ -46,9 +50,17 @@ class InstrumentResolver:
         """
         cache_file = self._get_cache_path(exchange)
 
-        # Check in-memory cache
-        if exchange in self._memory_cache:
+        # Check in-memory cache with 24-hour TTL
+        loaded_at = self._memory_cache_loaded_at.get(exchange)
+        if (
+            exchange in self._memory_cache
+            and loaded_at is not None
+            and datetime.now() - loaded_at < timedelta(hours=24)
+        ):
             return list(self._memory_cache[exchange].values())
+
+        self._memory_cache.pop(exchange, None)
+        self._memory_cache_loaded_at.pop(exchange, None)
 
         # Check disk cache
         if cache_file.exists():
@@ -58,6 +70,7 @@ class InstrumentResolver:
                     with open(cache_file, "r") as f:
                         data = json.load(f)
                         self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in data}
+                        self._memory_cache_loaded_at[exchange] = mtime
                         return data
             except Exception as e:
                 logger.warning(f"Failed to read disk cache for {exchange}: {e}")
@@ -91,6 +104,7 @@ class InstrumentResolver:
                 json.dump(sanitized, f)
 
             self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in sanitized}
+            self._memory_cache_loaded_at[exchange] = datetime.now()
             logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
             return sanitized
         except Exception as e:
@@ -132,6 +146,126 @@ class InstrumentResolver:
 
         return None
 
+    def _load_valid_universe_cache(
+        self,
+        cache_path: Path,
+        target_symbols: Set[str],
+    ) -> Optional[Dict[str, int]]:
+        """
+        Load the 300-stock token cache only when all integrity checks pass.
+
+        Cache requirements:
+          - correct schema/version
+          - NSE exchange
+          - fresh timestamp (< 24h)
+          - exact target symbol set
+          - positive integer tokens
+          - no duplicate tokens
+        """
+        if not cache_path.exists():
+            return None
+
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not read token cache {cache_path}: {e}")
+            return None
+
+        # Reject legacy/unversioned cache format.
+        if not isinstance(payload, dict):
+            logger.warning("Universe token cache is not a JSON object.")
+            return None
+
+        if payload.get("version") != UNIVERSE_TOKEN_CACHE_VERSION:
+            logger.warning(
+                "Universe token cache has unsupported/legacy schema. "
+                "Forcing fresh Kite resolution."
+            )
+            return None
+
+        if payload.get("exchange") != "NSE":
+            logger.warning(
+                f"Universe token cache exchange mismatch: "
+                f"{payload.get('exchange')!r}"
+            )
+            return None
+
+        generated_at_raw = payload.get("generated_at")
+        if not generated_at_raw:
+            logger.warning("Universe token cache has no generated_at timestamp.")
+            return None
+
+        try:
+            generated_at = datetime.fromisoformat(generated_at_raw)
+        except ValueError:
+            logger.warning("Universe token cache has invalid generated_at timestamp.")
+            return None
+
+        if datetime.now() - generated_at >= UNIVERSE_TOKEN_CACHE_TTL:
+            logger.info("Universe token cache expired; refreshing from Kite.")
+            return None
+
+        cached_symbols = {
+            str(s).strip().upper()
+            for s in payload.get("symbols", [])
+            if s
+        }
+
+        if cached_symbols != target_symbols:
+            logger.warning(
+                "Universe token cache symbol set mismatch; "
+                "forcing fresh Kite resolution."
+            )
+            return None
+
+        raw_tokens = payload.get("tokens")
+        if not isinstance(raw_tokens, dict):
+            logger.warning("Universe token cache has invalid tokens payload.")
+            return None
+
+        normalized: Dict[str, int] = {}
+
+        for symbol in target_symbols:
+            raw_token = raw_tokens.get(symbol)
+
+            if isinstance(raw_token, bool):
+                logger.warning(f"Invalid boolean token for {symbol}.")
+                return None
+
+            try:
+                token = int(raw_token)
+            except (TypeError, ValueError):
+                logger.warning(f"Invalid token for {symbol}: {raw_token!r}")
+                return None
+
+            if token <= 0:
+                logger.warning(f"Non-positive token for {symbol}: {token}")
+                return None
+
+            normalized[symbol] = token
+
+        # Critical integrity check: one NSE universe symbol must not map
+        # to the same token as another symbol.
+        token_to_symbols: Dict[int, List[str]] = {}
+
+        for symbol, token in normalized.items():
+            token_to_symbols.setdefault(token, []).append(symbol)
+
+        duplicates = {
+            token: symbols
+            for token, symbols in token_to_symbols.items()
+            if len(symbols) > 1
+        }
+
+        if duplicates:
+            logger.error(
+                f"Duplicate NSE instrument tokens in universe cache: {duplicates}"
+            )
+            return None
+
+        return normalized
+
     def resolve_universe(
         self,
         symbols: List[str],
@@ -140,46 +274,140 @@ class InstrumentResolver:
         force_refresh: bool = False,
     ) -> Tuple[Dict[str, int], List[str]]:
         """
-        Resolves symbols from the 300-stock universe to numeric instrument_tokens
-        using Kite's NSE instrument master.
-        Caches to data/cache/universe_300_tokens.json.
-        Returns (token_map: Dict[str, int], unresolved_symbols: List[str]).
+        Resolve the exact 300-stock universe using the authoritative Kite NSE
+        instrument master.
+
+        Cache is used only when it is:
+          - fresh
+          - versioned
+          - exact-match with the requested universe
+          - positive/integer tokens
+          - duplicate-free
+
+        No static/hardcoded token fallback is used.
         """
-        target_cache = cache_path or (self.cache_dir / "universe_300_tokens.json")
-        target_symbols = set(sym.strip().upper() for sym in symbols)
+        target_cache = cache_path or (
+            self.cache_dir / "universe_300_tokens.json"
+        )
 
-        # 1. Read from cache if valid and not forced
-        if target_cache.exists() and not force_refresh:
-            try:
-                with open(target_cache, "r", encoding="utf-8") as f:
-                    cached = json.load(f)
-                if any(sym in cached for sym in target_symbols):
-                    resolved = {k: int(v) for k, v in cached.items() if k in target_symbols and v is not None}
-                    unresolved = sorted(list(target_symbols - set(resolved.keys())))
-                    return resolved, unresolved
-            except Exception as e:
-                logger.warning(f"Failed reading token cache from {target_cache}: {e}")
+        target_symbols: Set[str] = {
+            sym.strip().upper()
+            for sym in symbols
+            if sym and sym.strip()
+        }
 
-        # 2. Query instrument dump from Kite client
+        if not target_symbols:
+            return {}, []
+
+        # 1. Valid cache path.
+        if not force_refresh:
+            cached = self._load_valid_universe_cache(
+                target_cache,
+                target_symbols,
+            )
+            if cached is not None:
+                logger.info(
+                    f"Using validated universe token cache: "
+                    f"{len(cached)}/{len(target_symbols)} symbols"
+                )
+                return cached, []
+
+        # 2. No trustworthy cache -> authoritative Kite master.
+        if kite_client is None:
+            logger.error(
+                "Cannot resolve universe tokens: no valid cache and no Kite client."
+            )
+            return {}, sorted(target_symbols)
+
+        instruments = self.get_instruments(
+            kite_client,
+            exchange="NSE",
+        )
+
         resolved: Dict[str, int] = {}
-        if kite_client is not None:
-            instruments = self.get_instruments(kite_client, exchange="NSE")
-            for inst in instruments:
-                sym = inst.get("tradingsymbol")
-                token = inst.get("instrument_token")
-                if sym in target_symbols and token:
-                    resolved[sym] = int(token)
+        token_to_symbols: Dict[int, List[str]] = {}
 
-            if resolved:
-                try:
-                    target_cache.parent.mkdir(parents=True, exist_ok=True)
-                    with open(target_cache, "w", encoding="utf-8") as f:
-                        json.dump(resolved, f, indent=2)
-                    logger.info(f"Cached {len(resolved)} universe tokens to {target_cache}")
-                except Exception as e:
-                    logger.warning(f"Error caching universe tokens: {e}")
+        for inst in instruments:
+            symbol = str(inst.get("tradingsymbol") or "").strip().upper()
+            raw_token = inst.get("instrument_token")
 
-        unresolved = sorted(list(target_symbols - set(resolved.keys())))
+            if symbol not in target_symbols:
+                continue
+
+            try:
+                token = int(raw_token)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Ignoring invalid Kite token for {symbol}: {raw_token!r}"
+                )
+                continue
+
+            if token <= 0:
+                logger.warning(
+                    f"Ignoring non-positive Kite token for {symbol}: {token}"
+                )
+                continue
+
+            resolved[symbol] = token
+            token_to_symbols.setdefault(token, []).append(symbol)
+
+        # 3. Reject duplicate token assignments.
+        duplicate_tokens = {
+            token: sorted(set(symbols_for_token))
+            for token, symbols_for_token in token_to_symbols.items()
+            if len(set(symbols_for_token)) > 1
+        }
+
+        if duplicate_tokens:
+            logger.error(
+                f"Duplicate instrument tokens returned for NSE universe: "
+                f"{duplicate_tokens}"
+            )
+
+            for token, duplicate_symbols in duplicate_tokens.items():
+                for symbol in duplicate_symbols:
+                    resolved.pop(symbol, None)
+
+        unresolved = sorted(target_symbols - set(resolved))
+
+        # 4. Cache ONLY a complete, duplicate-free universe mapping.
+        if not unresolved and len(resolved) == len(target_symbols):
+            payload = {
+                "version": UNIVERSE_TOKEN_CACHE_VERSION,
+                "exchange": "NSE",
+                "generated_at": datetime.now().isoformat(),
+                "symbols": sorted(target_symbols),
+                "tokens": {
+                    symbol: resolved[symbol]
+                    for symbol in sorted(target_symbols)
+                },
+            }
+
+            try:
+                target_cache.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                with open(target_cache, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+
+                logger.info(
+                    f"Cached validated NSE universe tokens: "
+                    f"{len(resolved)}/{len(target_symbols)}"
+                )
+
+            except Exception as e:
+                logger.warning(
+                    f"Could not write universe token cache: {e}"
+                )
+        else:
+            logger.error(
+                f"NSE universe token resolution incomplete: "
+                f"{len(resolved)}/{len(target_symbols)} resolved. "
+                f"Cache will NOT be written."
+            )
+
         return resolved, unresolved
 
     def resolve_lot_size(

@@ -95,24 +95,27 @@ class IntradayORBStrategy(BaseStrategy):
 
     def _max_allowed_risk(self, entry_price: float) -> float:
         """
-        Hard maximum stop distance.
+        Return the maximum permitted stop distance.
 
-        NIFTY/futures:
-            use the configured absolute point cap.
-
-        Equities:
-            use the normalized percentage cap or max_risk_cap.
+        Equities use an explicitly configured percentage-of-entry cap.
+        Futures/index instruments use the configured absolute point cap.
         """
+        tick = max(float(self.instrument.tick_size), 1e-8)
+
         if self.instrument.instrument_type == InstrumentType.EQUITY:
-            pct = getattr(self.instrument, "equity_orb_max_risk_pct", None)
-            if pct is not None:
-                return max(entry_price * pct, self.instrument.tick_size)
-            cap = getattr(self.instrument, "max_risk_cap", None)
-            if cap is not None and float(cap) > 0:
-                pct_cap = entry_price * 0.0040
-                return max(float(cap), pct_cap, self.instrument.tick_size)
-            return max(entry_price * 0.0040, self.instrument.tick_size)
-        return max(float(self.instrument.max_risk_cap), self.instrument.tick_size)
+            pct = self.instrument.equity_orb_max_risk_pct
+
+            if pct is None or pct <= 0:
+                return 0.0
+
+            return max(entry_price * float(pct), tick)
+
+        cap = float(self.instrument.max_risk_cap)
+
+        if cap <= 0:
+            return 0.0
+
+        return max(cap, tick)
 
     def _calculate_opening_range(self) -> Optional[OpeningRange]:
         if not self.history_today:

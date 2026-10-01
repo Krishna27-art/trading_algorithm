@@ -31,6 +31,13 @@ class InstrumentConfig(BaseModel):
     # and paste the result here; it changes every futures expiry.
     instrument_token: Optional[int] = None
 
+    # Equity-specific ORB controls.
+    # None means the equity constraint is not configured.
+    equity_orb_max_risk_pct: Optional[float] = None
+    equity_orb_min_range_pct: Optional[float] = None
+    equity_orb_max_range_pct: Optional[float] = None
+
+
 
 class StrategyConfig(BaseModel):
     # Strategy Schedule (IST)

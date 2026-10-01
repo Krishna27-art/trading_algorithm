@@ -58,8 +58,7 @@ def get_portfolio_positions():
 
     # Extract strategy SL / Target metadata from active trade entries in DB
     db = DatabaseManager(settings.db_path)
-    trades = db.get_all_trades()
-    open_trades = [t for t in trades if not t.get("exit_price")]
+    open_trades = db.get_open_live_trades()
     strategy_meta = {}
     for t in open_trades:
         sym = t.get("symbol")

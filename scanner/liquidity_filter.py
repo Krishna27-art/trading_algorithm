@@ -74,7 +74,28 @@ class LiquidityFilter:
 
         ltp = float(stock_quote_data.get("ltp") or stock_quote_data.get("last_price") or 0.0)
         volume = int(stock_quote_data.get("volume") or 0)
-        avg_vol_20d = int(stock_quote_data.get("avg_volume_20d") or volume)
+
+        raw_avg_vol_20d = stock_quote_data.get("avg_volume_20d")
+
+        try:
+            avg_vol_20d = int(raw_avg_vol_20d)
+        except (TypeError, ValueError):
+            return LiquidityFilterResult(
+                symbol=symbol,
+                status=LiquidityStatus.DATA_UNAVAILABLE,
+                rejection_reasons=[
+                    "20-day full-session average volume unavailable"
+                ],
+            )
+
+        if avg_vol_20d <= 0:
+            return LiquidityFilterResult(
+                symbol=symbol,
+                status=LiquidityStatus.DATA_UNAVAILABLE,
+                rejection_reasons=[
+                    "20-day full-session average volume unavailable or invalid"
+                ],
+            )
 
         if ltp <= 0:
             return LiquidityFilterResult(

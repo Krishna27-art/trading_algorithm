@@ -228,3 +228,49 @@ class DatabaseManager:
             cursor.execute("SELECT * FROM trades ORDER BY entry_time DESC")
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
+
+    def get_live_trades(self) -> List[dict]:
+        """
+        Returns only non-paper/live journal records.
+
+        Backtests and simulated trades are stored with is_paper=1 and are
+        intentionally excluded from live-facing views.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT *
+                FROM trades
+                WHERE is_paper = 0
+                ORDER BY entry_time DESC
+                """
+            )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def get_open_live_trades(self, symbol: Optional[str] = None) -> List[dict]:
+        """
+        Returns only open, non-paper/live journal records.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            query = """
+                SELECT *
+                FROM trades
+                WHERE is_paper = 0
+                  AND exit_time IS NULL
+            """
+            params = []
+
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+
+            query += " ORDER BY entry_time DESC"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+

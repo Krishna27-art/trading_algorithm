@@ -157,7 +157,14 @@ function SignalSummary({ signal }) {
         <Stat label="Entry" value={formatCurrency(signal.entry)} />
         <Stat label="Stop loss" value={formatCurrency(signal.stop_loss)} tone="negative" />
         <Stat label="Target" value={formatCurrency(signal.target)} tone="positive" />
-        <Stat label="Confidence" value={isFinite(signal.confidence) ? `${signal.confidence}%` : 'N/A'} />
+        <Stat
+          label="Consensus agreement"
+          value={
+            Number.isFinite(signal.consensus_agreement_pct)
+              ? `${signal.consensus_agreement_pct}%`
+              : 'N/A'
+          }
+        />
       </div>
       {signal.trigger && <p className="text-xs text-[var(--text-dim)]">{signal.trigger}</p>}
     </div>

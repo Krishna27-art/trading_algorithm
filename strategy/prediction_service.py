@@ -869,6 +869,7 @@ class PredictionService:
         book_snapshot: Optional[Any] = None,
         peer_context: Optional[Any] = None,
         kite_client: Optional[Any] = None,
+        ssf_strategy: Optional[Any] = None,
     ) -> Tuple[
         Dict[str, SingleStrategyPrediction],
         Dict[str, Any],
@@ -1038,6 +1039,7 @@ class PredictionService:
                     live_df,
                     ltp,
                     book_snapshot=book_snapshot,
+                    ssf_strategy=ssf_strategy,
                 )
             )
         except Exception as exc:
@@ -1922,59 +1924,24 @@ class PredictionService:
         df_15m: pd.DataFrame,
         ltp: float,
         book_snapshot: Optional[Any] = None,
+        ssf_strategy: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
-        if df_15m.empty:
+        if book_snapshot is None or len(getattr(book_snapshot, "bids", [])) < 5 or len(getattr(book_snapshot, "asks", [])) < 5:
             return SingleStrategyPrediction(
                 status="UNAVAILABLE",
                 reason=(
-                    "SSF-L5-SRM cannot evaluate: "
-                    "no 15-minute candle data is available."
+                    "SSF-L5-SRM requires a real Level-5 book snapshot."
                 ),
                 levels={},
                 metrics={},
             )
 
-        _, days = self._prepare_data(
-            df_15m
-        )
-
-        if not days:
-            return SingleStrategyPrediction(
-                status="UNAVAILABLE",
-                reason=(
-                    "SSF-L5-SRM cannot evaluate: "
-                    "no valid trading-session data found."
-                ),
-                levels={},
-                metrics={},
-            )
-
-        latest_date, today_df = days[-1]
-
-        strategy = SsfL5SrmStrategy(
-            inst,
-            self.settings.strategy,
-        )
-
-        strategy.reset_session(
-            latest_date
-        )
-
-        for _, row in today_df.iterrows():
-            candle = self._candle_dict(
-                row
-            )
-
-            vwap = _positive_number(
-                row.get("vwap")
-            )
-
-            if vwap is None:
-                continue
-
-            strategy.on_candle(
-                candle,
-                vwap,
+        strategy = ssf_strategy
+        if strategy is None:
+            strategy = SsfL5SrmStrategy(
+                inst,
+                self.settings.strategy,
+                signal_only=True,
             )
 
         regime_ok = bool(
@@ -1996,131 +1963,68 @@ class PredictionService:
             "bars_tracked": len(bars),
         }
 
-        if book_snapshot is not None:
-            # on_book_update() calls _features() internally exactly once.
-            # Never call _features() separately first — it is NOT pure:
-            # it mutates _mids, _z_mlofi, _z_micro, _z_oi, _z_sector,
-            # _basis_hist, and _prev_oi, so calling it twice distorts the
-            # rolling statistics.
-            try:
-                signal = strategy.on_book_update(
-                    book_snapshot
-                )
-            except Exception as exc:
-                return SingleStrategyPrediction(
-                    status="ERROR",
-                    reason=(
-                        "SSF-L5-SRM book evaluation "
-                        f"failed: {type(exc).__name__}: {exc}"
-                    ),
-                    levels=levels,
-                )
-
-            # Read features written by on_book_update() to avoid the
-            # double-evaluation bug while still exposing feature values.
-            features = getattr(
-                strategy,
-                "last_features",
-                {},
-            ) or {}
-
-            if features:
-                for key, value in features.items():
-                    number = _finite_number(
-                        value
-                    )
-                    if number is not None:
-                        levels[key] = round(
-                            number,
-                            3,
-                        )
-
-            if signal is not None:
-                if signal.action == SignalAction.BUY:
-                    return self._prediction_from_signal(
-                        status="SSF_LONG",
-                        signal=signal,
-                        ltp=ltp,
-                        default_reason=(
-                            "SSF Level-5 microstructure "
-                            "generated a validated LONG signal."
-                        ),
-                        levels=levels,
-                    )
-
-                if signal.action == SignalAction.SELL:
-                    return self._prediction_from_signal(
-                        status="SSF_SHORT",
-                        signal=signal,
-                        ltp=ltp,
-                        default_reason=(
-                            "SSF Level-5 microstructure "
-                            "generated a validated SHORT signal."
-                        ),
-                        levels=levels,
-                    )
-
-            if not regime_ok:
-                return SingleStrategyPrediction(
-                    status="NO_TRADE",
-                    reason=(
-                        "SSF regime filter is inactive."
-                    ),
-                    levels=levels,
-                )
-
-            blocked_reason = None
-
-            if features:
-                try:
-                    blocked_reason = (
-                        strategy._blocked(
-                            book_snapshot,
-                            features,
-                        )
-                    )
-                except Exception as exc:
-                    return SingleStrategyPrediction(
-                        status="ERROR",
-                        reason=(
-                            "SSF-L5-SRM block evaluation "
-                            f"failed: {type(exc).__name__}: {exc}"
-                        ),
-                        levels=levels,
-                    )
-
-            if blocked_reason:
-                return SingleStrategyPrediction(
-                    status="NO_TRADE",
-                    reason=(
-                        "SSF conditions not met "
-                        f"({blocked_reason})."
-                    ),
-                    levels=levels,
-                )
-
-            score = (
-                _finite_number(
-                    features.get("score")
-                )
-                if features
-                else 0.0
+        # on_book_update() calls _features() internally exactly once.
+        # Never call _features() separately first — it is NOT pure:
+        # it mutates _mids, _z_mlofi, _z_micro, _z_oi, _z_sector,
+        # _basis_hist, and _prev_oi, so calling it twice distorts the
+        # rolling statistics.
+        try:
+            signal = strategy.on_book_update(
+                book_snapshot
             )
-
-            score_text = (
-                f"{score:.2f}"
-                if score is not None
-                else "0.00"
-            )
-
+        except Exception as exc:
             return SingleStrategyPrediction(
-                status="WAITING",
+                status="ERROR",
                 reason=(
-                    "Awaiting SSF trigger threshold "
-                    f"(composite score={score_text})."
+                    "SSF-L5-SRM book evaluation "
+                    f"failed: {type(exc).__name__}: {exc}"
                 ),
                 levels=levels,
             )
+
+        # Read features written by on_book_update() to avoid the
+        # double-evaluation bug while still exposing feature values.
+        features = getattr(
+            strategy,
+            "last_features",
+            {},
+        ) or {}
+
+        if features:
+            for key, value in features.items():
+                number = _finite_number(
+                    value
+                )
+                if number is not None:
+                    levels[key] = round(
+                        number,
+                        3,
+                    )
+
+        if signal is not None:
+            if signal.action == SignalAction.BUY:
+                return self._prediction_from_signal(
+                    status="SSF_LONG",
+                    signal=signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "SSF Level-5 microstructure "
+                        "generated a validated LONG signal."
+                    ),
+                    levels=levels,
+                )
+
+            if signal.action == SignalAction.SELL:
+                return self._prediction_from_signal(
+                    status="SSF_SHORT",
+                    signal=signal,
+                    ltp=ltp,
+                    default_reason=(
+                        "SSF Level-5 microstructure "
+                        "generated a validated SHORT signal."
+                    ),
+                    levels=levels,
+                )
 
         if not regime_ok:
             return SingleStrategyPrediction(
@@ -2131,11 +2035,55 @@ class PredictionService:
                 levels=levels,
             )
 
+        blocked_reason = None
+
+        if features:
+            try:
+                blocked_reason = (
+                    strategy._blocked(
+                        book_snapshot,
+                        features,
+                    )
+                )
+            except Exception as exc:
+                return SingleStrategyPrediction(
+                    status="ERROR",
+                    reason=(
+                        "SSF-L5-SRM block evaluation "
+                        f"failed: {type(exc).__name__}: {exc}"
+                    ),
+                    levels=levels,
+                )
+
+        if blocked_reason:
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    "SSF conditions not met "
+                    f"({blocked_reason})."
+                ),
+                levels=levels,
+            )
+
+        score = (
+            _finite_number(
+                features.get("score")
+            )
+            if features
+            else 0.0
+        )
+
+        score_text = (
+            f"{score:.2f}"
+            if score is not None
+            else "0.00"
+        )
+
         return SingleStrategyPrediction(
-            status="UNAVAILABLE",
+            status="WAITING",
             reason=(
-                "Real Level-5 order-book depth "
-                "is not available."
+                "Awaiting SSF trigger threshold "
+                f"(composite score={score_text})."
             ),
             levels=levels,
         )

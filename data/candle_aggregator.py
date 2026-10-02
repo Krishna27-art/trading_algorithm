@@ -194,6 +194,7 @@ class CandleAggregator:
         session_open: time = NSE_SESSION_OPEN,
         session_close: time = NSE_SESSION_CLOSE,
         max_completed_candles: int = 512,
+        require_vwap_for_callback: bool = True,
     ):
         if timeframe_minutes <= 0:
             raise ValueError("timeframe_minutes must be > 0")
@@ -211,6 +212,7 @@ class CandleAggregator:
         self.symbol = str(symbol).strip().upper()
         self.timeframe_minutes = int(timeframe_minutes)
         self.on_candle_close = on_candle_close
+        self.require_vwap_for_callback = bool(require_vwap_for_callback)
 
         self.session_open = session_open
         self.session_close = session_close
@@ -467,13 +469,15 @@ class CandleAggregator:
             completed_vwap <= 0
             or not math.isfinite(completed_vwap)
         ):
-            logger.warning(
-                "[%s] Completed candle %s has no valid VWAP; "
-                "candle retained but strategy callback skipped.",
-                self.symbol,
-                candle_dict.get("datetime"),
-            )
-            return
+            if self.require_vwap_for_callback:
+                logger.warning(
+                    "[%s] Completed candle %s has no valid VWAP; "
+                    "candle retained but strategy callback skipped.",
+                    self.symbol,
+                    candle_dict.get("datetime"),
+                )
+                return
+            completed_vwap = 0.0
 
         callback = self.on_candle_close
 
@@ -759,6 +763,7 @@ class MultiSymbolCandleAggregator:
             Callable[[str, Any], None]
         ] = None,
         max_completed_candles_per_symbol: int = 512,
+        require_vwap_for_callback: bool = True,
     ):
         if not token_to_symbol_map:
             raise ValueError(
@@ -850,6 +855,10 @@ class MultiSymbolCandleAggregator:
             int(max_completed_candles_per_symbol)
         )
 
+        self.require_vwap_for_callback = bool(
+            require_vwap_for_callback
+        )
+
         self.aggregators: Dict[
             str,
             CandleAggregator,
@@ -895,6 +904,9 @@ class MultiSymbolCandleAggregator:
                         on_candle_close=self.on_candle_close,
                         max_completed_candles=(
                             self.max_completed_candles_per_symbol
+                        ),
+                        require_vwap_for_callback=(
+                            self.require_vwap_for_callback
                         ),
                     )
                 )
@@ -1143,7 +1155,7 @@ class MultiSymbolCandleAggregator:
                 asks=asks,
                 ltp=price,
                 fut_ltp=None,
-                fut_oi=oi,
+                fut_oi=None,   # cash tick OI != near-month futures OI
                 circuit_lower=circuit_lower,
                 circuit_upper=circuit_upper,
             )

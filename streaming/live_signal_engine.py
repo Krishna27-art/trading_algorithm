@@ -46,7 +46,7 @@ from data.time_utils import now_ist, now_ist_iso
 from strategy.prediction_service import prediction_service
 from strategy.ssf_l5_srm_strategy import BookSnapshot
 from streaming.live_market_state import live_market_state
-from streaming.ssf_live_runtime import SSFLiveRuntime
+from streaming.ssf_live_runtime import ssf_live_runtime
 from streaming.ssf_market_context import ssf_context_store
 
 
@@ -85,12 +85,10 @@ class LiveSignalEngine:
         self._max_processed_keys = int(max_processed_keys)
         self._max_ltp_age_seconds = int(max_ltp_age_seconds)
 
-        # Persistent SSF strategy registry — one SsfL5SrmStrategy per symbol
+        # Shared persistent SSF strategy registry — one SsfL5SrmStrategy per symbol
         # survives across candle-close and book-update events so that rolling
         # z-score buffers, basis history, and regime state accumulate correctly.
-        self._ssf_runtime = SSFLiveRuntime(
-            strategy_config=prediction_service.settings.strategy
-        )
+        self._ssf_runtime = ssf_live_runtime
 
     # ------------------------------------------------------------------
     # NORMALIZATION / VALIDATION
@@ -495,6 +493,28 @@ class LiveSignalEngine:
                 else None
             )
 
+            # Enrich book snapshot with SSF futures/sector context
+            ctx = ssf_context_store.get(symbol)
+            if book_snap is not None:
+                book_snap = BookSnapshot(
+                    timestamp=book_snap.timestamp,
+                    bids=book_snap.bids,
+                    asks=book_snap.asks,
+                    ltp=book_snap.ltp,
+                    fut_ltp=ctx.fut_ltp,
+                    fut_oi=ctx.fut_oi,
+                    sector_ret_30m=ctx.sector_ret_30m,
+                    stock_ret_30m=ctx.stock_ret_30m,
+                    circuit_lower=ctx.circuit_lower or book_snap.circuit_lower,
+                    circuit_upper=ctx.circuit_upper or book_snap.circuit_upper,
+                )
+
+            ssf_strat = self._ssf_runtime.get_strategy(
+                symbol=symbol,
+                token=int(token or 0),
+                current_price=float(live_ltp),
+            )
+
             # current_ltp is explicitly the freshest verified market price,
             # not the completed candle's close unless no fresher price exists.
             preds, consensus = prediction_service.evaluate_symbol(
@@ -504,6 +524,7 @@ class LiveSignalEngine:
                 token=token,
                 book_snapshot=book_snap,
                 kite_client=kite_client,
+                ssf_strategy=ssf_strat,
             )
 
             prediction_payload = {
@@ -669,6 +690,22 @@ class LiveSignalEngine:
                 type(exc).__name__,
                 exc,
             )
+
+    def get_ssf_strategy(
+        self,
+        symbol: str,
+        token: int = 0,
+        current_price: float = 0.0,
+    ) -> Any:
+        return self._ssf_runtime.get_strategy(symbol, token, current_price)
+
+    def prepare_ssf_session(
+        self,
+        symbol: str,
+        reference_date: Any,
+        kite_client: Optional[Any] = None,
+    ) -> None:
+        self._ssf_runtime.prepare_session(symbol, reference_date, kite_client)
 
     # ------------------------------------------------------------------
     # READ APIs

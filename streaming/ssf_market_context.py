@@ -19,21 +19,20 @@ BookSnapshot before passing it to SsfL5SrmStrategy.on_book_update().
 
 Architecture
 ------------
-  Kite CASH tick  → _on_book_update()  → sets SSFMarketContext.cash fields
-  Kite FUTURES tick → [future expansion] → sets SSFMarketContext.fut_ltp / fut_oi
-  Sector index calc → [future expansion] → sets SSFMarketContext.sector_ret_30m
-
-Until the futures and sector feeds are wired, fut_ltp and fut_oi remain None
-and the basis / OI z-scores stay at 0 — but the strategy instance survives and
-keeps accumulating mlofi / microprice history.
+  Kite CASH tick        → _on_book_update()        → cash L5 fields
+  Kite FUTURES tick     → ssf_context_store         → fut_ltp / fut_oi
+  SSFOneMinuteRuntime   → ssf_context_store         → sector_ret_30m / stock_ret_30m
 """
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Deque, Dict, Optional, Tuple
+
+from data.time_utils import now_ist_naive
 
 
 @dataclass
@@ -52,6 +51,10 @@ class SSFMarketContext:
     circuit_lower: Optional[float] = None
     circuit_upper: Optional[float] = None
 
+    # Per-field timestamps so is_ready() can check freshness independently.
+    futures_updated_at: Optional[datetime] = None
+    sector_return_updated_at: Optional[datetime] = None
+    stock_return_updated_at: Optional[datetime] = None
     last_updated: Optional[datetime] = None
 
 
@@ -85,13 +88,14 @@ class SSFContextStore:
     ) -> None:
         """Record the latest near-month futures LTP and OI for *symbol*."""
         clean = str(symbol).strip().upper()
-        now = timestamp or datetime.utcnow()
+        now = timestamp or now_ist_naive()
         with self._lock:
             ctx = self._get_or_create(clean)
             if fut_ltp is not None:
                 ctx.fut_ltp = float(fut_ltp)
             if fut_oi is not None:
                 ctx.fut_oi = float(fut_oi)
+            ctx.futures_updated_at = now
             ctx.last_updated = now
 
     def update_sector_returns(
@@ -103,13 +107,15 @@ class SSFContextStore:
     ) -> None:
         """Record the latest 30-minute sector and stock returns for *symbol*."""
         clean = str(symbol).strip().upper()
-        now = timestamp or datetime.utcnow()
+        now = timestamp or now_ist_naive()
         with self._lock:
             ctx = self._get_or_create(clean)
             if sector_ret_30m is not None:
                 ctx.sector_ret_30m = float(sector_ret_30m)
+                ctx.sector_return_updated_at = now
             if stock_ret_30m is not None:
                 ctx.stock_ret_30m = float(stock_ret_30m)
+                ctx.stock_return_updated_at = now
             ctx.last_updated = now
 
     def update_circuit_limits(
@@ -142,14 +148,131 @@ class SSFContextStore:
                 stock_ret_30m=ctx.stock_ret_30m,
                 circuit_lower=ctx.circuit_lower,
                 circuit_upper=ctx.circuit_upper,
+                futures_updated_at=ctx.futures_updated_at,
+                sector_return_updated_at=ctx.sector_return_updated_at,
+                stock_return_updated_at=ctx.stock_return_updated_at,
                 last_updated=ctx.last_updated,
             )
+
+    def is_ready(
+        self,
+        symbol: str,
+        reference_time: datetime,
+        max_age_seconds: int = 120,
+    ) -> bool:
+        """
+        Return True when all required SSF external fields are present and fresh.
+
+        required: fut_ltp, fut_oi, sector_ret_30m, stock_ret_30m
+        fresh: each field's timestamp is within max_age_seconds of reference_time
+        """
+        ctx = self.get(symbol)
+        required_values = (
+            ctx.fut_ltp,
+            ctx.fut_oi,
+            ctx.sector_ret_30m,
+            ctx.stock_ret_30m,
+        )
+        if any(value is None for value in required_values):
+            return False
+
+        timestamps = (
+            ctx.futures_updated_at,
+            ctx.sector_return_updated_at,
+            ctx.stock_return_updated_at,
+        )
+        if any(ts is None for ts in timestamps):
+            return False
+
+        return all(
+            0 <= (reference_time - ts).total_seconds() <= max_age_seconds
+            for ts in timestamps
+        )
 
     def reset(self) -> None:
         """Clear all stored context (call on stream stop)."""
         with self._lock:
             self._contexts.clear()
+        ssf_return_tracker.reset()
 
 
-# Module-level singleton used by LiveSignalEngine and MarketStreamManager.
+class SSFReturnTracker:
+    """
+    Tracks real 1-minute closes and computes causal 30-minute returns.
+
+    Returns are computed as:
+        current_close / close_30_minutes_ago - 1
+
+    where close_30_minutes_ago is the latest close whose timestamp is
+    at or before (current_timestamp - 30 minutes).
+    """
+
+    def __init__(self, max_points: int = 90) -> None:
+        self._lock = threading.Lock()
+        self._data: Dict[str, Deque[Tuple[datetime, float]]] = {}
+        self._latest_returns: Dict[str, Optional[float]] = {}
+        self._max_points = max_points
+
+    def _series(self, key: str) -> Deque[Tuple[datetime, float]]:
+        series = self._data.get(key)
+        if series is None:
+            series = deque(maxlen=self._max_points)
+            self._data[key] = series
+        return series
+
+    def update(
+        self,
+        key: str,
+        timestamp: datetime,
+        close: float,
+    ) -> Optional[float]:
+        close = float(close)
+        if close <= 0:
+            return None
+        with self._lock:
+            series = self._series(key)
+            series.append((timestamp, close))
+            target_time = timestamp.timestamp() - 30 * 60
+            reference = None
+            for ts, price in reversed(series):
+                if ts.timestamp() <= target_time:
+                    reference = price
+                    break
+            if reference is None or reference <= 0:
+                result = None
+            else:
+                result = (close / reference) - 1.0
+            self._latest_returns[key] = result
+            return result
+
+    def get(self, key: str) -> Optional[float]:
+        with self._lock:
+            return self._latest_returns.get(key)
+
+    def seed(
+        self,
+        key: str,
+        candles,
+    ) -> None:
+        if candles is None or candles.empty:
+            return
+        data = candles.copy()
+        for _, row in data.sort_values("datetime").iterrows():
+            try:
+                ts = row["datetime"]
+                if hasattr(ts, "to_pydatetime"):
+                    ts = ts.to_pydatetime()
+                self.update(key, ts, float(row["close"]))
+            except (TypeError, ValueError):
+                continue
+
+    def reset(self) -> None:
+        with self._lock:
+            self._data.clear()
+            self._latest_returns.clear()
+
+
+# Module-level singletons used by LiveSignalEngine, MarketStreamManager,
+# and SSFOneMinuteRuntime.
+ssf_return_tracker = SSFReturnTracker()
 ssf_context_store = SSFContextStore()

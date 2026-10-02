@@ -16,9 +16,13 @@ from config.settings import settings
 from config.universe import resolve_universe_tokens
 from data.candle_aggregator import MultiSymbolCandleAggregator
 from data.historical_loader import HistoricalDataLoader
+from data.instrument_resolver import instrument_resolver
+from data.sector_peer_manager import get_sector_index_symbol
 from data.time_utils import now_ist, now_ist_iso, now_ist_naive
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
+from streaming.ssf_market_context import ssf_context_store
+from streaming.ssf_one_minute_runtime import ssf_one_minute_runtime
 
 logger = logging.getLogger("streaming.market_stream_manager")
 
@@ -48,6 +52,8 @@ class MarketStreamManager:
         self.last_error: Optional[str] = None
         self.kws: Optional[Any] = None
         self.aggregator: Optional[MultiSymbolCandleAggregator] = None
+        self.futures_token_to_symbol: Dict[int, str] = {}
+        self.index_token_to_symbol: Dict[int, str] = {}
         self._history_ready_symbols: set[str] = set()
         self._history_lock = threading.Lock()
 
@@ -206,7 +212,47 @@ class MarketStreamManager:
                 raise RuntimeError(self.last_error)
 
             self.token_to_symbol = dict(token_to_symbol)
-            self.subscribed_token_count = len(token_to_symbol)
+
+            # Resolve nearest single-stock futures for SSF lead-lag
+            self.futures_token_to_symbol = {}
+            for sym in self.token_to_symbol.values():
+                try:
+                    fut_tok = instrument_resolver.find_nearest_single_stock_future(
+                        sym, kite_client=kite_client
+                    )
+                    if fut_tok:
+                        self.futures_token_to_symbol[int(fut_tok)] = sym
+                except Exception as exc:
+                    logger.debug(
+                        "[MarketStreamManager] Failed to resolve futures token for %s: %s",
+                        sym,
+                        exc,
+                    )
+
+            # Resolve sector index tokens for SSF 30m sector returns
+            self.index_token_to_symbol = {}
+            for sym in self.token_to_symbol.values():
+                try:
+                    idx_sym = get_sector_index_symbol(sym)
+                    if idx_sym:
+                        idx_tok = instrument_resolver.resolve_token(
+                            idx_sym, exchange="NSE", kite_client=kite_client
+                        )
+                        if idx_tok:
+                            self.index_token_to_symbol[int(idx_tok)] = idx_sym
+                except Exception as exc:
+                    logger.debug(
+                        "[MarketStreamManager] Failed to resolve index token for %s: %s",
+                        sym,
+                        exc,
+                    )
+
+            all_tokens = (
+                list(self.token_to_symbol.keys())
+                + list(self.futures_token_to_symbol.keys())
+                + list(self.index_token_to_symbol.keys())
+            )
+            self.subscribed_token_count = len(all_tokens)
             self.state = StreamState.CONNECTING
             self.last_error = None
 
@@ -215,6 +261,13 @@ class MarketStreamManager:
             # --------------------------------------------------------------
             live_market_state.set_token_map(
                 self.token_to_symbol
+            )
+
+            # Initialize 1-minute runtime for SSF regime and return tracking
+            ssf_one_minute_runtime.initialize(
+                symbols=list(self.token_to_symbol.values()),
+                kite_client=kite_client,
+                seed_history=True,
             )
 
             # --------------------------------------------------------------
@@ -287,9 +340,7 @@ class MarketStreamManager:
                 access_token,
             )
 
-            tokens = list(
-                self.token_to_symbol.keys()
-            )
+            tokens_to_subscribe = list(all_tokens)
 
             def on_ticks(ws, ticks):
                 now_ts = now_ist()
@@ -302,6 +353,7 @@ class MarketStreamManager:
                     )
                     self.last_tick_time = now_ts
 
+                cash_ticks = []
                 for t in (
                     ticks
                     if isinstance(ticks, list)
@@ -310,10 +362,33 @@ class MarketStreamManager:
                     tok = t.get(
                         "instrument_token"
                     )
+                    if not tok:
+                        continue
+                    tok = int(tok)
+
+                    # 1. Futures tick -> update SSF futures LTP & OI
+                    if tok in self.futures_token_to_symbol:
+                        fut_sym = self.futures_token_to_symbol[tok]
+                        fut_ltp = t.get("last_price")
+                        fut_oi = t.get("oi")
+                        ssf_context_store.update_futures(
+                            symbol=fut_sym,
+                            fut_ltp=fut_ltp,
+                            fut_oi=fut_oi,
+                            timestamp=now_ts.replace(tzinfo=None),
+                        )
+                        continue
+
+                    # 2. Sector index tick -> update 1m runtime
+                    if tok in self.index_token_to_symbol:
+                        ssf_one_minute_runtime.on_tick(t)
+                        continue
+
+                    # 3. Cash stock tick
                     sym = self.token_to_symbol.get(tok)
-                    last_price = t.get(
-                        "last_price"
-                    )
+                    last_price = t.get("last_price")
+                    vol_traded = t.get("volume_traded", t.get("volume", 0))
+
                     if (
                         sym
                         and last_price is not None
@@ -321,17 +396,21 @@ class MarketStreamManager:
                         live_market_state.update_tick(
                             symbol=sym,
                             price=float(last_price),
-                            volume=0,
+                            volume=int(vol_traded or 0),
                             timestamp=now_ts.replace(
                                 tzinfo=None
                             ),
                             token=tok,
                         )
 
-                if self.aggregator:
+                    # Feed cash tick to 1m runtime for regime & stock returns
+                    ssf_one_minute_runtime.on_tick(t)
+                    cash_ticks.append(t)
+
+                if self.aggregator and cash_ticks:
                     try:
                         self.aggregator.process_ticks(
-                            ticks
+                            cash_ticks
                         )
                     except Exception as e:
                         logger.error(
@@ -343,11 +422,15 @@ class MarketStreamManager:
                 with self._lock:
                     self.state = StreamState.CONNECTED
                     self.last_connect_time = now_ist()
-                ws.subscribe(tokens)
-                ws.set_mode(ws.MODE_FULL, tokens)
+                ws.subscribe(tokens_to_subscribe)
+                ws.set_mode(ws.MODE_FULL, tokens_to_subscribe)
                 logger.info(
-                    f"[MarketStreamManager] KiteTicker connected in MODE_FULL — "
-                    f"subscribed {len(tokens)} instruments."
+                    "[MarketStreamManager] KiteTicker connected in MODE_FULL — "
+                    "subscribed %d instruments (%d cash, %d futures, %d indices).",
+                    len(tokens_to_subscribe),
+                    len(self.token_to_symbol),
+                    len(self.futures_token_to_symbol),
+                    len(self.index_token_to_symbol),
                 )
 
             def on_close(ws, code, reason):
@@ -398,7 +481,7 @@ class MarketStreamManager:
             return {
                 "status": "CONNECTING",
                 "subscribed_tokens": len(
-                    self.token_to_symbol
+                    tokens_to_subscribe
                 ),
                 "symbols_count": len(
                     self.token_to_symbol
@@ -408,6 +491,10 @@ class MarketStreamManager:
     def _stop_internal(self) -> None:
         with self._history_lock:
             self._history_ready_symbols.clear()
+        ssf_one_minute_runtime.stop()
+        live_signal_engine.reset()
+        self.futures_token_to_symbol.clear()
+        self.index_token_to_symbol.clear()
         if self.kws is not None:
             try:
                 self.kws.close()

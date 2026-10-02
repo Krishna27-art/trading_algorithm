@@ -20,6 +20,11 @@ are NOT from the spec. Values taken from the spec are unmarked.
 Order intent: entries are passive LIMITs at the touch. There is no CANCEL
 action in SignalAction, so a cancel is emitted as HOLD with reason starting
 "CANCEL_ORDER:". Fill confirmation comes from register_trade_entry() as usual.
+
+signal_only mode: when signal_only=True the strategy never creates a pending
+order and never simulates a fill.  It emits one BUY/SELL signal per qualifying
+direction change, then stays silent until the direction flips.  This is the
+correct mode for a live decision-support system.
 """
 
 from __future__ import annotations
@@ -115,9 +120,13 @@ def select_candidates(basis_z: Dict[str, float], sector_resid_var: Dict[str, flo
 
 
 class SsfL5SrmStrategy(BaseStrategy):
-    def __init__(self, instrument: InstrumentConfig,
-                 strategy_config: StrategyConfig = settings.strategy,
-                 ssf: Optional[SSFConfig] = None):
+    def __init__(
+        self,
+        instrument: InstrumentConfig,
+        strategy_config: StrategyConfig = settings.strategy,
+        ssf: Optional[SSFConfig] = None,
+        signal_only: bool = False,
+    ):
         super().__init__(instrument.symbol)
         self.instrument = instrument
         self.config = strategy_config
@@ -141,6 +150,10 @@ class SsfL5SrmStrategy(BaseStrategy):
         self.entry_time: Optional[datetime] = None
         self.last_features: Dict[str, float] = {}
 
+        # signal-only mode: emit one signal per direction change, no order management
+        self.signal_only: bool = bool(signal_only)
+        self._last_signal_direction: int = 0
+
     # ------------------------------------------------------------- lifecycle
     def reset_session(self, session_date: date):
         self.current_date = session_date
@@ -154,6 +167,10 @@ class SsfL5SrmStrategy(BaseStrategy):
         self._prev_oi = None
         self._basis_hist.clear()
         self._mids.clear()
+        self._last_signal_direction = 0
+        self.last_features = {}
+        # NOTE: _bars and _parkinson_hist are intentionally NOT cleared here.
+        # They hold the 1-minute regime history which must survive across sessions.
 
     def register_trade_entry(self, entry_price, position, stop_loss, target, risk_dist):
         super().register_trade_entry(entry_price, position, stop_loss, target, risk_dist)
@@ -237,6 +254,18 @@ class SsfL5SrmStrategy(BaseStrategy):
                     z_oi=z_oi, z_sector=z_sec, score=score, micro_dev=micro - mid,
                     spread_ticks=(ba[0] - bb[0]) / self.tick)
 
+    def _has_required_context(self, s: BookSnapshot) -> bool:
+        """Return True only when all external SSF data fields are present."""
+        return all(
+            value is not None
+            for value in (
+                s.fut_ltp,
+                s.fut_oi,
+                s.sector_ret_30m,
+                s.stock_ret_30m,
+            )
+        )
+
     def _blocked(self, s: BookSnapshot, f: Dict[str, float]) -> Optional[str]:
         t = s.timestamp.time()
         for a, b in (self.p.no_trade_open, self.p.no_trade_close):
@@ -256,14 +285,24 @@ class SsfL5SrmStrategy(BaseStrategy):
     # --------------------------------------------------------------- signals
     def on_book_update(self, s: BookSnapshot) -> Optional[StrategySignal]:
         f = self._features(s)
-        prev, self._prev = self._prev, s
+        self._prev = s
         if f is None:
             return None
         self.last_features = f
+
+        # In signal-only mode, require real external context and active regime.
+        if self.signal_only:
+            if not self._has_required_context(s):
+                self._last_signal_direction = 0
+                return None
+            if not self.regime_ok:
+                self._last_signal_direction = 0
+                return None
+
         sig = lambda a, px, why, **kw: StrategySignal(action=a, symbol=self.symbol,
                                                       timestamp=s.timestamp, price=px, reason=why, **kw)
-        # --- pending passive order management
-        if self.pending is not None:
+        # --- pending passive order management (backtest/execution mode only)
+        if not self.signal_only and self.pending is not None:
             age = (s.timestamp - self.pending["t0"]).total_seconds()
             d, px = self.pending["dir"], self.pending["price"]
             chased = (d == 1 and s.bids[0][0] > px) or (d == -1 and s.asks[0][0] < px)
@@ -274,7 +313,7 @@ class SsfL5SrmStrategy(BaseStrategy):
             return None
 
         # --- open position: microstructure / basis exits (stop/target/time in on_tick)
-        if self.position != 0:
+        if not self.signal_only and self.position != 0:
             if f["micro_dev"] * self.position < 0:
                 return sig(SignalAction.EXIT, s.ltp, "MICROPRICE_INVERSION")
             if f["z_basis"] * self.position <= 0:
@@ -290,7 +329,10 @@ class SsfL5SrmStrategy(BaseStrategy):
             d = 1
         elif f["score"] <= -p.entry_score and f["z_basis"] <= -p.basis_z_thr and f["z_oi"] > 0 and f["z_sector"] < 0:
             d = -1   # OI expansion on short positioning: z_oi > 0 as well
+
         if d == 0:
+            if self.signal_only:
+                self._last_signal_direction = 0
             return None
 
         px = s.bids[0][0] if d == 1 else s.asks[0][0]
@@ -298,10 +340,29 @@ class SsfL5SrmStrategy(BaseStrategy):
         risk = min(p.stop_vol_mult * vol, p.max_stop_pct / 100.0 * px)
         if risk < self.tick:
             return None
-        self.pending = dict(dir=d, price=px, t0=s.timestamp)
-        return sig(SignalAction.BUY if d == 1 else SignalAction.SELL, px,
-                   f"SSF-L5-SRM score={f['score']:.2f} basis_z={f['z_basis']:.2f} micro_dev={f['micro_dev']:.3f}",
-                   stop_loss=px - d * risk, target=px + d * p.reward_risk * risk, order_type="LIMIT")
+
+        if self.signal_only:
+            # Emit one signal when the qualifying direction appears.
+            # Do not pretend that a manual order was filled.
+            if self._last_signal_direction == d:
+                return None
+            self._last_signal_direction = d
+        else:
+            self.pending = dict(dir=d, price=px, t0=s.timestamp)
+
+        return sig(
+            SignalAction.BUY if d == 1 else SignalAction.SELL,
+            px,
+            (
+                f"SSF-L5-SRM "
+                f"score={f['score']:.2f} "
+                f"basis_z={f['z_basis']:.2f} "
+                f"micro_dev={f['micro_dev']:.3f}"
+            ),
+            stop_loss=px - d * risk,
+            target=px + d * p.reward_risk * risk,
+            order_type="LIMIT",
+        )
 
     def on_tick(self, price: float, timestamp: datetime) -> Optional[StrategySignal]:
         if self.position == 0:

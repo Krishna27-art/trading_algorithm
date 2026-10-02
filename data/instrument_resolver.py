@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config.settings import settings
+from data.time_utils import now_ist_naive
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +469,82 @@ class InstrumentResolver:
                         return lot_val
 
         return fallback
+
+    def find_nearest_single_stock_future(
+        self,
+        underlying_symbol: str,
+        instruments: Optional[List[Dict[str, Any]]] = None,
+        kite_client: Optional[Any] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the nearest non-expired single-stock futures contract.
+
+        Uses the real NFO instrument dump and expiry date. No hardcoded contract
+        symbols or tokens are used.
+        """
+        clean = str(underlying_symbol).strip().upper()
+
+        if instruments is None:
+            instruments = self.get_instruments(
+                kite_client,
+                exchange="NFO",
+            )
+
+        today = now_ist_naive().date()
+        candidates = []
+
+        for inst in instruments:
+            if not isinstance(inst, dict):
+                continue
+
+            if str(inst.get("instrument_type", "")).upper() != "FUT":
+                continue
+
+            segment = str(inst.get("segment", "")).upper()
+            if segment and segment != "NFO-FUT":
+                continue
+
+            name = str(inst.get("name", "")).strip().upper()
+            tradingsymbol = str(inst.get("tradingsymbol", "")).strip().upper()
+
+            if name != clean and not tradingsymbol.startswith(clean):
+                continue
+
+            expiry_raw = str(inst.get("expiry", ""))[:10]
+            if not expiry_raw:
+                continue
+
+            try:
+                expiry = datetime.fromisoformat(expiry_raw).date()
+            except ValueError:
+                continue
+
+            if expiry < today:
+                continue
+
+            try:
+                token = int(inst["instrument_token"])
+            except (TypeError, ValueError, KeyError):
+                continue
+
+            if token <= 0:
+                continue
+
+            candidates.append((
+                expiry,
+                {
+                    "instrument_token": token,
+                    "tradingsymbol": tradingsymbol,
+                    "expiry": expiry.isoformat(),
+                    "name": name,
+                },
+            ))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
 
 
 # Global singleton instance

@@ -288,3 +288,33 @@ class SectorPeerManager:
         except Exception as e:
             logger.warning(f"Failed to initialize PeerContext for {symbol}: {e}")
             return None
+
+    @classmethod
+    def get_sector_name(cls, symbol: str) -> str:
+        """Return the sector name string for a given symbol."""
+        return cls.get_sector_for_symbol(symbol).name
+
+
+# Authoritative sector-to-index mapping for SSF Sector Residual Momentum
+SSF_SECTOR_INDEX_SYMBOLS: Dict[str, str] = {
+    "IT": "NIFTY IT",
+    "BANKING": "NIFTY BANK",
+    "AUTO": "NIFTY AUTO",
+    "ENERGY_POWER": "NIFTY ENERGY",
+    "METALS": "NIFTY METAL",
+    "PHARMA_HEALTH": "NIFTY PHARMA",
+    "FMCG_CONSUMER": "NIFTY FMCG",
+    "FIN_SERVICES": "NIFTY FIN SERVICE",
+    "INFRA_CAPGOODS_REALTY": "NIFTY INFRA",
+    "CHEMICALS": "NIFTY COMMODITIES",
+    "GENERAL_EQUITY": "NIFTY 50",
+}
+
+
+def get_sector_index_symbol(symbol: str) -> str:
+    """Return the NSE sector index symbol corresponding to the stock symbol."""
+    sec_name = SectorPeerManager.get_sector_name(symbol)
+    return SSF_SECTOR_INDEX_SYMBOLS.get(sec_name, "NIFTY 50")
+
+
+sector_peer_manager = SectorPeerManager()

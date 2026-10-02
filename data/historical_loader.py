@@ -401,10 +401,15 @@ class HistoricalDataLoader:
         6. No synthetic/fallback candles are generated.
         """
 
-        if interval != "15minute":
+        interval_minutes_map = {
+            "minute": 1,
+            "15minute": 15,
+        }
+        interval_minutes = interval_minutes_map.get(interval)
+        if interval_minutes is None:
             raise ValueError(
-                "load_or_refresh_intraday_cache currently supports "
-                "interval='15minute' only."
+                "Unsupported intraday interval. "
+                "Supported: 'minute', '15minute'."
             )
 
         if kite_client is None:
@@ -418,7 +423,7 @@ class HistoricalDataLoader:
         latest_completed = (
             HistoricalDataLoader.get_latest_completed_candle_start(
                 now=now,
-                interval_minutes=15,
+                interval_minutes=interval_minutes,
             )
         )
 

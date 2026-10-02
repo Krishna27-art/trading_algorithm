@@ -16,10 +16,9 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from kiteconnect import KiteConnect, KiteTicker
 
-from broker.base_broker import BaseBrokerAdapter
 from config.settings import settings
 from data.candle_aggregator import MultiSymbolCandleAggregator
-from database.models import OrderDirection, OrderRecord, OrderStatus, OrderType
+from data.time_utils import now_ist_naive
 from monitoring.logger import logger
 
 
@@ -49,7 +48,7 @@ def save_session(
         "user_name": user_name,
         "access_token": access_token,
         "public_token": public_token,
-        "login_time": datetime.now().isoformat(),
+        "login_time": now_ist_naive().isoformat(),
     }
     settings.token_file.parent.mkdir(parents=True, exist_ok=True)
     with open(settings.token_file, "w") as f:
@@ -84,7 +83,7 @@ def get_saved_session() -> Optional[Dict[str, Any]]:
             "access_token": settings.kite_access_token,
             "user_id": settings.kite_user_id or "",
             "user_name": "Trader",
-            "login_time": datetime.now().isoformat(),
+            "login_time": now_ist_naive().isoformat(),
         }
 
     return None
@@ -183,9 +182,10 @@ def get_active_kite() -> Optional[KiteConnect]:
     return kite
 
 
-class KiteBrokerAdapter(BaseBrokerAdapter):
+class KiteBrokerAdapter:
     def __init__(self, api_key: Optional[str] = None, access_token: Optional[str] = None):
-        super().__init__(name="KITE_BROKER")
+        self.name = "KITE_BROKER"
+        self._connected = False
         self.api_key = api_key
         self.access_token = access_token
         self.kite: Optional[KiteConnect] = None

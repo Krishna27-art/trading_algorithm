@@ -183,3 +183,37 @@ def test_duplicate_tokens_from_kite_are_not_cached(tmp_path):
     assert resolved == {}
     assert set(unresolved) == {"RELIANCE", "TCS"}
     assert not cache.exists()
+
+
+def test_empty_disk_instruments_cache_falls_through_to_kite(tmp_path):
+    resolver = InstrumentResolver(cache_dir=tmp_path)
+    cache_file = tmp_path / "instruments_nse.json"
+    cache_file.write_text("[]", encoding="utf-8")
+
+    class FakeKite:
+        def instruments(self, exchange):
+            return [
+                {"tradingsymbol": "INFY", "instrument_token": 408065},
+                {"tradingsymbol": "SBIN", "instrument_token": 779521},
+            ]
+
+    instruments = resolver.get_instruments(kite_client=FakeKite(), exchange="NSE")
+    assert len(instruments) == 2
+    assert {i["tradingsymbol"] for i in instruments} == {"INFY", "SBIN"}
+
+
+def test_corrupt_disk_instruments_cache_falls_through_to_kite(tmp_path):
+    resolver = InstrumentResolver(cache_dir=tmp_path)
+    cache_file = tmp_path / "instruments_nse.json"
+    cache_file.write_text("[{\"invalid\": true}]", encoding="utf-8")
+
+    class FakeKite:
+        def instruments(self, exchange):
+            return [
+                {"tradingsymbol": "INFY", "instrument_token": 408065},
+            ]
+
+    instruments = resolver.get_instruments(kite_client=FakeKite(), exchange="NSE")
+    assert len(instruments) == 1
+    assert instruments[0]["tradingsymbol"] == "INFY"
+

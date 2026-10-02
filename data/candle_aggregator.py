@@ -1024,79 +1024,53 @@ class MultiSymbolCandleAggregator:
         price: float,
     ) -> Optional[Any]:
         """
-        Extract the top 5 buy/sell levels from Kite FULL mode.
+        Extract top-5 buy/sell depth from Kite FULL mode.
+        Kite can send an empty/zeroed depth book, especially outside market hours.
+        That is DATA_UNAVAILABLE, not an exception.
 
-        Returns None when depth is unavailable or invalid.
+        Returns:
+            BookSnapshot when all required top-5 levels are valid.
+            None when depth is unavailable or incomplete.
         """
         depth = tick.get("depth")
-
         if not isinstance(depth, dict):
             return None
 
-        buy_levels = depth.get(
-            "buy"
-        )
+        buy_levels = depth.get("buy")
+        sell_levels = depth.get("sell")
 
-        sell_levels = depth.get(
-            "sell"
-        )
-
-        if not isinstance(
-            buy_levels,
-            list,
-        ):
+        if not isinstance(buy_levels, list) or not isinstance(sell_levels, list):
             return None
 
-        if not isinstance(
-            sell_levels,
-            list,
-        ):
+        if len(buy_levels) < 5 or len(sell_levels) < 5:
             return None
 
-        if (
-            len(buy_levels) < 5
-            or len(sell_levels) < 5
-        ):
-            return None
+        bids: List[Tuple[float, int, int]] = []
+        asks: List[Tuple[float, int, int]] = []
 
         try:
-            bids = []
-            asks = []
-
-            # Only top 5 are required by SSF-L5-SRM.
+            # -----------------------------
+            # Top 5 BUY levels
+            # -----------------------------
             for level in buy_levels[:5]:
-                if not isinstance(
-                    level,
-                    dict,
-                ):
-                    raise ValueError(
-                        "Invalid bid level"
-                    )
+                if not isinstance(level, dict):
+                    return None
 
-                bid_price = float(
-                    level["price"]
-                )
-                bid_qty = int(
-                    level["quantity"]
-                )
-                bid_orders = int(
-                    level.get(
-                        "orders",
-                        1,
-                    )
-                )
+                bid_price = float(level.get("price", 0))
+                bid_qty = int(level.get("quantity", 0))
+                bid_orders = int(level.get("orders", 0))
+
+                # Zero/empty depth is a valid "no book available" state.
+                if bid_price == 0:
+                    return None
 
                 if (
-                    not math.isfinite(
-                        bid_price
-                    )
-                    or bid_price <= 0
+                    not math.isfinite(bid_price)
+                    or bid_price < 0
                     or bid_qty < 0
                     or bid_orders < 0
                 ):
-                    raise ValueError(
-                        "Invalid bid values"
-                    )
+                    return None
 
                 bids.append(
                     (
@@ -1106,39 +1080,28 @@ class MultiSymbolCandleAggregator:
                     )
                 )
 
+            # -----------------------------
+            # Top 5 SELL levels
+            # -----------------------------
             for level in sell_levels[:5]:
-                if not isinstance(
-                    level,
-                    dict,
-                ):
-                    raise ValueError(
-                        "Invalid ask level"
-                    )
+                if not isinstance(level, dict):
+                    return None
 
-                ask_price = float(
-                    level["price"]
-                )
-                ask_qty = int(
-                    level["quantity"]
-                )
-                ask_orders = int(
-                    level.get(
-                        "orders",
-                        1,
-                    )
-                )
+                ask_price = float(level.get("price", 0))
+                ask_qty = int(level.get("quantity", 0))
+                ask_orders = int(level.get("orders", 0))
+
+                # Zero/empty depth is a valid "no book available" state.
+                if ask_price == 0:
+                    return None
 
                 if (
-                    not math.isfinite(
-                        ask_price
-                    )
-                    or ask_price <= 0
+                    not math.isfinite(ask_price)
+                    or ask_price < 0
                     or ask_qty < 0
                     or ask_orders < 0
                 ):
-                    raise ValueError(
-                        "Invalid ask values"
-                    )
+                    return None
 
                 asks.append(
                     (
@@ -1148,30 +1111,26 @@ class MultiSymbolCandleAggregator:
                     )
                 )
 
-            from strategy.ssf_l5_srm_strategy import (
-                BookSnapshot,
-            )
+            if len(bids) != 5 or len(asks) != 5:
+                return None
 
+            from strategy.ssf_l5_srm_strategy import BookSnapshot
+
+            # Optional fields. Missing OI/circuit values are allowed.
             oi_raw = tick.get("oi")
-            lower_raw = tick.get(
-                "lower_circuit_limit"
-            )
-            upper_raw = tick.get(
-                "upper_circuit_limit"
-            )
+            lower_raw = tick.get("lower_circuit_limit")
+            upper_raw = tick.get("upper_circuit_limit")
 
             oi = (
                 float(oi_raw)
                 if _is_finite_positive(oi_raw)
                 else None
             )
-
             circuit_lower = (
                 float(lower_raw)
                 if _is_finite_positive(lower_raw)
                 else None
             )
-
             circuit_upper = (
                 float(upper_raw)
                 if _is_finite_positive(upper_raw)
@@ -1189,16 +1148,13 @@ class MultiSymbolCandleAggregator:
                 circuit_upper=circuit_upper,
             )
 
-        except (
-            KeyError,
-            TypeError,
-            ValueError,
-            ImportError,
-        ):
-            logger.exception(
-                "Invalid Level-5 depth received "
+        except (TypeError, ValueError, KeyError, ImportError):
+            # Malformed depth must not break the streaming pipeline.
+            logger.debug(
+                "Ignoring malformed/unavailable Level-5 depth "
                 "for token %s",
                 tick.get("instrument_token"),
+                exc_info=True,
             )
             return None
 

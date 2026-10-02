@@ -6,7 +6,7 @@ import { Loading, ErrorState, EmptyState } from '../components/common/DataStates
 import { usePolling } from '../hooks/usePolling'
 import { getSystemHealth } from '../api/system'
 import { getStrategyState, getTelemetry } from '../api/market'
-import { getPositions } from '../api/positions'
+import { getTrades } from '../api/trades'
 import { formatCurrency } from '../utils/format'
 
 export default function DashboardPage({ onNavigate, isAuthenticated }) {
@@ -20,7 +20,17 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
     intervalMs: 10000,
     deps: [symbol, strategy],
   })
-  const positions = usePolling(getPositions, { intervalMs: 10000 })
+  const trades = usePolling(getTrades, { intervalMs: 15000 })
+  const tradesList = Array.isArray(trades.data?.trades)
+    ? trades.data.trades
+    : Array.isArray(trades.data)
+      ? trades.data
+      : []
+  const totalPnl = tradesList
+    .filter((t) => t.pnl_net !== null && t.pnl_net !== undefined)
+    .reduce((sum, t) => sum + (t.pnl_net || 0), 0)
+  const winCount = tradesList.filter((t) => (t.pnl_net || 0) > 0).length
+  const lossCount = tradesList.filter((t) => (t.pnl_net || 0) < 0).length
 
   const overallReady = health.data?.overall_status === 'READY'
 
@@ -80,39 +90,31 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Positions summary */}
+        {/* Trade Journal summary */}
         <Card
-          title="Positions"
+          title="Trade Journal"
           action={
-            <button onClick={() => onNavigate('stocks')} className="text-xs text-[var(--accent)] hover:underline">
-              View universe
+            <button onClick={() => onNavigate('trades')} className="text-xs text-[var(--accent)] hover:underline">
+              View journal
             </button>
           }
         >
-          {positions.status === 'loading' && !positions.data ? (
+          {trades.status === 'loading' && !trades.data ? (
             <Loading />
-          ) : positions.status === 'error' && !positions.data ? (
-            <ErrorState error={positions.error} onRetry={positions.refresh} />
-          ) : !positions.data?.count ? (
-            <EmptyState label="No open positions" />
+          ) : trades.status === 'error' && !trades.data ? (
+            <ErrorState error={trades.error} onRetry={trades.refresh} />
+          ) : !tradesList.length ? (
+            <EmptyState label="No journaled trades yet" hint="Strategy signals and executions are logged here" />
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              <Stat label="Open positions" value={positions.data.count} />
-              <Stat
-                label="Unrealized P&L"
-                value={formatCurrency(positions.data.total_unrealised_pnl)}
-                tone={pnlTone(positions.data.total_unrealised_pnl)}
-              />
-              <Stat
-                label="Realized P&L"
-                value={formatCurrency(positions.data.total_realised_pnl)}
-                tone={pnlTone(positions.data.total_realised_pnl)}
-              />
+              <Stat label="Total trades" value={tradesList.length} />
               <Stat
                 label="Total P&L"
-                value={formatCurrency(positions.data.total_pnl)}
-                tone={pnlTone(positions.data.total_pnl)}
+                value={formatCurrency(totalPnl)}
+                tone={pnlTone(totalPnl)}
               />
+              <Stat label="Profitable" value={winCount} tone="positive" />
+              <Stat label="Losses" value={lossCount} tone={lossCount > 0 ? 'negative' : undefined} />
             </div>
           )}
         </Card>

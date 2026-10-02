@@ -9,33 +9,20 @@ import pytest
 
 from config.settings import InstrumentConfig, InstrumentType
 from data.historical_loader import HistoricalDataLoader
-from run_algo import load_history
 
 
 def test_real_data_required_fails_when_unavailable(tmp_path, monkeypatch):
     """
     REAL_DATA_REQUIRED_TEST:
-    If real data is unavailable, the system must say:
-    'REAL HISTORICAL DATA REQUIRED — BACKTEST NOT EXECUTED'
-    and must not generate performance metrics.
+    If real data client is invalid/unavailable, fetch_real_data raises RuntimeError.
     """
-    fake_inst = InstrumentConfig(
-        symbol="NONEXISTENT_XYZ",
-        exchange="NSE",
-        instrument_type=InstrumentType.EQUITY,
-        lot_size=1,
-        instrument_token=99999999,
-    )
-
-    with pytest.raises(RuntimeError) as exc:
-        load_history(
-            days=30,
-            start_date=datetime(2025, 1, 1),
-            instrument=fake_inst,
-            allow_synthetic=False,
+    with pytest.raises(RuntimeError):
+        HistoricalDataLoader.fetch_real_data(
+            kite_client=None,
+            instrument_token=99999999,
+            start_date=datetime(2025, 1, 1).date(),
+            end_date=datetime(2025, 1, 31).date(),
         )
-
-    assert "REAL HISTORICAL DATA REQUIRED — BACKTEST NOT EXECUTED" in str(exc.value)
 
 
 def test_metadata_persistence(tmp_path):

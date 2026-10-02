@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getTrades } from '../api/positions';
+import { getTrades } from '../api/trades';
 import './TradesPage.css';
 
 const TradesPage = () => {

@@ -13,6 +13,7 @@ was unreachable dead code. It now just returns 501 directly.
 
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +33,7 @@ _live_research_cache: Dict[str, Any] = {
     "top_n": 10,
     "data": None,
 }
+_live_research_cache_lock = threading.Lock()
 
 STRATEGY_REGISTRY = {
     "cpr": {
@@ -228,9 +230,10 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
         }
 
     # Use in-memory cache if fresh (<= 15 seconds) unless forced
-    cache_age = time_mod.time() - _live_research_cache["timestamp"]
-    if not force_refresh and cache_age < 15.0 and _live_research_cache["data"] and _live_research_cache["top_n"] == top_n:
-        return _live_research_cache["data"]
+    with _live_research_cache_lock:
+        cache_age = time_mod.time() - _live_research_cache["timestamp"]
+        if not force_refresh and cache_age < 15.0 and _live_research_cache["data"] and _live_research_cache["top_n"] == top_n:
+            return _live_research_cache["data"]
 
     try:
         scanner = StockUniverseScanner()
@@ -332,9 +335,10 @@ def get_live_research(top_n: int = 10, force_refresh: bool = False):
                 "key_insights": key_insights,
             }
 
-        _live_research_cache["timestamp"] = time_mod.time()
-        _live_research_cache["top_n"] = top_n
-        _live_research_cache["data"] = response_payload
+        with _live_research_cache_lock:
+            _live_research_cache["timestamp"] = time_mod.time()
+            _live_research_cache["top_n"] = top_n
+            _live_research_cache["data"] = response_payload
 
         return response_payload
 
@@ -806,6 +810,8 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
             or 256265
         )
         target_inst.instrument_token = token
+        if not target_inst.max_risk_cap or target_inst.max_risk_cap <= 0:
+            target_inst.max_risk_cap = 80.0
         quote_key = "NSE:NIFTY 50"
 
     now = now_ist_naive()
@@ -867,6 +873,8 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
                 current_vwap = float(q_data.get("average_price", ltp)) or ltp
                 change_pts = round(ltp - prev_c, 2)
                 change_pct = round(((ltp - prev_c) / prev_c) * 100.0, 2) if prev_c > 0 else 0.0
+                if ltp > 0 and (not target_inst.max_risk_cap or target_inst.max_risk_cap <= 0):
+                    target_inst.max_risk_cap = round(ltp * 0.004, 2)
 
             # Fetch today's real intraday candles for chart
             if token:

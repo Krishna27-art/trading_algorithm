@@ -47,15 +47,17 @@ class InstrumentResolver:
     def get_instruments(self, kite_client: Any, exchange: str = "NSE") -> List[Dict[str, Any]]:
         """
         Fetches instrument dump from Kite or reads from local disk cache if < 24 hours old.
+        Validates that cached instruments are non-empty and well-formed.
         """
         cache_file = self._get_cache_path(exchange)
 
-        # Check in-memory cache with 24-hour TTL
+        # Check in-memory cache with 24-hour TTL and non-empty validation
         loaded_at = self._memory_cache_loaded_at.get(exchange)
         if (
             exchange in self._memory_cache
             and loaded_at is not None
             and datetime.now() - loaded_at < timedelta(hours=24)
+            and len(self._memory_cache[exchange]) > 0
         ):
             return list(self._memory_cache[exchange].values())
 
@@ -67,11 +69,27 @@ class InstrumentResolver:
             try:
                 mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
                 if datetime.now() - mtime < timedelta(hours=24):
-                    with open(cache_file, "r") as f:
+                    with open(cache_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                        self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in data}
-                        self._memory_cache_loaded_at[exchange] = mtime
-                        return data
+                    if isinstance(data, list) and len(data) > 0:
+                        valid_items = [
+                            i for i in data
+                            if isinstance(i, dict)
+                            and i.get("tradingsymbol")
+                            and i.get("instrument_token")
+                        ]
+                        if len(valid_items) > 0:
+                            self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in valid_items}
+                            self._memory_cache_loaded_at[exchange] = mtime
+                            return valid_items
+                        else:
+                            logger.warning(
+                                f"Disk cache for {exchange} contains no valid instrument records. Bypassing cache."
+                            )
+                    else:
+                        logger.warning(
+                            f"Disk cache for {exchange} is empty or invalid format. Bypassing cache."
+                        )
             except Exception as e:
                 logger.warning(f"Failed to read disk cache for {exchange}: {e}")
 
@@ -88,25 +106,37 @@ class InstrumentResolver:
             # Simplify dump to save disk space
             sanitized = []
             for inst in raw_instruments:
-                sanitized.append({
-                    "instrument_token": inst.get("instrument_token"),
-                    "tradingsymbol": inst.get("tradingsymbol"),
-                    "name": inst.get("name"),
-                    "expiry": str(inst.get("expiry")) if inst.get("expiry") else None,
-                    "strike": inst.get("strike"),
-                    "lot_size": inst.get("lot_size", 1),
-                    "instrument_type": inst.get("instrument_type"),
-                    "segment": inst.get("segment"),
-                    "exchange": exchange,
-                })
+                token = inst.get("instrument_token")
+                tsym = inst.get("tradingsymbol")
+                if token is not None and tsym:
+                    try:
+                        int_token = int(token)
+                        if int_token > 0:
+                            sanitized.append({
+                                "instrument_token": int_token,
+                                "tradingsymbol": str(tsym).strip().upper(),
+                                "name": inst.get("name"),
+                                "expiry": str(inst.get("expiry")) if inst.get("expiry") else None,
+                                "strike": inst.get("strike"),
+                                "lot_size": inst.get("lot_size", 1),
+                                "instrument_type": inst.get("instrument_type"),
+                                "segment": inst.get("segment"),
+                                "exchange": exchange,
+                            })
+                    except (TypeError, ValueError):
+                        continue
 
-            with open(cache_file, "w") as f:
-                json.dump(sanitized, f)
+            if sanitized:
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(sanitized, f)
 
-            self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in sanitized}
-            self._memory_cache_loaded_at[exchange] = datetime.now()
-            logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
-            return sanitized
+                self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in sanitized}
+                self._memory_cache_loaded_at[exchange] = datetime.now()
+                logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
+                return sanitized
+            else:
+                logger.warning(f"Kite returned 0 instruments for {exchange}.")
+                return []
         except Exception as e:
             logger.error(f"Failed to fetch {exchange} instrument dump from Kite: {e}")
             return []

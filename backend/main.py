@@ -6,7 +6,6 @@ router registration; every route lives in its own module:
 
   backend/kite.py       - /kite/*, /api/profile, /api/margins, /api/logout
   backend/signals.py    - /api/strategy/*, /api/research/*
-  backend/positions.py  - /api/portfolio/positions, /api/orders/*
   backend/system.py     - /api/system/health
 
 Also removed here: POST /api/login-url, POST /api/login, GET /api/status.
@@ -23,7 +22,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.kite import router as kite_router
 from backend.market import router as market_router
-from backend.positions import router as positions_router
 from backend.signals import router as signals_router
 from backend.stream import router as stream_router
 from backend.system import router as system_router
@@ -33,7 +31,7 @@ logger = logging.getLogger("backend_api")
 
 app = FastAPI(
     title="Zerodha Kite Connect Trading Dashboard API",
-    description="Backend API for Zerodha Kite Connect login, session management, strategy signals, and positions.",
+    description="Backend API for Zerodha Kite Connect login, session management, and strategy signals.",
     version="2.0.0",
 )
 
@@ -54,7 +52,6 @@ app.add_middleware(
 app.include_router(kite_router)
 app.include_router(market_router)
 app.include_router(signals_router)
-app.include_router(positions_router)
 app.include_router(stream_router)
 app.include_router(system_router)
 

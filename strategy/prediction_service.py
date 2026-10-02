@@ -32,6 +32,7 @@ from config.universe import create_instrument_config_for_equity
 from data.market_calendar import MarketCalendar
 from data.time_utils import now_ist_naive
 from indicators.vwap import calculate_session_vwap
+from monitoring.logger import logger
 from strategy.apex_engine import ApexStrategy
 from strategy.base_strategy import SignalAction, StrategySignal
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
@@ -1726,6 +1727,9 @@ class PredictionService:
                     )
                 )
             except Exception as exc:
+                logger.warning(
+                    f"[{inst.symbol}] SectorPeerManager unavailable: {type(exc).__name__}: {exc}"
+                )
                 return SingleStrategyPrediction(
                     status="UNAVAILABLE",
                     reason=(
@@ -2312,10 +2316,7 @@ class PredictionService:
             direction = "LONG"
             agreeing = long_count
 
-            if (
-                long_count == evaluable_count
-                and long_count >= 3
-            ):
+            if long_count >= 3:
                 strength = "STRONG"
             elif long_count >= 2:
                 strength = "MODERATE"
@@ -2331,10 +2332,7 @@ class PredictionService:
             direction = "SHORT"
             agreeing = short_count
 
-            if (
-                short_count == evaluable_count
-                and short_count >= 3
-            ):
+            if short_count >= 3:
                 strength = "STRONG"
             elif short_count >= 2:
                 strength = "MODERATE"
@@ -2349,11 +2347,11 @@ class PredictionService:
         agreement_pct = round(
             (
                 agreeing
-                / directional_count
+                / total_live
             )
             * 100.0,
             1,
-        )
+        ) if total_live > 0 else None
 
         return {
             "direction": direction,

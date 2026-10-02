@@ -77,8 +77,8 @@ def test_candle_aggregator_ticks_and_closure():
     assert c1["close"] == 24020.0
     assert c1["volume"] == 400
 
-    # Total volume: 100*24000 + 200*24050 + 100*24020 + 100*24060 = 12018000 / 500 = 24036.0
-    assert closed_vwaps[0] == pytest.approx(24036.0)
+    # Closed candle 1 volume: 100*24000 + 200*24050 + 100*24020 = 9612000 / 400 = 24030.0 (no next-candle lookahead leak)
+    assert closed_vwaps[0] == pytest.approx(24030.0)
 
     # Check dataframe
     df = aggregator.get_completed_dataframe()

@@ -8,22 +8,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-class OrderStatus(str, Enum):
-    PENDING = "PENDING"
-    SUBMITTED = "SUBMITTED"
-    OPEN = "OPEN"
-    FILLED = "FILLED"
-    PARTIALLY_FILLED = "PARTIALLY_FILLED"
-    REJECTED = "REJECTED"
-    CANCELLED = "CANCELLED"
-    UNKNOWN = "UNKNOWN"
-
-
-class OrderType(str, Enum):
-    MARKET = "MARKET"
-    LIMIT = "LIMIT"
-    SL = "SL"
-    SL_M = "SL-M"
 
 
 class OrderDirection(str, Enum):
@@ -68,22 +52,4 @@ class TradeRecord(BaseModel):
     notes: Optional[str] = None
 
 
-class OrderRecord(BaseModel):
-    order_id: str
-    broker_order_id: Optional[str] = None
-    client_order_id: Optional[str] = None
-    signal_id: Optional[str] = None
-    symbol: str
-    direction: OrderDirection
-    order_type: OrderType
-    price: Optional[float] = None
-    quantity: int
-    status: OrderStatus = OrderStatus.PENDING
-    filled_quantity: int = 0
-    average_fill_price: float = 0.0
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
-    reject_reason: Optional[str] = None
-    tag: Optional[str] = None
-    product: Optional[str] = "MIS"
-    exchange: Optional[str] = "NSE"
+

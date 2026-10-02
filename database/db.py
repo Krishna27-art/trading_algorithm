@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from database.models import ExitReason, OrderDirection, OrderRecord, OrderStatus, TradeRecord
+from database.models import ExitReason, OrderDirection, TradeRecord
 
 
 class DatabaseManager:
@@ -60,37 +60,7 @@ class DatabaseManager:
             );
             """)
 
-            # Orders table
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY,
-                broker_order_id TEXT,
-                client_order_id TEXT,
-                signal_id TEXT,
-                symbol TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                order_type TEXT NOT NULL,
-                price REAL,
-                quantity INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                filled_quantity INTEGER DEFAULT 0,
-                average_fill_price REAL DEFAULT 0.0,
-                created_at TIMESTAMP NOT NULL,
-                updated_at TIMESTAMP NOT NULL,
-                reject_reason TEXT,
-                tag TEXT
-            );
-            """)
 
-            # Run migrations for existing DBs if needed
-            cursor.execute("PRAGMA table_info(orders);")
-            cols = [r[1] for r in cursor.fetchall()]
-            if "client_order_id" not in cols:
-                cursor.execute("ALTER TABLE orders ADD COLUMN client_order_id TEXT;")
-            if "signal_id" not in cols:
-                cursor.execute("ALTER TABLE orders ADD COLUMN signal_id TEXT;")
-
-            # Daily summaries table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS daily_summaries (
                 date TEXT PRIMARY KEY,
@@ -169,35 +139,6 @@ class DatabaseManager:
             ))
             conn.commit()
 
-    def save_order(self, order: OrderRecord):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            INSERT OR REPLACE INTO orders (
-                order_id, broker_order_id, client_order_id, signal_id, symbol, direction, order_type, price,
-                quantity, status, filled_quantity, average_fill_price,
-                created_at, updated_at, reject_reason, tag
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                order.order_id,
-                order.broker_order_id,
-                order.client_order_id,
-                order.signal_id,
-                order.symbol,
-                order.direction.value,
-                order.order_type.value,
-                order.price,
-                order.quantity,
-                order.status.value,
-                order.filled_quantity,
-                order.average_fill_price,
-                order.created_at.isoformat(),
-                order.updated_at.isoformat(),
-                order.reject_reason,
-                order.tag
-            ))
-            conn.commit()
-
     def get_open_trades(self, symbol: Optional[str] = None) -> List[dict]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -210,17 +151,6 @@ class DatabaseManager:
             cursor.execute(query, params)
             return [dict(r) for r in cursor.fetchall()]
 
-    def get_orders(self, symbol: Optional[str] = None) -> List[dict]:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            query = "SELECT * FROM orders"
-            params = []
-            if symbol:
-                query += " WHERE symbol = ?"
-                params.append(symbol)
-            query += " ORDER BY created_at DESC"
-            cursor.execute(query, params)
-            return [dict(r) for r in cursor.fetchall()]
 
     def get_all_trades(self) -> List[dict]:
         with self._get_connection() as conn:

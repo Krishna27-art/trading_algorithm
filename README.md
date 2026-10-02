@@ -9,7 +9,7 @@ A high-performance quantitative research and intraday signal generation platform
 
 ## 📐 Quantitative Strategies & Engine Architectures
 
-The platform maintains a registry of 6 quantitative strategy models, evaluating multi-timeframe price action, volatility regimes, momentum, and Level-5 order book microstructure:
+The platform maintains a registry of 7 quantitative strategy models, evaluating multi-timeframe price action, volatility regimes, momentum, and Level-5 order book microstructure:
 
 ### 1. 30-Minute Volatility-Filtered Opening Range Breakout (`orb`)
 Captures morning price discovery momentum while strictly filtering out low-volatility chop and anchoring directional entries to session volume-weighted fair value.
@@ -36,6 +36,9 @@ Cross-sectional momentum strategy tracking peer dispersion and sector index rela
 
 ### 6. SSF Level-5 Order Book Microstructure Model (`ssf_l5_srm`)
 Order book imbalance model driven by streaming Level-5 bid/ask depth snapshots, spread dynamics, and order flow imbalance (OFI).
+
+### 7. Analytic Ornstein-Uhlenbeck Optimal-Stopping System (`aou_oss`)
+Continuous-time mean-reversion model operating on rolling volume-weighted anchor (RVWAP) spreads with exact numerical Bertram/Leung-Li optimal entry thresholds and analytical stopping barriers.
 
 ---
 
@@ -129,6 +132,7 @@ trading algorithm/
 │   ├── liquidity_filter.py      # Multi-tiered liquidity and tradability gates
 │   └── stock_ranker.py          # 100-point explainable universe ranking engine
 ├── strategy/
+│   ├── aou_oss_strategy.py      # Analytic OU Optimal-Stopping Strategy
 │   ├── apex_engine.py           # APEX Adaptive Intraday Volatility Model
 │   ├── base_strategy.py         # Abstract BaseStrategy & Signal dataclasses
 │   ├── cpr_strategy.py          # CPR Regime Breakout Strategy

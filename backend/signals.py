@@ -72,6 +72,12 @@ STRATEGY_REGISTRY = {
         "timeframe": "Tick / L5 Depth / 15m Regime",
         "key_levels": ["Microprice Dev", "Basis Z-Score", "OFI Imbalance", "Parkinson Vol"],
     },
+    "aou_oss": {
+        "name": "Analytic Ornstein-Uhlenbeck Optimal-Stopping System (AOU-OSS)",
+        "description": "Rolling 32-bar RVWAP spread, Kendall-corrected OU calibration, half-life & Garman-Klass volatility gates, with numerical Bertram optimal stopping boundaries",
+        "timeframe": "15m candles",
+        "key_levels": ["RVWAP", "Spread", "Equilibrium", "Long Boundary", "Short Boundary", "Stop Barrier"],
+    },
 }
 
 
@@ -479,6 +485,16 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
     )
     rep_ssf = bt_ssf.run(df, initial_capital=settings.risk.initial_capital)
 
+    # 7. AOU-OSS Backtest
+    from strategy.aou_oss_strategy import AouOssStrategy
+    bt_aou = StrategyBacktester(
+        strategy_factory=lambda: AouOssStrategy(inst, settings.strategy),
+        instrument=inst,
+        app_settings=settings,
+        persist_trades=False,
+    )
+    rep_aou = bt_aou.run(df, initial_capital=settings.risk.initial_capital)
+
     def serialize_rep(rep) -> dict:
         pf = rep.profit_factor
         if pf is not None and (pf == float("inf") or pf != pf):
@@ -572,6 +588,17 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
             "net_pnl": round(rep_ssf.net_pnl, 2),
             "state": "ACTIVE" if settings.active_strategy.lower() in ("ssf_l5_srm", "ssf") else "STANDBY",
         },
+        {
+            "strategy": "Analytic Ornstein-Uhlenbeck Optimal-Stopping (AOU-OSS)",
+            "strategy_id": "aou_oss",
+            "trades": rep_aou.total_trades,
+            "win_rate": round(rep_aou.win_rate_pct, 1),
+            "profit_factor": round(rep_aou.profit_factor if rep_aou.profit_factor != float("inf") else 99.9, 2),
+            "sharpe": round(rep_aou.sharpe_ratio, 2),
+            "max_drawdown": round(rep_aou.max_drawdown_pct, 1),
+            "net_pnl": round(rep_aou.net_pnl, 2),
+            "state": "ACTIVE" if settings.active_strategy.lower() == "aou_oss" else "STANDBY",
+        },
     ]
 
     return {
@@ -585,6 +612,7 @@ def run_all_three_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str,
             "apex": serialize_rep(rep_apex),
             "sector_impulse": serialize_rep(rep_sit),
             "ssf_l5_srm": serialize_rep(rep_ssf),
+            "aou_oss": serialize_rep(rep_aou),
         },
         "comparison": comparison,
     }
@@ -727,6 +755,22 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
         from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
         backtester = StrategyBacktester(
             strategy_factory=lambda: SsfL5SrmStrategy(inst, settings.strategy),
+            instrument=inst,
+            app_settings=settings,
+            persist_trades=False,
+        )
+    elif strat_name == "aou_oss":
+        from strategy.aou_oss_strategy import AouOssStrategy
+        backtester = StrategyBacktester(
+            strategy_factory=lambda: AouOssStrategy(inst, settings.strategy),
+            instrument=inst,
+            app_settings=settings,
+            persist_trades=False,
+        )
+    elif strat_name == "orb":
+        from strategy.orb_strategy import IntradayORBStrategy
+        backtester = StrategyBacktester(
+            strategy_factory=lambda: IntradayORBStrategy(inst, settings.strategy),
             instrument=inst,
             app_settings=settings,
             persist_trades=False,
@@ -876,26 +920,37 @@ def get_strategy_telemetry(symbol: str = "NIFTY", strategy: str = "cpr"):
                 if ltp > 0 and (not target_inst.max_risk_cap or target_inst.max_risk_cap <= 0):
                     target_inst.max_risk_cap = round(ltp * 0.004, 2)
 
-            # Fetch today's real intraday candles for chart
+            # Fetch real intraday candles for chart
             if token:
                 today_str = now.strftime("%Y-%m-%d")
-                intraday_bars = kite.historical_data(
-                    instrument_token=token,
-                    from_date=today_str,
-                    to_date=today_str,
-                    interval="15minute",
-                )
-                if not intraday_bars:
-                    # Market hasn't generated bars today (pre-market / holiday).
-                    # Pull the last session's bars — but keep their REAL dates so
-                    # strategies don't think they are replaying today.
-                    prev_start = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+                if strat_name == "aou_oss":
+                    # AOU-OSS needs at least 152 bars (120 calibration + 32 RVWAP).
+                    # 25 calendar days provides ~375 15m bars, ensuring >=152 valid completed bars.
+                    aou_start = (now - timedelta(days=25)).strftime("%Y-%m-%d")
                     intraday_bars = kite.historical_data(
                         instrument_token=token,
-                        from_date=prev_start,
+                        from_date=aou_start,
                         to_date=today_str,
                         interval="15minute",
-                    )[-15:]
+                    )
+                else:
+                    intraday_bars = kite.historical_data(
+                        instrument_token=token,
+                        from_date=today_str,
+                        to_date=today_str,
+                        interval="15minute",
+                    )
+                    if not intraday_bars:
+                        # Market hasn't generated bars today (pre-market / holiday).
+                        # Pull the last session's bars — but keep their REAL dates so
+                        # strategies don't think they are replaying today.
+                        prev_start = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+                        intraday_bars = kite.historical_data(
+                            instrument_token=token,
+                            from_date=prev_start,
+                            to_date=today_str,
+                            interval="15minute",
+                        )[-15:]
 
                 for bar in intraday_bars:
                     # Fix 1.5: preserve the original bar datetime — do NOT

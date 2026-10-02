@@ -213,7 +213,7 @@ class AppSettings(BaseSettings):
         )
     ]
 
-    # Active Strategy (Options: "cpr", "dual_ema", "orb", "rm100", "vrp")
+    # Active Strategy (Options: "cpr", "dual_ema", "orb", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss", "rm100", "vrp")
     active_strategy: str = "cpr"
 
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)

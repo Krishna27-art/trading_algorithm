@@ -14,6 +14,7 @@ const STRATEGIES = [
   { id: 'apex', label: 'APEX-AIVEM', usesSymbol: true },
   { id: 'sector_impulse', label: 'Sector Impulse', usesSymbol: true },
   { id: 'ssf_l5_srm', label: 'SSF-L5-SRM', usesSymbol: true },
+  { id: 'aou_oss', label: 'AOU-OSS', usesSymbol: true },
   { id: 'rm100', label: 'RM100 (portfolio)', usesSymbol: false },
 ]
 
@@ -143,7 +144,7 @@ export default function BacktestPage() {
       )}
 
       {selected.usesSymbol && (
-        <Card title="Compare intraday strategies" action={<span className="text-xs text-[var(--text-faint)]">All 6 intraday strategies, same symbol &amp; lookback</span>}>
+        <Card title="Compare intraday strategies" action={<span className="text-xs text-[var(--text-faint)]">All 7 intraday strategies, same symbol &amp; lookback</span>}>
           {!compare ? (
             <button
               onClick={runCompare}

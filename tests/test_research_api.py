@@ -170,7 +170,7 @@ def test_research_backtest_endpoints(monkeypatch):
     assert data["days"] == 20
     assert data["symbol"] == "NIFTY"
     assert "strategies" in data
-    for expected_strat in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]:
+    for expected_strat in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss"]:
         assert expected_strat in data["strategies"]
 
     required_metrics = [
@@ -179,14 +179,14 @@ def test_research_backtest_endpoints(monkeypatch):
         "sharpe_ratio", "cagr_pct", "max_drawdown_pct", "expectancy_rupees",
         "long_win_rate", "short_win_rate", "long_net_pnl", "short_net_pnl", "yearly_returns",
     ]
-    for strat_key in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]:
+    for strat_key in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss"]:
         strat_report = data["strategies"][strat_key]
         for m in required_metrics:
             assert m in strat_report, f"Missing metric {m} in {strat_key}"
 
     assert "comparison" in data
-    # Now has 6 strategies: ORB, CPR, Dual-EMA, APEX, Sector Impulse, SSF-L5-SRM
-    assert len(data["comparison"]) == 6
+    # Now has 7 strategies: ORB, CPR, Dual-EMA, APEX, Sector Impulse, SSF-L5-SRM, AOU-OSS
+    assert len(data["comparison"]) == 7
     for comp in data["comparison"]:
         assert "strategy" in comp
         assert "trades" in comp
@@ -200,21 +200,22 @@ def test_research_backtest_endpoints(monkeypatch):
     # Test POST function
     data_post = post_research_backtest(days=20, symbol="NIFTY")
     assert data_post["days"] == 20
-    assert len(data_post["strategies"]) == 6
+    assert len(data_post["strategies"]) == 7
 
 
-def test_prediction_service_all_six_strategies():
-    """Tests PredictionService.evaluate_symbol produces predictions for all 6 strategies."""
+def test_prediction_service_all_strategies():
+    """Tests PredictionService.evaluate_symbol produces predictions for all 7 strategies."""
     from data.historical_loader import HistoricalDataLoader
 
     df = HistoricalDataLoader.generate_synthetic_nifty_data(days=15, seed=42)
     preds, consensus = prediction_service.evaluate_symbol(symbol="NIFTY", df_15m=df, current_ltp=24000.0)
 
-    expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]
+    expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss"]
     assert sorted(list(preds.keys())) == sorted(expected_keys)
     assert consensus["total_strategies"] == 4
     assert consensus["evaluable_strategies"] == 4
     assert consensus["excluded_strategies"] == [
+        "aou_oss",
         "sector_impulse",
         "ssf_l5_srm",
     ]

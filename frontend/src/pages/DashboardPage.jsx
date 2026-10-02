@@ -199,6 +199,7 @@ function strategyLabel(key) {
       apex: 'APEX-AIVEM',
       sector_impulse: 'Sector Impulse',
       ssf_l5_srm: 'SSF-L5-SRM',
+      aou_oss: 'AOU-OSS',
       rm100: 'RM100',
       vrp: 'VRP',
     }[key] || key.toUpperCase()

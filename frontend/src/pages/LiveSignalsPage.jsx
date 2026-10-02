@@ -15,6 +15,7 @@ const STRATEGIES = [
   { id: 'apex', label: 'APEX-AIVEM' },
   { id: 'sector_impulse', label: 'Sector Impulse' },
   { id: 'ssf_l5_srm', label: 'SSF-L5-SRM' },
+  { id: 'aou_oss', label: 'AOU-OSS' },
 ]
 
 const ALL_STRATEGY_KEYS = [
@@ -24,6 +25,7 @@ const ALL_STRATEGY_KEYS = [
   'apex',
   'sector_impulse',
   'ssf_l5_srm',
+  'aou_oss',
 ]
 
 /**
@@ -810,6 +812,7 @@ function labelFor(key) {
       apex: 'APEX-AIVEM',
       sector_impulse: 'Sector Impulse',
       ssf_l5_srm: 'SSF-L5-SRM',
+      aou_oss: 'AOU-OSS',
     }[key] || key
   )
 }

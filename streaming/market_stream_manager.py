@@ -8,13 +8,15 @@ from __future__ import annotations
 from enum import Enum
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
-from broker.kite_adapter import get_saved_session
+from broker.kite_adapter import get_saved_session, get_active_kite
+from config.settings import settings
 from config.universe import resolve_universe_tokens
 from data.candle_aggregator import MultiSymbolCandleAggregator
-from data.time_utils import now_ist, now_ist_iso
+from data.historical_loader import HistoricalDataLoader
+from data.time_utils import now_ist, now_ist_iso, now_ist_naive
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
 
@@ -46,6 +48,84 @@ class MarketStreamManager:
         self.last_error: Optional[str] = None
         self.kws: Optional[Any] = None
         self.aggregator: Optional[MultiSymbolCandleAggregator] = None
+        self._history_ready_symbols: set[str] = set()
+        self._history_lock = threading.Lock()
+
+    def is_history_ready(
+        self,
+        symbol: str,
+    ) -> bool:
+        clean = str(symbol).strip().upper()
+        with self._history_lock:
+            return clean in self._history_ready_symbols
+
+    def _warm_historical_state(
+        self,
+        token_to_symbol: Dict[int, str],
+        kite_client: Any,
+    ) -> None:
+        """
+        Seed the live in-memory candle state with real completed 15-minute
+        history before/alongside the streaming session.
+
+        Existing validated cache is reused. Missing history is fetched from
+        Zerodha Kite through HistoricalDataLoader.
+
+        No synthetic data is permitted.
+        """
+        now = now_ist_naive()
+
+        for token, symbol in token_to_symbol.items():
+            cache_path = (
+                settings.base_dir
+                / "data"
+                / "cache"
+                / f"{symbol}_15m.csv"
+            )
+
+            try:
+                df = HistoricalDataLoader.load_or_refresh_intraday_cache(
+                    kite_client=kite_client,
+                    instrument_token=int(token),
+                    cache_path=cache_path,
+                    now=now,
+                    lookback_days=45,
+                    interval="15minute",
+                )
+
+                if df is None or df.empty:
+                    logger.warning(
+                        "[MarketStreamManager] No historical 15m data "
+                        "available for %s",
+                        symbol,
+                    )
+                    continue
+
+                seeded = live_market_state.seed_historical_candles(
+                    symbol=symbol,
+                    candles=df,
+                )
+
+                with self._history_lock:
+                    self._history_ready_symbols.add(
+                        str(symbol).strip().upper()
+                    )
+
+                logger.info(
+                    "[MarketStreamManager] Seeded %s historical "
+                    "candles for %s",
+                    seeded,
+                    symbol,
+                )
+
+            except Exception as exc:
+                logger.error(
+                    "[MarketStreamManager] Historical warm-up failed "
+                    "for %s (token=%s): %s",
+                    symbol,
+                    token,
+                    exc,
+                )
 
     def start_stream(
         self,
@@ -55,29 +135,71 @@ class MarketStreamManager:
     ) -> Dict[str, Any]:
         """
         Starts the KiteTicker WebSocket stream.
-        If token_to_symbol is not provided, automatically resolves universe tokens.
+
+        The same authenticated Kite client is used for:
+        - instrument/token resolution
+        - historical peer-data fallback for Sector Impulse
+        - other live strategy context requiring Kite REST data
+
+        No order execution occurs here.
         """
         with self._lock:
-            # Stop any existing stream before starting a new one
+            # Stop any existing stream before starting a new one.
             if self.kws is not None and self.state == StreamState.CONNECTED:
                 self._stop_internal()
 
-            # Resolve tokens if not supplied
+            # --------------------------------------------------------------
+            # 1. Resolve the authenticated Kite client once.
+            # --------------------------------------------------------------
+            if kite_client is None:
+                kite_client = get_active_kite()
+
+            if kite_client is None:
+                self.state = StreamState.ERROR
+                self.last_error = (
+                    "No active Zerodha Kite client available. "
+                    "Please authenticate via Kite Connect."
+                )
+                raise RuntimeError(self.last_error)
+
+            # --------------------------------------------------------------
+            # 2. Resolve tokens using the authenticated Kite client.
+            # --------------------------------------------------------------
             if not token_to_symbol:
-                token_map = resolve_universe_tokens(kite_client=kite_client)
-                token_to_symbol = {int(tok): sym for sym, tok in token_map.items() if tok}
+                token_map = resolve_universe_tokens(
+                    kite_client=kite_client
+                )
+
+                token_to_symbol = {
+                    int(tok): sym
+                    for sym, tok in token_map.items()
+                    if tok
+                }
 
             if not token_to_symbol:
-                raise ValueError("No valid instrument tokens available to start market stream.")
+                self.state = StreamState.ERROR
+                self.last_error = (
+                    "No valid instrument tokens available "
+                    "to start market stream."
+                )
+                raise ValueError(self.last_error)
 
+            # --------------------------------------------------------------
+            # 3. Validate the saved session.
+            # --------------------------------------------------------------
             session = get_saved_session()
+
             if not session:
                 self.state = StreamState.ERROR
-                self.last_error = "No active Zerodha Kite session found. Please authenticate via Kite login."
+                self.last_error = (
+                    "No active Zerodha Kite session found. "
+                    "Please authenticate via Kite login."
+                )
                 raise RuntimeError(self.last_error)
 
             api_key = session.get("api_key")
             access_token = session.get("access_token")
+
             if not api_key or not access_token:
                 self.state = StreamState.ERROR
                 self.last_error = "Invalid session credentials."
@@ -88,18 +210,61 @@ class MarketStreamManager:
             self.state = StreamState.CONNECTING
             self.last_error = None
 
-            # Initialize LiveMarketState with the token map
-            live_market_state.set_token_map(self.token_to_symbol)
+            # --------------------------------------------------------------
+            # 4. Initialize live state.
+            # --------------------------------------------------------------
+            live_market_state.set_token_map(
+                self.token_to_symbol
+            )
 
-            # Define callbacks for candle close and Level-5 book updates
-            def _on_candle_close(candle_dict: dict, vwap: float):
+            # --------------------------------------------------------------
+            # 5. Candle-close callback keeps the SAME Kite client.
+            # --------------------------------------------------------------
+            def _on_candle_close(
+                candle_dict: dict,
+                vwap: float,
+            ):
                 with self._lock:
                     self.candle_count += 1
-                live_market_state.update_candle_close(candle_dict, vwap)
-                live_signal_engine.on_candle_close(candle_dict, vwap, kite_client=kite_client)
 
-            def _on_book_update(symbol: str, snapshot: Any):
-                live_market_state.update_book_snapshot(symbol, snapshot)
+                live_market_state.update_candle_close(
+                    candle_dict,
+                    vwap,
+                )
+
+                symbol = str(
+                    candle_dict.get("symbol", "")
+                ).strip().upper()
+
+                if not self.is_history_ready(symbol):
+                    logger.info(
+                        "[MarketStreamManager] Skipping strategy evaluation "
+                        "for %s: historical warm-up not complete.",
+                        symbol,
+                    )
+                    return
+
+                live_signal_engine.on_candle_close(
+                    candle_dict,
+                    vwap,
+                    kite_client=kite_client,
+                )
+
+            def _on_book_update(
+                symbol: str,
+                snapshot: Any,
+            ):
+                live_market_state.update_book_snapshot(
+                    symbol,
+                    snapshot,
+                )
+                # Route L5 depth directly to the persistent SSF runtime.
+                # ORB / CPR / Dual-EMA / APEX / SIT are not called here;
+                # they run at candle-close time via on_candle_close().
+                live_signal_engine.on_book_update(
+                    symbol=symbol,
+                    snapshot=snapshot,
+                )
 
             self.aggregator = MultiSymbolCandleAggregator(
                 token_to_symbol_map=self.token_to_symbol,
@@ -112,37 +277,67 @@ class MarketStreamManager:
                 from kiteconnect import KiteTicker
             except ImportError:
                 self.state = StreamState.ERROR
-                self.last_error = "kiteconnect package is not installed."
+                self.last_error = (
+                    "kiteconnect package is not installed."
+                )
                 raise RuntimeError(self.last_error)
 
-            kws = KiteTicker(api_key, access_token)
-            tokens = list(self.token_to_symbol.keys())
+            kws = KiteTicker(
+                api_key,
+                access_token,
+            )
+
+            tokens = list(
+                self.token_to_symbol.keys()
+            )
 
             def on_ticks(ws, ticks):
                 now_ts = now_ist()
+
                 with self._lock:
-                    self.tick_count += len(ticks) if isinstance(ticks, list) else 1
+                    self.tick_count += (
+                        len(ticks)
+                        if isinstance(ticks, list)
+                        else 1
+                    )
                     self.last_tick_time = now_ts
 
-                for t in (ticks if isinstance(ticks, list) else [ticks]):
-                    tok = t.get("instrument_token")
+                for t in (
+                    ticks
+                    if isinstance(ticks, list)
+                    else [ticks]
+                ):
+                    tok = t.get(
+                        "instrument_token"
+                    )
                     sym = self.token_to_symbol.get(tok)
-                    last_price = t.get("last_price")
-                    vol = t.get("volume", 0)
-                    if sym and last_price is not None:
+                    last_price = t.get(
+                        "last_price"
+                    )
+                    if (
+                        sym
+                        and last_price is not None
+                    ):
                         live_market_state.update_tick(
                             symbol=sym,
                             price=float(last_price),
-                            volume=int(vol),
-                            timestamp=now_ts.replace(tzinfo=None),
+                            volume=0,
+                            timestamp=now_ts.replace(
+                                tzinfo=None
+                            ),
                             token=tok,
                         )
 
                 if self.aggregator:
                     try:
-                        self.aggregator.process_ticks(ticks)
+                        self.aggregator.process_ticks(
+                            ticks
+                        )
                     except Exception as e:
-                        logger.error(f"[MarketStreamManager] Error processing ticks: {e}")
+                        logger.error(
+                            "[MarketStreamManager] "
+                            f"Error processing ticks: {e}"
+                        )
 
             def on_connect(ws, response):
                 with self._lock:
@@ -179,16 +374,40 @@ class MarketStreamManager:
             kws.on_reconnect = on_reconnect
 
             self.kws = kws
-            kws.connect(threaded=True)
-            logger.info("[MarketStreamManager] KiteTicker stream connecting in background.")
+
+            warmup_thread = threading.Thread(
+                target=self._warm_historical_state,
+                args=(
+                    dict(self.token_to_symbol),
+                    kite_client,
+                ),
+                name="kite-history-warmup",
+                daemon=True,
+            )
+            warmup_thread.start()
+
+            kws.connect(
+                threaded=True
+            )
+
+            logger.info(
+                "[MarketStreamManager] "
+                "KiteTicker stream connecting in background."
+            )
 
             return {
                 "status": "CONNECTING",
-                "subscribed_tokens": len(self.token_to_symbol),
-                "symbols_count": len(self.token_to_symbol),
+                "subscribed_tokens": len(
+                    self.token_to_symbol
+                ),
+                "symbols_count": len(
+                    self.token_to_symbol
+                ),
             }
 
     def _stop_internal(self) -> None:
+        with self._history_lock:
+            self._history_ready_symbols.clear()
         if self.kws is not None:
             try:
                 self.kws.close()

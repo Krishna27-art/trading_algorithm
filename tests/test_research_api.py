@@ -207,7 +207,7 @@ def test_prediction_service_all_six_strategies():
     """Tests PredictionService.evaluate_symbol produces predictions for all 6 strategies."""
     from data.historical_loader import HistoricalDataLoader
 
-    df = HistoricalDataLoader.generate_synthetic_nifty_data(days=3, seed=42)
+    df = HistoricalDataLoader.generate_synthetic_nifty_data(days=15, seed=42)
     preds, consensus = prediction_service.evaluate_symbol(symbol="NIFTY", df_15m=df, current_ltp=24000.0)
 
     expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm"]

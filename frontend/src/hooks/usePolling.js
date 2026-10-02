@@ -26,6 +26,8 @@ export function usePolling(fetcher, { intervalMs = 10000, deps = [] } = {}) {
     }
   }, [])
 
+  const refresh = useCallback(() => run(), [run])
+
   useEffect(() => {
     run()
     if (!intervalMs) return undefined
@@ -34,5 +36,5 @@ export function usePolling(fetcher, { intervalMs = 10000, deps = [] } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
 
-  return { data, status, error, updatedAt, refresh: () => run() }
+  return { data, status, error, updatedAt, refresh }
 }

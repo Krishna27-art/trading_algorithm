@@ -20,7 +20,14 @@ import os
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
 
@@ -149,14 +156,23 @@ def kite_status():
     }
 
 
-@router.post("/kite/logout")
+@router.post(
+    "/kite/logout",
+    dependencies=[Depends(verify_shared_secret)],
+)
 def kite_logout():
     """Clears local access token and session state."""
     clear_session()
-    return {"success": True, "message": "Logged out successfully"}
+    return {
+        "success": True,
+        "message": "Logged out successfully",
+    }
 
 
-@router.get("/api/profile")
+@router.get(
+    "/api/profile",
+    dependencies=[Depends(verify_shared_secret)],
+)
 def get_user_profile():
     """Fetches user profile details."""
     kite = get_active_kite()
@@ -187,7 +203,10 @@ def get_user_profile():
         )
 
 
-@router.get("/api/margins")
+@router.get(
+    "/api/margins",
+    dependencies=[Depends(verify_shared_secret)],
+)
 def get_user_margins():
     """Fetches equity and commodity account margins."""
     kite = get_active_kite()
@@ -209,6 +228,15 @@ def get_user_margins():
 
 
 @router.post("/api/logout")
-def logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
+def logout(
+    x_shared_secret: Optional[str] = Header(
+        None,
+        alias="X-Shared-Secret",
+    ),
+):
     verify_shared_secret(x_shared_secret)
-    return kite_logout()
+    clear_session()
+    return {
+        "success": True,
+        "message": "Logged out successfully",
+    }

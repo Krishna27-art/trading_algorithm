@@ -56,7 +56,7 @@ def test_strategies_cannot_generate_signals_without_market_data():
         assert p.entry is None
         assert p.stop_loss is None
         assert p.target is None
-        assert p.status in ("NO_TRADE", "DATA_UNAVAILABLE", "WAITING")
+        assert p.status in ("NO_TRADE", "DATA_UNAVAILABLE", "UNAVAILABLE", "WAITING")
 
     assert consensus["direction"] == "NEUTRAL"
 

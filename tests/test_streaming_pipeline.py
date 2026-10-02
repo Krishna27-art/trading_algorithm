@@ -132,7 +132,7 @@ def test_live_signal_engine_with_level_5_depth():
 
 
 def test_fastapi_stream_endpoints():
-    from backend.stream import stream_market, stream_signals, stream_status
+    from backend.stream_routes import stream_market, stream_signals, stream_status
 
     # Status returns health dictionary
     st = stream_status()
@@ -157,3 +157,98 @@ def test_fastapi_stream_endpoints():
     assert s_res["status"] == "success"
     assert "TCS" in s_res["signals"]
     assert s_res["signals"]["TCS"]["consensus"]["direction"] == "LONG"
+
+
+def test_market_stream_manager_kite_client_propagation(monkeypatch):
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_kite = MagicMock()
+    mod = sys.modules["streaming.market_stream_manager"]
+    monkeypatch.setattr(mod, "get_active_kite", lambda: fake_kite)
+    monkeypatch.setattr(mod, "get_saved_session", lambda: {"api_key": "k", "access_token": "tok"})
+
+    # Mock KiteTicker so it doesn't open a real WebSocket
+    mock_ticker_instance = MagicMock()
+    monkeypatch.setattr("kiteconnect.KiteTicker", lambda api_key, access_token: mock_ticker_instance)
+
+    token_map = {738561: "RELIANCE"}
+
+    passed_client = []
+    original_on_candle = live_signal_engine.on_candle_close
+
+    def mock_on_candle(candle, vwap, kite_client=None):
+        passed_client.append(kite_client)
+        return original_on_candle(candle, vwap, kite_client=kite_client)
+
+    monkeypatch.setattr(live_signal_engine, "on_candle_close", mock_on_candle)
+
+    res = market_stream_manager.start_stream(token_to_symbol=token_map)
+    assert res["status"] == "CONNECTING"
+
+    # Set history ready so strategy evaluation is not skipped
+    with market_stream_manager._history_lock:
+        market_stream_manager._history_ready_symbols.add("RELIANCE")
+
+    # Trigger aggregator's candle close callback
+    candle = {
+        "symbol": "RELIANCE",
+        "datetime": datetime(2026, 10, 1, 9, 15),
+        "open": 2500.0,
+        "high": 2510.0,
+        "low": 2490.0,
+        "close": 2505.0,
+        "volume": 1000,
+    }
+    market_stream_manager.aggregator.on_candle_close(candle, vwap=2502.0)
+
+    assert len(passed_client) == 1
+    assert passed_client[0] is fake_kite
+
+
+def test_market_stream_manager_raises_when_no_kite_client(monkeypatch):
+    import sys
+
+    mod = sys.modules["streaming.market_stream_manager"]
+    monkeypatch.setattr(mod, "get_active_kite", lambda: None)
+
+    with pytest.raises(RuntimeError, match="No active Zerodha Kite client available"):
+        market_stream_manager.start_stream(token_to_symbol={738561: "RELIANCE"})
+
+    assert market_stream_manager.state == StreamState.ERROR
+
+
+def test_seed_historical_candles_populates_live_history():
+    state = LiveMarketState(max_candle_history=640)
+
+    df = pd.DataFrame([
+        {
+            "datetime": "2026-09-30 09:15:00",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000,
+        },
+        {
+            "datetime": "2026-10-01 15:15:00",
+            "open": 102.0,
+            "high": 103.0,
+            "low": 101.0,
+            "close": 102.5,
+            "volume": 1200,
+        },
+    ])
+
+    count = state.seed_historical_candles("TCS", df)
+    assert count == 2
+
+    seeded = state.get_candles_df("TCS")
+    assert len(seeded) == 2
+
+    # Verify LTP is NOT overwritten by historical candles
+    state.update_tick(symbol="TCS", price=3500.0, volume=10)
+    state.seed_historical_candles("TCS", df)
+    assert state.get_symbol_state("TCS").ltp == 3500.0
+
+

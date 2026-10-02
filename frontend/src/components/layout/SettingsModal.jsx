@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
-import { setSharedSecret, hasSharedSecret } from '../../api/client'
+import { setSharedSecret, getSharedSecret, hasSharedSecret } from '../../api/client'
 
 export default function SettingsModal({ onClose }) {
-  const [secret, setSecret] = useState('')
+  const [secret, setSecret] = useState(() => getSharedSecret() || '')
   const [saved, setSaved] = useState(hasSharedSecret())
 
   const save = () => {

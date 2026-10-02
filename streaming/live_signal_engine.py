@@ -44,7 +44,10 @@ import pandas as pd
 
 from data.time_utils import now_ist, now_ist_iso
 from strategy.prediction_service import prediction_service
+from strategy.ssf_l5_srm_strategy import BookSnapshot
 from streaming.live_market_state import live_market_state
+from streaming.ssf_live_runtime import SSFLiveRuntime
+from streaming.ssf_market_context import ssf_context_store
 
 
 logger = logging.getLogger("streaming.live_signal_engine")
@@ -81,6 +84,13 @@ class LiveSignalEngine:
 
         self._max_processed_keys = int(max_processed_keys)
         self._max_ltp_age_seconds = int(max_ltp_age_seconds)
+
+        # Persistent SSF strategy registry — one SsfL5SrmStrategy per symbol
+        # survives across candle-close and book-update events so that rolling
+        # z-score buffers, basis history, and regime state accumulate correctly.
+        self._ssf_runtime = SSFLiveRuntime(
+            strategy_config=prediction_service.settings.strategy
+        )
 
     # ------------------------------------------------------------------
     # NORMALIZATION / VALIDATION
@@ -595,6 +605,72 @@ class LiveSignalEngine:
             return error_result
 
     # ------------------------------------------------------------------
+    # SSF BOOK-UPDATE PATH
+    # ------------------------------------------------------------------
+
+    def on_book_update(
+        self,
+        symbol: str,
+        snapshot: Any,
+    ) -> None:
+        """
+        Route a live Level-5 book snapshot to the persistent SSF strategy.
+
+        This is the PRIMARY entry point for SSF-L5-SRM as documented in the
+        strategy header.  It is called from MarketStreamManager._on_book_update()
+        on every tick that carries full depth, independently of candle closes.
+
+        Other strategies (ORB/CPR/Dual-EMA/APEX/SIT) are NOT touched here.
+        They run at candle-close time via on_candle_close().
+        """
+        clean = self._normalize_symbol(symbol)
+        if clean is None:
+            return
+
+        if not isinstance(snapshot, BookSnapshot):
+            # snapshot may come from the aggregator as the raw BookSnapshot;
+            # if it is not the right type, skip rather than error.
+            return
+
+        state = live_market_state.get_symbol_state(clean)
+        token = state.token if state else 0
+        ltp = snapshot.ltp
+
+        if not self._valid_price(ltp):
+            return
+
+        # Merge futures / sector context into the snapshot.
+        ctx = ssf_context_store.get(clean)
+
+        enriched = BookSnapshot(
+            timestamp=snapshot.timestamp,
+            bids=snapshot.bids,
+            asks=snapshot.asks,
+            ltp=snapshot.ltp,
+            fut_ltp=ctx.fut_ltp,        # None until futures feed is wired
+            fut_oi=ctx.fut_oi,          # None until futures feed is wired
+            sector_ret_30m=ctx.sector_ret_30m,
+            stock_ret_30m=ctx.stock_ret_30m,
+            circuit_lower=ctx.circuit_lower or snapshot.circuit_lower,
+            circuit_upper=ctx.circuit_upper or snapshot.circuit_upper,
+        )
+
+        try:
+            strategy = self._ssf_runtime.get_strategy(
+                symbol=clean,
+                token=int(token or 0),
+                current_price=float(ltp),
+            )
+            strategy.on_book_update(enriched)
+        except Exception as exc:
+            logger.warning(
+                "[LiveSignalEngine] SSF book-update failed for %s: %s: %s",
+                clean,
+                type(exc).__name__,
+                exc,
+            )
+
+    # ------------------------------------------------------------------
     # READ APIs
     # ------------------------------------------------------------------
 
@@ -646,6 +722,9 @@ class LiveSignalEngine:
             self._latest_ltp.clear()
             self._processed_candle_keys.clear()
             self._processed_candle_order.clear()
+        # Clear persistent SSF state so a new session starts clean.
+        self._ssf_runtime.reset()
+        ssf_context_store.reset()
 
 
 live_signal_engine = LiveSignalEngine()

@@ -109,7 +109,7 @@ trading algorithm/
 │   ├── market.py                # Lightweight live market quotes endpoint
 │   ├── positions.py             # Broker positions & strategy trade matching
 │   ├── signals.py               # Universe scanner, live research, backtest & telemetry routes
-│   ├── stream.py                # KiteTicker stream control & live signal endpoints
+│   ├── stream_routes.py         # KiteTicker stream control & live signal endpoints
 │   └── system.py                # System health monitoring
 ├── broker/
 │   ├── kite_adapter.py          # Zerodha REST + KiteTicker broker adapter

@@ -12,11 +12,18 @@ export class ApiError extends Error {
 }
 
 // Shared secret required by the backend for sensitive actions
-// (logout, placing orders, exiting orders). Held in memory only.
-let sharedSecret = null
+// (logout, placing orders, exiting orders). Held in memory / localStorage.
+let sharedSecret = typeof window !== 'undefined' ? localStorage.getItem('app_shared_secret') || null : null
 
 export function setSharedSecret(value) {
   sharedSecret = value || null
+  if (typeof window !== 'undefined') {
+    if (value) {
+      localStorage.setItem('app_shared_secret', value)
+    } else {
+      localStorage.removeItem('app_shared_secret')
+    }
+  }
 }
 
 export function getSharedSecret() {

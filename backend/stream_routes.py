@@ -5,8 +5,9 @@ controlling and querying the streaming market pipeline.
 """
 
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from backend.security import verify_shared_secret
 from monitoring.logger import logger
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
@@ -15,7 +16,10 @@ from streaming.market_stream_manager import market_stream_manager
 router = APIRouter()
 
 
-@router.post("/api/stream/start")
+@router.post(
+    "/api/stream/start",
+    dependencies=[Depends(verify_shared_secret)],
+)
 def start_stream(tokens: Optional[Dict[str, str]] = None):
     """
     Start the KiteTicker WebSocket stream.
@@ -57,7 +61,10 @@ def start_stream(tokens: Optional[Dict[str, str]] = None):
         )
 
 
-@router.post("/api/stream/stop")
+@router.post(
+    "/api/stream/stop",
+    dependencies=[Depends(verify_shared_secret)],
+)
 def stop_stream():
     """Stop the currently active KiteTicker WebSocket stream."""
     return market_stream_manager.stop_stream()

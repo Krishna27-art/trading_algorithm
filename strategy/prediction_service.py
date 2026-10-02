@@ -388,9 +388,19 @@ class PredictionService:
         df_15m: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Return only today's completed IST-session candles.
+        Prepare real completed 15-minute candles for live strategy evaluation.
 
-        No server clock, synthetic row, or forming candle is introduced.
+        Keeps historical sessions because CPR, Dual EMA, APEX and other
+        strategies may require prior-session context.
+
+        Rules:
+        - Keep all valid historical candles supplied by the caller.
+        - Normalize timestamps to IST.
+        - Remove invalid candles.
+        - Remove duplicate timestamps.
+        - Never include a forming/future candle.
+        - Do not manufacture missing candles.
+        - Do not restrict the dataset to today's session.
         """
         if (
             df_15m is None
@@ -401,13 +411,10 @@ class PredictionService:
 
         data = df_15m.copy()
 
-        if not REQUIRED_CANDLE_COLUMNS.issubset(
-            data.columns
-        ):
+        if not REQUIRED_CANDLE_COLUMNS.issubset(data.columns):
             return pd.DataFrame()
 
-        # Normalize each timestamp individually so mixed aware/naive
-        # timestamps cannot silently turn into UTC-based data.
+        # Normalize every timestamp to IST.
         data["datetime"] = data["datetime"].map(
             _normalize_ist_naive
         )
@@ -419,16 +426,16 @@ class PredictionService:
         if data.empty:
             return pd.DataFrame()
 
-        if not self._validate_candle_dataframe(
-            data
-        ):
+        # Validate real OHLC data.
+        if not self._validate_candle_dataframe(data):
             return pd.DataFrame()
 
+        # Chronological order is mandatory for all strategy calculations.
         data = data.sort_values(
             "datetime"
         ).reset_index(drop=True)
 
-        # A timestamp identifies one source candle. Keep one observation.
+        # One timestamp = one source candle.
         data = data.drop_duplicates(
             subset=["datetime"],
             keep="last",
@@ -436,68 +443,51 @@ class PredictionService:
 
         now_ist = now_ist_naive()
 
-        if not MarketCalendar.is_trading_day(
-            now_ist.date()
-        ):
-            return pd.DataFrame()
-
-        latest_completed = (
-            self._latest_completed_15m_start(
-                now_ist
-            )
-        )
-
-        if latest_completed is None:
-            return pd.DataFrame()
-
-        today = now_ist.date()
-
+        # Never allow future candles.
         data = data[
-            (data["datetime"].dt.date == today)
-            & (
-                data["datetime"].dt.time
-                >= SESSION_OPEN
-            )
-            & (
-                data["datetime"]
-                <= latest_completed
-            )
+            data["datetime"] <= now_ist
         ].copy()
 
         if data.empty:
             return pd.DataFrame()
 
-        # The live system expects 15-minute source bars.
-        # Do not manufacture missing candles. Drop bars outside the
-        # expected grid instead of silently re-bucketing them.
-        session_open_dt = datetime.combine(
-            today,
-            SESSION_OPEN,
+        # Do not allow today's forming 15-minute candle.
+        latest_completed = self._latest_completed_15m_start(
+            now_ist
         )
 
-        elapsed = (
-            data["datetime"]
-            - session_open_dt
-        ).dt.total_seconds()
+        today = now_ist.date()
 
-        grid_seconds = (
-            DEFAULT_TIMEFRAME_MINUTES
-            * 60
+        # Historical sessions remain untouched.
+        # Only today's candles are restricted to completed bars.
+        historical = data[
+            data["datetime"].dt.date < today
+        ]
+
+        if latest_completed is not None:
+            today_completed = data[
+                (data["datetime"].dt.date == today)
+                & (
+                    data["datetime"]
+                    <= latest_completed
+                )
+            ]
+        else:
+            today_completed = data.iloc[0:0]
+
+        data = pd.concat(
+            [
+                historical,
+                today_completed,
+            ],
+            ignore_index=True,
         )
 
-        on_grid = (
-            elapsed >= 0
-        ) & (
-            elapsed
-            % grid_seconds
-            == 0
-        )
+        data = data.sort_values(
+            "datetime"
+        ).reset_index(drop=True)
 
-        data = data[on_grid].copy()
-
-        return data.reset_index(
-            drop=True
-        )
+        return data
 
     def _prepare_data(
         self,
@@ -899,11 +889,10 @@ class PredictionService:
         if live_df.empty:
             predictions = {
                 key: SingleStrategyPrediction(
-                    status="NO_TRADE",
+                    status="UNAVAILABLE",
                     reason=(
-                        "No completed 15-minute "
-                        "candle is available "
-                        "for today's IST session."
+                        "No completed 15-minute candle "
+                        "data is available for live evaluation."
                     ),
                     levels={},
                     metrics={},
@@ -1222,11 +1211,13 @@ class PredictionService:
 
         if len(days) < 2:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
+                status="UNAVAILABLE",
                 reason=(
-                    "Requires prior-session data "
-                    "for CPR calculation."
+                    "CPR cannot evaluate: "
+                    "prior-session data is required."
                 ),
+                levels={},
+                metrics={},
             )
 
         lookback_df = pd.concat(
@@ -1375,11 +1366,14 @@ class PredictionService:
 
         if len(days) < 2:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
+                status="UNAVAILABLE",
                 reason=(
-                    "Requires prior-session data "
-                    "for SMA200/EMA warm-up."
+                    "Dual-EMA cannot evaluate: "
+                    "prior-session history is required "
+                    "for SMA200/ATR warm-up."
                 ),
+                levels={},
+                metrics={},
             )
 
         lookback_df = pd.concat(
@@ -1540,8 +1534,13 @@ class PredictionService:
     ) -> SingleStrategyPrediction:
         if df_15m.empty:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason="No 15m candle data available.",
+                status="UNAVAILABLE",
+                reason=(
+                    "APEX cannot evaluate: "
+                    "no 15-minute candle data is available."
+                ),
+                levels={},
+                metrics={},
             )
 
         _, days = self._prepare_data(
@@ -1550,18 +1549,35 @@ class PredictionService:
 
         if not days:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason="No trading days found.",
+                status="UNAVAILABLE",
+                reason=(
+                    "APEX cannot evaluate: "
+                    "no trading-session data is available."
+                ),
+                levels={},
+                metrics={},
+            )
+
+        if len(days) < 2:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "APEX cannot evaluate: "
+                    "prior-session history is required "
+                    "for prior ATR and opening-gap calculation."
+                ),
+                levels={},
+                metrics={},
             )
 
         latest_date, today_df = days[-1]
 
-        lookback_df = (
-            df_15m.iloc[
-                :-len(today_df)
-            ].copy()
-            if len(days) > 1
-            else pd.DataFrame()
+        lookback_df = pd.concat(
+            [
+                day_df
+                for _, day_df in days[:-1]
+            ],
+            ignore_index=True,
         )
 
         strategy = ApexStrategy(
@@ -1687,8 +1703,13 @@ class PredictionService:
     ) -> SingleStrategyPrediction:
         if df_15m.empty:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason="No 15m candle data available.",
+                status="UNAVAILABLE",
+                reason=(
+                    "Sector Impulse cannot evaluate: "
+                    "no 15-minute candle data is available."
+                ),
+                levels={},
+                metrics={},
             )
 
         _, days = self._prepare_data(
@@ -1697,16 +1718,25 @@ class PredictionService:
 
         if not days:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason="No trading days found.",
+                status="UNAVAILABLE",
+                reason=(
+                    "Sector Impulse cannot evaluate: "
+                    "no valid trading-session data found."
+                ),
+                levels={},
+                metrics={},
             )
 
         latest_date, today_df = days[-1]
 
         lookback_df = (
-            df_15m.iloc[
-                :-len(today_df)
-            ].copy()
+            pd.concat(
+                [
+                    day_df
+                    for _, day_df in days[:-1]
+                ],
+                ignore_index=True,
+            )
             if len(days) > 1
             else pd.DataFrame()
         )
@@ -1895,8 +1925,13 @@ class PredictionService:
     ) -> SingleStrategyPrediction:
         if df_15m.empty:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason="No 15m candle data available.",
+                status="UNAVAILABLE",
+                reason=(
+                    "SSF-L5-SRM cannot evaluate: "
+                    "no 15-minute candle data is available."
+                ),
+                levels={},
+                metrics={},
             )
 
         _, days = self._prepare_data(
@@ -1905,8 +1940,13 @@ class PredictionService:
 
         if not days:
             return SingleStrategyPrediction(
-                status="NO_TRADE",
-                reason="No trading days found.",
+                status="UNAVAILABLE",
+                reason=(
+                    "SSF-L5-SRM cannot evaluate: "
+                    "no valid trading-session data found."
+                ),
+                levels={},
+                metrics={},
             )
 
         latest_date, today_df = days[-1]
@@ -1957,31 +1997,11 @@ class PredictionService:
         }
 
         if book_snapshot is not None:
-            try:
-                features = strategy._features(
-                    book_snapshot
-                )
-            except Exception as exc:
-                return SingleStrategyPrediction(
-                    status="ERROR",
-                    reason=(
-                        "SSF-L5-SRM feature calculation "
-                        f"failed: {type(exc).__name__}: {exc}"
-                    ),
-                    levels=levels,
-                )
-
-            if features:
-                for key, value in features.items():
-                    number = _finite_number(
-                        value
-                    )
-                    if number is not None:
-                        levels[key] = round(
-                            number,
-                            3,
-                        )
-
+            # on_book_update() calls _features() internally exactly once.
+            # Never call _features() separately first — it is NOT pure:
+            # it mutates _mids, _z_mlofi, _z_micro, _z_oi, _z_sector,
+            # _basis_hist, and _prev_oi, so calling it twice distorts the
+            # rolling statistics.
             try:
                 signal = strategy.on_book_update(
                     book_snapshot
@@ -1995,6 +2015,25 @@ class PredictionService:
                     ),
                     levels=levels,
                 )
+
+            # Read features written by on_book_update() to avoid the
+            # double-evaluation bug while still exposing feature values.
+            features = getattr(
+                strategy,
+                "last_features",
+                {},
+            ) or {}
+
+            if features:
+                for key, value in features.items():
+                    number = _finite_number(
+                        value
+                    )
+                    if number is not None:
+                        levels[key] = round(
+                            number,
+                            3,
+                        )
 
             if signal is not None:
                 if signal.action == SignalAction.BUY:
@@ -2205,12 +2244,16 @@ class PredictionService:
         """
         Transparent equal-vote consensus.
 
-        Important:
-        - ERROR and UNAVAILABLE strategies do not vote.
-        - NO_TRADE strategies are evaluable but do not cast a direction vote.
-        - Excluded strategies never enter the live denominator.
-        - The denominator for agreement percentage is directional voters,
-          while total_strategies remains the number of live-enabled models.
+        Status semantics:
+        - UNAVAILABLE = required market/history/context data was missing.
+        - ERROR = strategy evaluation failed.
+        - WAITING = strategy has enough valid data but is waiting for
+          its defined entry conditions/time window.
+        - NO_TRADE = strategy evaluated successfully and found no valid setup.
+        - Directional statuses = validated LONG/SHORT strategy results.
+
+        Only UNAVAILABLE and ERROR are excluded from the evaluable count.
+        NO_TRADE and WAITING are valid strategy evaluations without a vote.
         """
         live_predictions = {
             name: prediction

@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, ArrowUpRight, ArrowDownRight, Play, Square } from 'lucide-react'
 import Card from '../components/common/Card'
 import StatusPill from '../components/common/StatusPill'
 import Timestamp from '../components/common/Timestamp'
 import { Loading, ErrorState, EmptyState } from '../components/common/DataStates'
 import { usePolling } from '../hooks/usePolling'
-import { apiGet, apiPost } from '../api/client'
+import { apiGet, apiPost, hasSharedSecret } from '../api/client'
 
 const STRATEGIES = [
   { id: 'all', label: 'All' },
@@ -45,6 +45,7 @@ export default function LiveSignalsPage({ isAuthenticated }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [streamAction, setStreamAction] = useState('idle')
   const [streamError, setStreamError] = useState(null)
+  const streamStartInFlight = useRef(false)
 
   const status = usePolling(() => apiGet('/api/stream/status'), {
     intervalMs: 5000,
@@ -67,30 +68,35 @@ export default function LiveSignalsPage({ isAuthenticated }) {
    */
   useEffect(() => {
     if (!isAuthenticated) return
+    if (!hasSharedSecret()) return
     if (status.status !== 'success') return
     if (status.data?.connected) return
-    if (streamAction === 'starting') return
 
     const state = status.data?.state
     if (state === 'CONNECTING' || state === 'RECONNECTING') return
+    if (streamAction === 'starting' || streamAction === 'error') return
+    if (streamStartInFlight.current) return
 
     let cancelled = false
 
     const start = async () => {
+      streamStartInFlight.current = true
       setStreamAction('starting')
       setStreamError(null)
 
       try {
-        await apiPost('/api/stream/start', {})
-        if (!cancelled) {
-          setStreamAction('started')
-          status.refresh()
-        }
+        await apiPost('/api/stream/start', {}, { requireSecret: true })
+        if (cancelled) return
+
+        setStreamAction('started')
+        status.refresh()
       } catch (error) {
-        if (!cancelled) {
-          setStreamAction('error')
-          setStreamError(error)
-        }
+        if (cancelled) return
+
+        setStreamAction('error')
+        setStreamError(error)
+      } finally {
+        streamStartInFlight.current = false
       }
     }
 
@@ -104,6 +110,7 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     status.status,
     status.data?.connected,
     status.data?.state,
+    status.refresh,
     streamAction,
   ])
 
@@ -169,7 +176,7 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     setStreamError(null)
 
     try {
-      await apiPost('/api/stream/start', {})
+      await apiPost('/api/stream/start', {}, { requireSecret: true })
       setStreamAction('started')
       await status.refresh()
     } catch (error) {
@@ -183,7 +190,7 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     setStreamError(null)
 
     try {
-      await apiPost('/api/stream/stop', {})
+      await apiPost('/api/stream/stop', {}, { requireSecret: true })
       setStreamAction('stopped')
       await status.refresh()
     } catch (error) {

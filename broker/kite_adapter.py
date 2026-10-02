@@ -412,7 +412,7 @@ class KiteBrokerAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton for use by backend/stream.py and other modules that
+# Module-level singleton for use by backend/stream_routes.py and other modules that
 # need to start/stop the WebSocket market stream. This follows the same
 # pattern as the shared _cached_kite for the REST session.
 # ---------------------------------------------------------------------------

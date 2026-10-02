@@ -7,7 +7,12 @@ export const getKiteStatus = () => apiGet('/kite/status')
 export const getKiteLoginUrl = () => apiGet('/kite/login')
 
 // POST /kite/logout -> { success, message }
-export const kiteLogout = () => apiPost('/kite/logout')
+export const kiteLogout = () =>
+  apiPost(
+    '/kite/logout',
+    undefined,
+    { requireSecret: true },
+  )
 
 // Compatibility exports
 export const getStatus = getKiteStatus
@@ -15,7 +20,16 @@ export const getLoginUrl = getKiteLoginUrl
 export const logout = kiteLogout
 
 // GET /api/profile -> user profile fields
-export const getProfile = () => apiGet('/api/profile')
+export const getProfile = () =>
+  apiGet(
+    '/api/profile',
+    { requireSecret: true },
+  )
 
 // GET /api/margins -> raw Kite margins object
-export const getMargins = () => apiGet('/api/margins')
+export const getMargins = () =>
+  apiGet(
+    '/api/margins',
+    { requireSecret: true },
+  )
+

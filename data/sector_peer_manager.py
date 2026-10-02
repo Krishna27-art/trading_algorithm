@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from config.settings import settings
+from data.time_utils import now_ist_naive
 from monitoring.logger import logger
 from strategy.sector_impulse_strategy import PeerContext
 
@@ -240,7 +241,7 @@ class SectorPeerManager:
                     from data.instrument_resolver import instrument_resolver
                     tok = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
                     if tok:
-                        today = datetime.now().date()
+                        today = now_ist_naive().date()
                         start_d = today - timedelta(days=45)
                         df = HistoricalDataLoader.fetch_real_data(
                             kite_client=kite_client,
@@ -261,9 +262,16 @@ class SectorPeerManager:
         df_market = load_df(market_sym)
         df_sector = load_df(sector_sym)
 
-        # Ensure leader has volume column
+        # Ensure leader has real volume column; refuse to fabricate volume data.
         if df_leader is not None and "volume" not in df_leader.columns:
-            df_leader["volume"] = 1000
+            logger.warning(
+                "SIT requires real leader volume; "
+                "volume column is absent for %s. "
+                "Returning None to prevent fabricated data from "
+                "reaching the strategy.",
+                leader_sym,
+            )
+            return None
 
         # If any essential frame is missing, return None
         if df_leader is None or df_market is None or df_sector is None:

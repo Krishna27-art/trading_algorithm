@@ -28,6 +28,12 @@ const ALL_STRATEGY_KEYS = [
   'aou_oss',
 ]
 
+const MAX_AUTO_START_ATTEMPTS = 5
+const AUTO_START_RETRY_MS = 15000
+
+const SHARED_SECRET_MISSING_MESSAGE =
+  'Backend shared secret is not configured. Add it in Settings before starting the live market stream.'
+
 /**
  * The live-signal page intentionally uses the WebSocket-backed endpoints:
  *
@@ -48,6 +54,15 @@ export default function LiveSignalsPage({ isAuthenticated }) {
   const [streamAction, setStreamAction] = useState('idle')
   const [streamError, setStreamError] = useState(null)
   const streamStartInFlight = useRef(false)
+  const autoStartAttempts = useRef(0)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   const status = usePolling(() => apiGet('/api/stream/status'), {
     intervalMs: 5000,
@@ -65,35 +80,47 @@ export default function LiveSignalsPage({ isAuthenticated }) {
    * Start the read-only market-data stream automatically after the user has
    * authenticated. No order/trade action occurs here.
    *
-   * The effect is guarded by the backend stream state so repeated renders do
-   * not create repeated WebSocket connections.
+   * Guards:
+   *  - backend stream state, so renders never open duplicate connections
+   *  - an in-flight ref, so overlapping start requests are impossible
+   *  - a bounded retry (see the retry effect below) so a failed start can
+   *    recover on its own without hammering the backend in a tight loop
    */
   useEffect(() => {
     if (!isAuthenticated) return
-    if (!hasSharedSecret()) return
     if (status.status !== 'success') return
-    if (status.data?.connected) return
+
+    if (status.data?.connected) {
+      autoStartAttempts.current = 0
+      return
+    }
 
     const state = status.data?.state
     if (state === 'CONNECTING' || state === 'RECONNECTING') return
+
+    // 'error' is only cleared by the retry effect (after a delay) or by the
+    // user. Without this guard the effect re-fires immediately after a failure.
     if (streamAction === 'starting' || streamAction === 'error') return
     if (streamStartInFlight.current) return
 
-    let cancelled = false
+    // A missing secret is surfaced in the UI (see secretError below).
+    if (!hasSharedSecret()) return
+    if (autoStartAttempts.current >= MAX_AUTO_START_ATTEMPTS) return
 
     const start = async () => {
       streamStartInFlight.current = true
+      autoStartAttempts.current += 1
       setStreamAction('starting')
-      setStreamError(null)
 
       try {
         await apiPost('/api/stream/start', {}, { requireSecret: true })
-        if (cancelled) return
+        if (!mounted.current) return
 
+        setStreamError(null)
         setStreamAction('started')
         status.refresh()
       } catch (error) {
-        if (cancelled) return
+        if (!mounted.current) return
 
         setStreamAction('error')
         setStreamError(error)
@@ -103,10 +130,6 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     }
 
     start()
-
-    return () => {
-      cancelled = true
-    }
   }, [
     isAuthenticated,
     status.status,
@@ -116,6 +139,22 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     streamAction,
   ])
 
+  /**
+   * Bounded automatic retry: after a failed start, wait, then return to 'idle'
+   * so the startup effect above may try again (up to MAX_AUTO_START_ATTEMPTS).
+   */
+  useEffect(() => {
+    if (streamAction !== 'error') return
+    if (!isAuthenticated || !hasSharedSecret()) return
+    if (autoStartAttempts.current >= MAX_AUTO_START_ATTEMPTS) return
+
+    const timer = setTimeout(() => {
+      if (mounted.current) setStreamAction('idle')
+    }, AUTO_START_RETRY_MS)
+
+    return () => clearTimeout(timer)
+  }, [streamAction, isAuthenticated])
+
   const candidates = useMemo(() => {
     const rawSignals = signals.data?.signals || {}
     const rawMarket = market.data?.instruments || {}
@@ -123,13 +162,14 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     return Object.entries(rawSignals)
       .map(([symbol, signal]) => {
         const marketState = rawMarket[symbol]
-        const liveLtp = Number.isFinite(Number(marketState?.ltp))
-          ? Number(marketState.ltp)
-          : Number(signal?.ltp)
+
+        // Only a finite, positive price is real market data. Never fabricate
+        // a fallback (e.g. 0): missing/invalid LTP stays null and renders as "—".
+        const liveLtp = firstValidPrice(marketState?.ltp, signal?.ltp)
 
         return {
           symbol,
-          ltp: Number.isFinite(liveLtp) ? liveLtp : 0,
+          ltp: liveLtp,
           timestamp: signal?.timestamp || marketState?.updated_at || null,
           predictions: signal?.predictions || signal?.strategies || {},
           strategies: signal?.predictions || signal?.strategies || {},
@@ -174,6 +214,7 @@ export default function LiveSignalsPage({ isAuthenticated }) {
   }
 
   const handleStart = async () => {
+    autoStartAttempts.current = 0
     setStreamAction('starting')
     setStreamError(null)
 
@@ -207,6 +248,12 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     streamState === 'CONNECTING' ||
     streamState === 'RECONNECTING' ||
     streamAction === 'starting'
+
+  const secretError =
+    isAuthenticated && !hasSharedSecret()
+      ? new Error(SHARED_SECRET_MISSING_MESSAGE)
+      : null
+  const displayedError = streamError || secretError
 
   const hasSignals = candidates.length > 0
   const isAuthRequired = !isAuthenticated || status.data?.last_error?.includes('No active Zerodha Kite session')
@@ -280,10 +327,10 @@ export default function LiveSignalsPage({ isAuthenticated }) {
         </div>
       </Card>
 
-      {streamError && (
+      {displayedError && (
         <Card>
           <ErrorState
-            error={streamError}
+            error={displayedError}
             onRetry={handleStart}
           />
         </Card>
@@ -408,7 +455,15 @@ function KeyInsights({ candidates }) {
     (candidate) => candidate.consensus?.direction === 'DIVERGENT',
   )
 
-  const strongest = [...candidates].sort(
+  // Only real LONG/SHORT consensus is eligible; NEUTRAL, DIVERGENT,
+  // UNAVAILABLE and ERROR must never be shown as "strongest consensus".
+  const directionalCandidates = candidates.filter(
+    (candidate) =>
+      candidate.consensus?.direction === 'LONG' ||
+      candidate.consensus?.direction === 'SHORT',
+  )
+
+  const strongest = [...directionalCandidates].sort(
     (a, b) =>
       Number(b.consensus?.agreeing_strategies || 0) -
         Number(a.consensus?.agreeing_strategies || 0) ||
@@ -790,6 +845,15 @@ function formatValue(value) {
   }
 
   return String(value)
+}
+
+function firstValidPrice(...values) {
+  for (const value of values) {
+    if (value == null || value === '') continue
+    const numeric = Number(value)
+    if (Number.isFinite(numeric) && numeric > 0) return numeric
+  }
+  return null
 }
 
 function formatCurrency(value) {

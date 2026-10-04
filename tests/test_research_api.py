@@ -10,7 +10,7 @@ import os
 import pytest
 from datetime import datetime
 
-from backend.signals import get_live_research, get_research_backtest, post_research_backtest
+from backend.backtest_routes import get_research_backtest, post_research_backtest
 from strategy.prediction_service import (
     CandidatePrediction,
     PredictionService,
@@ -140,14 +140,6 @@ def test_prediction_service_extract_key_insights():
     assert insights["strongest_consensus"]["symbol"] == "SBILIFE"
     assert len(insights["divergent_signals"]) == 1
     assert insights["divergent_signals"][0]["symbol"] == "TCS"
-
-
-def test_get_research_live_endpoint():
-    """Tests get_live_research returns proper auth requirement when offline."""
-    data = get_live_research(top_n=5, force_refresh=True)
-    assert data["status"] in ("AUTH_REQUIRED", "success", "DATA_UNAVAILABLE")
-    assert "timestamp" in data
-    assert "market_status" in data
 
 
 def test_research_backtest_endpoints(monkeypatch):
@@ -435,42 +427,6 @@ def test_consensus_agreement_is_none_when_no_strategies_exist():
     assert consensus["agreeing_strategies"] == 0
     assert consensus["total_strategies"] == 0
     assert consensus["consensus_agreement_pct"] is None
-
-
-def test_strategy_trades_returns_live_only(tmp_path, monkeypatch):
-    from database.db import DatabaseManager
-    from database.models import OrderDirection, TradeRecord
-    from config import settings as config_settings
-    from backend import signals
-
-    db_file = tmp_path / "trading_system.db"
-    db = DatabaseManager(db_file)
-
-    def record(trade_id, is_paper):
-        db.record_trade_entry(
-            TradeRecord(
-                trade_id=trade_id,
-                symbol="SBIN",
-                direction=OrderDirection.BUY,
-                entry_time=datetime(2026, 10, 1, 10, 0),
-                entry_price=1000.0,
-                quantity=1,
-                initial_stop=990.0,
-                initial_target=1020.0,
-                is_paper=is_paper,
-            )
-        )
-
-    record("BT_TEST", True)
-    record("LIVE_TEST", False)
-
-    from config.settings import settings as app_settings
-    monkeypatch.setattr(app_settings, "db_path", db_file)
-
-    result = signals.get_strategy_trades()
-
-    assert result["count"] == 1
-    assert result["trades"][0]["trade_id"] == "LIVE_TEST"
 
 
 

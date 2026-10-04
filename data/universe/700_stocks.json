@@ -1,0 +1,4202 @@
+[
+  {
+    "symbol": "RELIANCE",
+    "name": "Reliance Industries Ltd",
+    "market_cap_rank": 1,
+    "category": "large"
+  },
+  {
+    "symbol": "TCS",
+    "name": "Tata Consultancy Services Ltd",
+    "market_cap_rank": 2,
+    "category": "large"
+  },
+  {
+    "symbol": "HDFCBANK",
+    "name": "HDFC Bank Ltd",
+    "market_cap_rank": 3,
+    "category": "large"
+  },
+  {
+    "symbol": "BHARTIARTL",
+    "name": "Bharti Airtel Ltd",
+    "market_cap_rank": 4,
+    "category": "large"
+  },
+  {
+    "symbol": "ICICIBANK",
+    "name": "ICICI Bank Ltd",
+    "market_cap_rank": 5,
+    "category": "large"
+  },
+  {
+    "symbol": "INFY",
+    "name": "Infosys Ltd",
+    "market_cap_rank": 6,
+    "category": "large"
+  },
+  {
+    "symbol": "ITC",
+    "name": "ITC Ltd",
+    "market_cap_rank": 7,
+    "category": "large"
+  },
+  {
+    "symbol": "SBIN",
+    "name": "State Bank of India",
+    "market_cap_rank": 8,
+    "category": "large"
+  },
+  {
+    "symbol": "ASHOKLEY",
+    "name": "Ashok Leyland Ltd",
+    "market_cap_rank": 9,
+    "category": "large"
+  },
+  {
+    "symbol": "LT",
+    "name": "Larsen & Toubro Ltd",
+    "market_cap_rank": 10,
+    "category": "large"
+  },
+  {
+    "symbol": "HINDUNILVR",
+    "name": "Hindustan Unilever Ltd",
+    "market_cap_rank": 11,
+    "category": "large"
+  },
+  {
+    "symbol": "KOTAKBANK",
+    "name": "Kotak Mahindra Bank Ltd",
+    "market_cap_rank": 12,
+    "category": "large"
+  },
+  {
+    "symbol": "HCLTECH",
+    "name": "HCL Technologies Ltd",
+    "market_cap_rank": 13,
+    "category": "large"
+  },
+  {
+    "symbol": "MARUTI",
+    "name": "Maruti Suzuki India Ltd",
+    "market_cap_rank": 14,
+    "category": "large"
+  },
+  {
+    "symbol": "SUNPHARMA",
+    "name": "Sun Pharmaceutical Industries Ltd",
+    "market_cap_rank": 15,
+    "category": "large"
+  },
+  {
+    "symbol": "M&M",
+    "name": "Mahindra & Mahindra Ltd",
+    "market_cap_rank": 16,
+    "category": "large"
+  },
+  {
+    "symbol": "AXISBANK",
+    "name": "Axis Bank Ltd",
+    "market_cap_rank": 17,
+    "category": "large"
+  },
+  {
+    "symbol": "TMPV",
+    "name": "Tata Motors Passenger Vehicles Ltd",
+    "market_cap_rank": 18,
+    "category": "large"
+  },
+  {
+    "symbol": "NTPC",
+    "name": "NTPC Ltd",
+    "market_cap_rank": 19,
+    "category": "large"
+  },
+  {
+    "symbol": "ONGC",
+    "name": "Oil & Natural Gas Corporation Ltd",
+    "market_cap_rank": 20,
+    "category": "large"
+  },
+  {
+    "symbol": "ADANIENT",
+    "name": "Adani Enterprises Ltd",
+    "market_cap_rank": 21,
+    "category": "large"
+  },
+  {
+    "symbol": "ADANIPORTS",
+    "name": "Adani Ports & Special Economic Zone Ltd",
+    "market_cap_rank": 22,
+    "category": "large"
+  },
+  {
+    "symbol": "POWERGRID",
+    "name": "Power Grid Corporation of India Ltd",
+    "market_cap_rank": 23,
+    "category": "large"
+  },
+  {
+    "symbol": "COALINDIA",
+    "name": "Coal India Ltd",
+    "market_cap_rank": 24,
+    "category": "large"
+  },
+  {
+    "symbol": "BAJFINANCE",
+    "name": "Bajaj Finance Ltd",
+    "market_cap_rank": 25,
+    "category": "large"
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "name": "Asian Paints Ltd",
+    "market_cap_rank": 26,
+    "category": "large"
+  },
+  {
+    "symbol": "TITAN",
+    "name": "Titan Company Ltd",
+    "market_cap_rank": 27,
+    "category": "large"
+  },
+  {
+    "symbol": "ULTRACEMCO",
+    "name": "UltraTech Cement Ltd",
+    "market_cap_rank": 28,
+    "category": "large"
+  },
+  {
+    "symbol": "BEL",
+    "name": "Bharat Electronics Ltd",
+    "market_cap_rank": 29,
+    "category": "large"
+  },
+  {
+    "symbol": "TRENT",
+    "name": "Trent Ltd",
+    "market_cap_rank": 30,
+    "category": "large"
+  },
+  {
+    "symbol": "BAJAJFINSV",
+    "name": "Bajaj Finserv Ltd",
+    "market_cap_rank": 31,
+    "category": "large"
+  },
+  {
+    "symbol": "TATASTEEL",
+    "name": "Tata Steel Ltd",
+    "market_cap_rank": 32,
+    "category": "large"
+  },
+  {
+    "symbol": "JSWSTEEL",
+    "name": "JSW Steel Ltd",
+    "market_cap_rank": 33,
+    "category": "large"
+  },
+  {
+    "symbol": "ADANIGREEN",
+    "name": "Adani Green Energy Ltd",
+    "market_cap_rank": 34,
+    "category": "large"
+  },
+  {
+    "symbol": "HAL",
+    "name": "Hindustan Aeronautics Ltd",
+    "market_cap_rank": 35,
+    "category": "large"
+  },
+  {
+    "symbol": "SIEMENS",
+    "name": "Siemens Ltd",
+    "market_cap_rank": 36,
+    "category": "large"
+  },
+  {
+    "symbol": "DLF",
+    "name": "DLF Ltd",
+    "market_cap_rank": 37,
+    "category": "large"
+  },
+  {
+    "symbol": "GRASIM",
+    "name": "Grasim Industries Ltd",
+    "market_cap_rank": 38,
+    "category": "large"
+  },
+  {
+    "symbol": "BPCL",
+    "name": "Bharat Petroleum Corporation Ltd",
+    "market_cap_rank": 39,
+    "category": "large"
+  },
+  {
+    "symbol": "BRITANNIA",
+    "name": "Britannia Industries Ltd",
+    "market_cap_rank": 40,
+    "category": "large"
+  },
+  {
+    "symbol": "DRREDDY",
+    "name": "Dr. Reddy's Laboratories Ltd",
+    "market_cap_rank": 41,
+    "category": "large"
+  },
+  {
+    "symbol": "VBL",
+    "name": "Varun Beverages Ltd",
+    "market_cap_rank": 42,
+    "category": "large"
+  },
+  {
+    "symbol": "IOC",
+    "name": "Indian Oil Corporation Ltd",
+    "market_cap_rank": 43,
+    "category": "large"
+  },
+  {
+    "symbol": "IRFC",
+    "name": "Indian Railway Finance Corporation Ltd",
+    "market_cap_rank": 44,
+    "category": "large"
+  },
+  {
+    "symbol": "ETERNAL",
+    "name": "Eternal Ltd (Zomato)",
+    "market_cap_rank": 45,
+    "category": "large"
+  },
+  {
+    "symbol": "RECLTD",
+    "name": "REC Ltd",
+    "market_cap_rank": 46,
+    "category": "large"
+  },
+  {
+    "symbol": "PFC",
+    "name": "Power Finance Corporation Ltd",
+    "market_cap_rank": 47,
+    "category": "large"
+  },
+  {
+    "symbol": "HINDALCO",
+    "name": "Hindalco Industries Ltd",
+    "market_cap_rank": 48,
+    "category": "large"
+  },
+  {
+    "symbol": "INDIGO",
+    "name": "InterGlobe Aviation Ltd",
+    "market_cap_rank": 49,
+    "category": "large"
+  },
+  {
+    "symbol": "PIDILITIND",
+    "name": "Pidilite Industries Ltd",
+    "market_cap_rank": 50,
+    "category": "large"
+  },
+  {
+    "symbol": "EICHERMOT",
+    "name": "Eicher Motors Ltd",
+    "market_cap_rank": 51,
+    "category": "large"
+  },
+  {
+    "symbol": "CIPLA",
+    "name": "Cipla Ltd",
+    "market_cap_rank": 52,
+    "category": "large"
+  },
+  {
+    "symbol": "TECHM",
+    "name": "Tech Mahindra Ltd",
+    "market_cap_rank": 53,
+    "category": "large"
+  },
+  {
+    "symbol": "TATAPOWER",
+    "name": "Tata Power Company Ltd",
+    "market_cap_rank": 54,
+    "category": "large"
+  },
+  {
+    "symbol": "DIVISLAB",
+    "name": "Divi's Laboratories Ltd",
+    "market_cap_rank": 55,
+    "category": "large"
+  },
+  {
+    "symbol": "GODREJCP",
+    "name": "Godrej Consumer Products Ltd",
+    "market_cap_rank": 56,
+    "category": "large"
+  },
+  {
+    "symbol": "AMBUJACEM",
+    "name": "Ambuja Cements Ltd",
+    "market_cap_rank": 57,
+    "category": "large"
+  },
+  {
+    "symbol": "GAIL",
+    "name": "GAIL (India) Ltd",
+    "market_cap_rank": 58,
+    "category": "large"
+  },
+  {
+    "symbol": "TVSMOTOR",
+    "name": "TVS Motor Company Ltd",
+    "market_cap_rank": 59,
+    "category": "large"
+  },
+  {
+    "symbol": "HEROMOTOCO",
+    "name": "Hero MotoCorp Ltd",
+    "market_cap_rank": 60,
+    "category": "large"
+  },
+  {
+    "symbol": "SHRIRAMFIN",
+    "name": "Shriram Finance Ltd",
+    "market_cap_rank": 61,
+    "category": "large"
+  },
+  {
+    "symbol": "APOLLOHOSP",
+    "name": "Apollo Hospitals Enterprise Ltd",
+    "market_cap_rank": 62,
+    "category": "large"
+  },
+  {
+    "symbol": "BAJAJ-AUTO",
+    "name": "Bajaj Auto Ltd",
+    "market_cap_rank": 63,
+    "category": "large"
+  },
+  {
+    "symbol": "BOSCHLTD",
+    "name": "Bosch Ltd",
+    "market_cap_rank": 64,
+    "category": "large"
+  },
+  {
+    "symbol": "INDHOTEL",
+    "name": "The Indian Hotels Company Ltd",
+    "market_cap_rank": 65,
+    "category": "large"
+  },
+  {
+    "symbol": "ABB",
+    "name": "ABB India Ltd",
+    "market_cap_rank": 66,
+    "category": "large"
+  },
+  {
+    "symbol": "VEDL",
+    "name": "Vedanta Ltd",
+    "market_cap_rank": 67,
+    "category": "large"
+  },
+  {
+    "symbol": "HAVELLS",
+    "name": "Havells India Ltd",
+    "market_cap_rank": 68,
+    "category": "large"
+  },
+  {
+    "symbol": "TATACONSUM",
+    "name": "Tata Consumer Products Ltd",
+    "market_cap_rank": 69,
+    "category": "large"
+  },
+  {
+    "symbol": "DABUR",
+    "name": "Dabur India Ltd",
+    "market_cap_rank": 70,
+    "category": "large"
+  },
+  {
+    "symbol": "ICICIGI",
+    "name": "ICICI Lombard General Insurance Co Ltd",
+    "market_cap_rank": 71,
+    "category": "large"
+  },
+  {
+    "symbol": "LICI",
+    "name": "Life Insurance Corporation of India",
+    "market_cap_rank": 72,
+    "category": "large"
+  },
+  {
+    "symbol": "TORNTPHARM",
+    "name": "Torrent Pharmaceuticals Ltd",
+    "market_cap_rank": 73,
+    "category": "large"
+  },
+  {
+    "symbol": "NAUKRI",
+    "name": "Info Edge (India) Ltd",
+    "market_cap_rank": 74,
+    "category": "large"
+  },
+  {
+    "symbol": "JIOFIN",
+    "name": "Jio Financial Services Ltd",
+    "market_cap_rank": 75,
+    "category": "large"
+  },
+  {
+    "symbol": "ICICIPRULI",
+    "name": "ICICI Prudential Life Insurance Co Ltd",
+    "market_cap_rank": 76,
+    "category": "large"
+  },
+  {
+    "symbol": "HDFCLIFE",
+    "name": "HDFC Life Insurance Company Ltd",
+    "market_cap_rank": 77,
+    "category": "large"
+  },
+  {
+    "symbol": "SBILIFE",
+    "name": "SBI Life Insurance Company Ltd",
+    "market_cap_rank": 78,
+    "category": "large"
+  },
+  {
+    "symbol": "MAXHEALTH",
+    "name": "Max Healthcare Institute Ltd",
+    "market_cap_rank": 79,
+    "category": "large"
+  },
+  {
+    "symbol": "CHOLAFIN",
+    "name": "Cholamandalam Investment & Finance Co Ltd",
+    "market_cap_rank": 80,
+    "category": "large"
+  },
+  {
+    "symbol": "JSWENERGY",
+    "name": "JSW Energy Ltd",
+    "market_cap_rank": 81,
+    "category": "large"
+  },
+  {
+    "symbol": "BHEL",
+    "name": "Bharat Heavy Electricals Ltd",
+    "market_cap_rank": 82,
+    "category": "large"
+  },
+  {
+    "symbol": "PNB",
+    "name": "Punjab National Bank",
+    "market_cap_rank": 83,
+    "category": "large"
+  },
+  {
+    "symbol": "BANKBARODA",
+    "name": "Bank of Baroda",
+    "market_cap_rank": 84,
+    "category": "large"
+  },
+  {
+    "symbol": "CANBK",
+    "name": "Canara Bank",
+    "market_cap_rank": 85,
+    "category": "large"
+  },
+  {
+    "symbol": "UNIONBANK",
+    "name": "Union Bank of India",
+    "market_cap_rank": 86,
+    "category": "large"
+  },
+  {
+    "symbol": "INDIANB",
+    "name": "Indian Bank",
+    "market_cap_rank": 87,
+    "category": "large"
+  },
+  {
+    "symbol": "IOB",
+    "name": "Indian Overseas Bank",
+    "market_cap_rank": 88,
+    "category": "large"
+  },
+  {
+    "symbol": "UCOBANK",
+    "name": "UCO Bank",
+    "market_cap_rank": 89,
+    "category": "large"
+  },
+  {
+    "symbol": "COLPAL",
+    "name": "Colgate-Palmolive (India) Ltd",
+    "market_cap_rank": 90,
+    "category": "large"
+  },
+  {
+    "symbol": "MOTHERSON",
+    "name": "Samvardhana Motherson International Ltd",
+    "market_cap_rank": 91,
+    "category": "large"
+  },
+  {
+    "symbol": "CGPOWER",
+    "name": "CG Power and Industrial Solutions Ltd",
+    "market_cap_rank": 92,
+    "category": "large"
+  },
+  {
+    "symbol": "POLYCAB",
+    "name": "Polycab India Ltd",
+    "market_cap_rank": 93,
+    "category": "large"
+  },
+  {
+    "symbol": "CUMMINSIND",
+    "name": "Cummins India Ltd",
+    "market_cap_rank": 94,
+    "category": "large"
+  },
+  {
+    "symbol": "SOLARINDS",
+    "name": "Solar Industries India Ltd",
+    "market_cap_rank": 95,
+    "category": "large"
+  },
+  {
+    "symbol": "PERSISTENT",
+    "name": "Persistent Systems Ltd",
+    "market_cap_rank": 96,
+    "category": "large"
+  },
+  {
+    "symbol": "COFORGE",
+    "name": "Coforge Ltd",
+    "market_cap_rank": 97,
+    "category": "large"
+  },
+  {
+    "symbol": "MPHASIS",
+    "name": "Mphasis Ltd",
+    "market_cap_rank": 98,
+    "category": "large"
+  },
+  {
+    "symbol": "JSWINFRA",
+    "name": "JSW Infrastructure Ltd",
+    "market_cap_rank": 99,
+    "category": "large"
+  },
+  {
+    "symbol": "LTTS",
+    "name": "L&T Technology Services Ltd",
+    "market_cap_rank": 100,
+    "category": "large"
+  },
+  {
+    "symbol": "AUROPHARMA",
+    "name": "Aurobindo Pharma Ltd",
+    "market_cap_rank": 101,
+    "category": "mid"
+  },
+  {
+    "symbol": "BALKRISIND",
+    "name": "Balkrishna Industries Ltd",
+    "market_cap_rank": 102,
+    "category": "mid"
+  },
+  {
+    "symbol": "BANDHANBNK",
+    "name": "Bandhan Bank Ltd",
+    "market_cap_rank": 103,
+    "category": "mid"
+  },
+  {
+    "symbol": "BATAINDIA",
+    "name": "Bata India Ltd",
+    "market_cap_rank": 104,
+    "category": "mid"
+  },
+  {
+    "symbol": "BHARATFORG",
+    "name": "Bharat Forge Ltd",
+    "market_cap_rank": 105,
+    "category": "mid"
+  },
+  {
+    "symbol": "BIOCON",
+    "name": "Biocon Ltd",
+    "market_cap_rank": 106,
+    "category": "mid"
+  },
+  {
+    "symbol": "CONCOR",
+    "name": "Container Corporation of India Ltd",
+    "market_cap_rank": 107,
+    "category": "mid"
+  },
+  {
+    "symbol": "DEEPAKNTR",
+    "name": "Deepak Nitrite Ltd",
+    "market_cap_rank": 108,
+    "category": "mid"
+  },
+  {
+    "symbol": "ESCORTS",
+    "name": "Escorts Kubota Ltd",
+    "market_cap_rank": 109,
+    "category": "mid"
+  },
+  {
+    "symbol": "FEDERALBNK",
+    "name": "The Federal Bank Ltd",
+    "market_cap_rank": 110,
+    "category": "mid"
+  },
+  {
+    "symbol": "GODREJPROP",
+    "name": "Godrej Properties Ltd",
+    "market_cap_rank": 111,
+    "category": "mid"
+  },
+  {
+    "symbol": "IDFCFIRSTB",
+    "name": "IDFC First Bank Ltd",
+    "market_cap_rank": 112,
+    "category": "mid"
+  },
+  {
+    "symbol": "INDIAMART",
+    "name": "Indiamart Intermesh Ltd",
+    "market_cap_rank": 113,
+    "category": "mid"
+  },
+  {
+    "symbol": "IRCTC",
+    "name": "Indian Railway Catering & Tourism Corp Ltd",
+    "market_cap_rank": 114,
+    "category": "mid"
+  },
+  {
+    "symbol": "JUBLFOOD",
+    "name": "Jubilant Foodworks Ltd",
+    "market_cap_rank": 115,
+    "category": "mid"
+  },
+  {
+    "symbol": "LALPATHLAB",
+    "name": "Dr. Lal PathLabs Ltd",
+    "market_cap_rank": 116,
+    "category": "mid"
+  },
+  {
+    "symbol": "LICHSGFIN",
+    "name": "LIC Housing Finance Ltd",
+    "market_cap_rank": 117,
+    "category": "mid"
+  },
+  {
+    "symbol": "LUPIN",
+    "name": "Lupin Ltd",
+    "market_cap_rank": 118,
+    "category": "mid"
+  },
+  {
+    "symbol": "MFSL",
+    "name": "Max Financial Services Ltd",
+    "market_cap_rank": 119,
+    "category": "mid"
+  },
+  {
+    "symbol": "MGL",
+    "name": "Mahanagar Gas Ltd",
+    "market_cap_rank": 120,
+    "category": "mid"
+  },
+  {
+    "symbol": "MRF",
+    "name": "MRF Ltd",
+    "market_cap_rank": 121,
+    "category": "mid"
+  },
+  {
+    "symbol": "NATIONALUM",
+    "name": "National Aluminium Company Ltd",
+    "market_cap_rank": 122,
+    "category": "mid"
+  },
+  {
+    "symbol": "NMDC",
+    "name": "NMDC Ltd",
+    "market_cap_rank": 123,
+    "category": "mid"
+  },
+  {
+    "symbol": "OBEROIRLTY",
+    "name": "Oberoi Realty Ltd",
+    "market_cap_rank": 124,
+    "category": "mid"
+  },
+  {
+    "symbol": "OFSS",
+    "name": "Oracle Financial Services Software Ltd",
+    "market_cap_rank": 125,
+    "category": "mid"
+  },
+  {
+    "symbol": "PAGEIND",
+    "name": "Page Industries Ltd",
+    "market_cap_rank": 126,
+    "category": "mid"
+  },
+  {
+    "symbol": "PETRONET",
+    "name": "Petronet LNG Ltd",
+    "market_cap_rank": 127,
+    "category": "mid"
+  },
+  {
+    "symbol": "PVRINOX",
+    "name": "PVR Inox Ltd",
+    "market_cap_rank": 128,
+    "category": "mid"
+  },
+  {
+    "symbol": "RAMCOCEM",
+    "name": "The Ramco Cements Ltd",
+    "market_cap_rank": 129,
+    "category": "mid"
+  },
+  {
+    "symbol": "SAIL",
+    "name": "Steel Authority of India Ltd",
+    "market_cap_rank": 130,
+    "category": "mid"
+  },
+  {
+    "symbol": "SYNGENE",
+    "name": "Syngene International Ltd",
+    "market_cap_rank": 131,
+    "category": "mid"
+  },
+  {
+    "symbol": "TATACOMM",
+    "name": "Tata Communications Ltd",
+    "market_cap_rank": 132,
+    "category": "mid"
+  },
+  {
+    "symbol": "TATACHEM",
+    "name": "Tata Chemicals Ltd",
+    "market_cap_rank": 133,
+    "category": "mid"
+  },
+  {
+    "symbol": "TATAELXSI",
+    "name": "Tata Elxsi Ltd",
+    "market_cap_rank": 134,
+    "category": "mid"
+  },
+  {
+    "symbol": "TORNTPOWER",
+    "name": "Torrent Power Ltd",
+    "market_cap_rank": 135,
+    "category": "mid"
+  },
+  {
+    "symbol": "VOLTAS",
+    "name": "Voltas Ltd",
+    "market_cap_rank": 136,
+    "category": "mid"
+  },
+  {
+    "symbol": "WHIRLPOOL",
+    "name": "Whirlpool of India Ltd",
+    "market_cap_rank": 137,
+    "category": "mid"
+  },
+  {
+    "symbol": "ZEEL",
+    "name": "Zee Entertainment Enterprises Ltd",
+    "market_cap_rank": 138,
+    "category": "mid"
+  },
+  {
+    "symbol": "AARTIIND",
+    "name": "Aarti Industries Ltd",
+    "market_cap_rank": 139,
+    "category": "mid"
+  },
+  {
+    "symbol": "ABFRL",
+    "name": "Aditya Birla Fashion and Retail Ltd",
+    "market_cap_rank": 140,
+    "category": "mid"
+  },
+  {
+    "symbol": "ALKYLAMINE",
+    "name": "Alkyl Amines Chemicals Ltd",
+    "market_cap_rank": 141,
+    "category": "mid"
+  },
+  {
+    "symbol": "ARE&M",
+    "name": "Amara Raja Energy & Mobility Ltd",
+    "market_cap_rank": 142,
+    "category": "mid"
+  },
+  {
+    "symbol": "ANGELONE",
+    "name": "Angel One Ltd",
+    "market_cap_rank": 143,
+    "category": "mid"
+  },
+  {
+    "symbol": "ASTRAZEN",
+    "name": "AstraZeneca Pharma India Ltd",
+    "market_cap_rank": 144,
+    "category": "mid"
+  },
+  {
+    "symbol": "ATUL",
+    "name": "Atul Ltd",
+    "market_cap_rank": 145,
+    "category": "mid"
+  },
+  {
+    "symbol": "BSOFT",
+    "name": "Birlasoft Ltd",
+    "market_cap_rank": 146,
+    "category": "mid"
+  },
+  {
+    "symbol": "CDSL",
+    "name": "Central Depository Services (India) Ltd",
+    "market_cap_rank": 147,
+    "category": "mid"
+  },
+  {
+    "symbol": "APOLLOTYRE",
+    "name": "Apollo Tyres Ltd",
+    "market_cap_rank": 148,
+    "category": "mid"
+  },
+  {
+    "symbol": "CESC",
+    "name": "CESC Ltd",
+    "market_cap_rank": 149,
+    "category": "mid"
+  },
+  {
+    "symbol": "CHAMBLFERT",
+    "name": "Chambal Fertilisers & Chemicals Ltd",
+    "market_cap_rank": 150,
+    "category": "mid"
+  },
+  {
+    "symbol": "CHALET",
+    "name": "Chalet Hotels Ltd",
+    "market_cap_rank": 151,
+    "category": "mid"
+  },
+  {
+    "symbol": "CHENNPETRO",
+    "name": "Chennai Petroleum Corporation Ltd",
+    "market_cap_rank": 152,
+    "category": "mid"
+  },
+  {
+    "symbol": "CAMS",
+    "name": "Computer Age Management Services Ltd",
+    "market_cap_rank": 153,
+    "category": "mid"
+  },
+  {
+    "symbol": "CYIENT",
+    "name": "Cyient Ltd",
+    "market_cap_rank": 154,
+    "category": "mid"
+  },
+  {
+    "symbol": "DELTACORP",
+    "name": "Delta Corp Ltd",
+    "market_cap_rank": 155,
+    "category": "mid"
+  },
+  {
+    "symbol": "ERIS",
+    "name": "Eris Lifesciences Ltd",
+    "market_cap_rank": 156,
+    "category": "mid"
+  },
+  {
+    "symbol": "EXIDEIND",
+    "name": "Exide Industries Ltd",
+    "market_cap_rank": 157,
+    "category": "mid"
+  },
+  {
+    "symbol": "HFCL-BE",
+    "name": "HFCL Ltd",
+    "market_cap_rank": 158,
+    "category": "mid"
+  },
+  {
+    "symbol": "GRAVITA",
+    "name": "Gravita India Ltd",
+    "market_cap_rank": 159,
+    "category": "mid"
+  },
+  {
+    "symbol": "GREAVESCOT",
+    "name": "Greaves Cotton Ltd",
+    "market_cap_rank": 160,
+    "category": "mid"
+  },
+  {
+    "symbol": "HAPPSTMNDS",
+    "name": "Happiest Minds Technologies Ltd",
+    "market_cap_rank": 161,
+    "category": "mid"
+  },
+  {
+    "symbol": "IEX",
+    "name": "Indian Energy Exchange Ltd",
+    "market_cap_rank": 162,
+    "category": "mid"
+  },
+  {
+    "symbol": "AEGISLOG",
+    "name": "Aegis Logistics Ltd",
+    "market_cap_rank": 163,
+    "category": "mid"
+  },
+  {
+    "symbol": "IIFL",
+    "name": "IIFL Finance Ltd",
+    "market_cap_rank": 164,
+    "category": "mid"
+  },
+  {
+    "symbol": "INTELLECT",
+    "name": "Intellect Design Arena Ltd",
+    "market_cap_rank": 165,
+    "category": "mid"
+  },
+  {
+    "symbol": "GODREJAGRO",
+    "name": "Godrej Agrovet Ltd",
+    "market_cap_rank": 166,
+    "category": "mid"
+  },
+  {
+    "symbol": "KEC",
+    "name": "KEC International Ltd",
+    "market_cap_rank": 167,
+    "category": "mid"
+  },
+  {
+    "symbol": "KPITTECH",
+    "name": "KPIT Technologies Ltd",
+    "market_cap_rank": 168,
+    "category": "mid"
+  },
+  {
+    "symbol": "LEMONTREE",
+    "name": "Lemon Tree Hotels Ltd",
+    "market_cap_rank": 169,
+    "category": "mid"
+  },
+  {
+    "symbol": "MASTEK",
+    "name": "Mastek Ltd",
+    "market_cap_rank": 170,
+    "category": "mid"
+  },
+  {
+    "symbol": "METROPOLIS",
+    "name": "Metropolis Healthcare Ltd",
+    "market_cap_rank": 171,
+    "category": "mid"
+  },
+  {
+    "symbol": "MINDACORP",
+    "name": "Minda Corporation Ltd",
+    "market_cap_rank": 172,
+    "category": "mid"
+  },
+  {
+    "symbol": "MCX",
+    "name": "Multi Commodity Exchange of India Ltd",
+    "market_cap_rank": 173,
+    "category": "mid"
+  },
+  {
+    "symbol": "NAVINFLUOR",
+    "name": "Navin Fluorine International Ltd",
+    "market_cap_rank": 174,
+    "category": "mid"
+  },
+  {
+    "symbol": "NBCC",
+    "name": "NBCC (India) Ltd",
+    "market_cap_rank": 175,
+    "category": "mid"
+  },
+  {
+    "symbol": "NETWORK18",
+    "name": "Network18 Media & Investments Ltd",
+    "market_cap_rank": 176,
+    "category": "mid"
+  },
+  {
+    "symbol": "NH",
+    "name": "Narayana Hrudayalaya Ltd",
+    "market_cap_rank": 177,
+    "category": "mid"
+  },
+  {
+    "symbol": "NLCINDIA",
+    "name": "NLC India Ltd",
+    "market_cap_rank": 178,
+    "category": "mid"
+  },
+  {
+    "symbol": "NOCIL",
+    "name": "NOCIL Ltd",
+    "market_cap_rank": 179,
+    "category": "mid"
+  },
+  {
+    "symbol": "ORIENTELEC",
+    "name": "Orient Electric Ltd",
+    "market_cap_rank": 180,
+    "category": "mid"
+  },
+  {
+    "symbol": "PNBHOUSING",
+    "name": "PNB Housing Finance Ltd",
+    "market_cap_rank": 181,
+    "category": "mid"
+  },
+  {
+    "symbol": "ROUTE",
+    "name": "Route Mobile Ltd",
+    "market_cap_rank": 182,
+    "category": "mid"
+  },
+  {
+    "symbol": "RAYMOND",
+    "name": "Raymond Ltd",
+    "market_cap_rank": 183,
+    "category": "mid"
+  },
+  {
+    "symbol": "SONACOMS",
+    "name": "Sona BLW Precision Forgings Ltd",
+    "market_cap_rank": 184,
+    "category": "mid"
+  },
+  {
+    "symbol": "SUZLON",
+    "name": "Suzlon Energy Ltd",
+    "market_cap_rank": 185,
+    "category": "mid"
+  },
+  {
+    "symbol": "TATAINVEST",
+    "name": "Tata Investment Corporation Ltd",
+    "market_cap_rank": 186,
+    "category": "mid"
+  },
+  {
+    "symbol": "UJJIVANSFB",
+    "name": "Ujjivan Small Finance Bank Ltd",
+    "market_cap_rank": 187,
+    "category": "mid"
+  },
+  {
+    "symbol": "VIPIND",
+    "name": "VIP Industries Ltd",
+    "market_cap_rank": 188,
+    "category": "mid"
+  },
+  {
+    "symbol": "WELCORP",
+    "name": "Welspun Corp Ltd",
+    "market_cap_rank": 189,
+    "category": "mid"
+  },
+  {
+    "symbol": "ZENSARTECH",
+    "name": "Zensar Technologies Ltd",
+    "market_cap_rank": 190,
+    "category": "mid"
+  },
+  {
+    "symbol": "SUNDARMFIN",
+    "name": "Sundaram Finance Ltd",
+    "market_cap_rank": 191,
+    "category": "mid"
+  },
+  {
+    "symbol": "APLLTD",
+    "name": "Alembic Pharmaceuticals Ltd",
+    "market_cap_rank": 192,
+    "category": "mid"
+  },
+  {
+    "symbol": "ASTERDM",
+    "name": "Aster DM Healthcare Ltd",
+    "market_cap_rank": 193,
+    "category": "mid"
+  },
+  {
+    "symbol": "BALRAMCHIN",
+    "name": "Balrampur Chini Mills Ltd",
+    "market_cap_rank": 194,
+    "category": "mid"
+  },
+  {
+    "symbol": "BEML",
+    "name": "BEML Ltd",
+    "market_cap_rank": 195,
+    "category": "mid"
+  },
+  {
+    "symbol": "BLS",
+    "name": "BLS International Services Ltd",
+    "market_cap_rank": 196,
+    "category": "mid"
+  },
+  {
+    "symbol": "BLUESTARCO",
+    "name": "Blue Star Ltd",
+    "market_cap_rank": 197,
+    "category": "mid"
+  },
+  {
+    "symbol": "CANFINHOME",
+    "name": "Can Fin Homes Ltd",
+    "market_cap_rank": 198,
+    "category": "mid"
+  },
+  {
+    "symbol": "CEATLTD",
+    "name": "CEAT Ltd",
+    "market_cap_rank": 199,
+    "category": "mid"
+  },
+  {
+    "symbol": "M&MFIN",
+    "name": "Mahindra & Mahindra Financial Services Ltd",
+    "market_cap_rank": 200,
+    "category": "mid"
+  },
+  {
+    "symbol": "ALEMBICLTD",
+    "name": "Alembic Ltd",
+    "market_cap_rank": 201,
+    "category": "small"
+  },
+  {
+    "symbol": "ALOKINDS",
+    "name": "Alok Industries Ltd",
+    "market_cap_rank": 202,
+    "category": "small"
+  },
+  {
+    "symbol": "AMRUTANJAN",
+    "name": "Amrutanjan Health Care Ltd",
+    "market_cap_rank": 203,
+    "category": "small"
+  },
+  {
+    "symbol": "ANANTRAJ",
+    "name": "Anant Raj Ltd",
+    "market_cap_rank": 204,
+    "category": "small"
+  },
+  {
+    "symbol": "APARINDS",
+    "name": "Apar Industries Ltd",
+    "market_cap_rank": 205,
+    "category": "small"
+  },
+  {
+    "symbol": "ASHOKA",
+    "name": "Ashoka Buildcon Ltd",
+    "market_cap_rank": 206,
+    "category": "small"
+  },
+  {
+    "symbol": "ASTRAMICRO",
+    "name": "Astra Microwave Products Ltd",
+    "market_cap_rank": 207,
+    "category": "small"
+  },
+  {
+    "symbol": "AVANTIFEED",
+    "name": "Avanti Feeds Ltd",
+    "market_cap_rank": 208,
+    "category": "small"
+  },
+  {
+    "symbol": "BAJAJELEC",
+    "name": "Bajaj Electricals Ltd",
+    "market_cap_rank": 209,
+    "category": "small"
+  },
+  {
+    "symbol": "BALAJITELE",
+    "name": "Balaji Telefilms Ltd",
+    "market_cap_rank": 210,
+    "category": "small"
+  },
+  {
+    "symbol": "BANCOINDIA",
+    "name": "Banco Products (India) Ltd",
+    "market_cap_rank": 211,
+    "category": "small"
+  },
+  {
+    "symbol": "BOMDYEING",
+    "name": "The Bombay Dyeing & Mfg Co Ltd",
+    "market_cap_rank": 212,
+    "category": "small"
+  },
+  {
+    "symbol": "CAMPUS",
+    "name": "Campus Activewear Ltd",
+    "market_cap_rank": 213,
+    "category": "small"
+  },
+  {
+    "symbol": "CAPLIPOINT",
+    "name": "Caplin Point Laboratories Ltd",
+    "market_cap_rank": 214,
+    "category": "small"
+  },
+  {
+    "symbol": "CARBORUNIV",
+    "name": "Carborundum Universal Ltd",
+    "market_cap_rank": 215,
+    "category": "small"
+  },
+  {
+    "symbol": "CENTURYPLY",
+    "name": "Century Plyboards (India) Ltd",
+    "market_cap_rank": 216,
+    "category": "small"
+  },
+  {
+    "symbol": "CERA",
+    "name": "Cera Sanitaryware Ltd",
+    "market_cap_rank": 217,
+    "category": "small"
+  },
+  {
+    "symbol": "CHEVIOT",
+    "name": "Cheviot Company Ltd",
+    "market_cap_rank": 218,
+    "category": "small"
+  },
+  {
+    "symbol": "STYRENIX",
+    "name": "Styrenix Performance Materials Ltd",
+    "market_cap_rank": 219,
+    "category": "small"
+  },
+  {
+    "symbol": "COCHINSHIP",
+    "name": "Cochin Shipyard Ltd",
+    "market_cap_rank": 220,
+    "category": "small"
+  },
+  {
+    "symbol": "CRAFTSMAN",
+    "name": "Craftsman Automation Ltd",
+    "market_cap_rank": 221,
+    "category": "small"
+  },
+  {
+    "symbol": "DCBBANK",
+    "name": "DCB Bank Ltd",
+    "market_cap_rank": 222,
+    "category": "small"
+  },
+  {
+    "symbol": "DCMSHRIRAM",
+    "name": "DCM Shriram Ltd",
+    "market_cap_rank": 223,
+    "category": "small"
+  },
+  {
+    "symbol": "DEEPAKFERT",
+    "name": "Deepak Fertilisers & Petrochemicals Corp Ltd",
+    "market_cap_rank": 224,
+    "category": "small"
+  },
+  {
+    "symbol": "ADOR",
+    "name": "Ador Welding Ltd",
+    "market_cap_rank": 225,
+    "category": "small"
+  },
+  {
+    "symbol": "DODLA",
+    "name": "Dodla Dairy Ltd",
+    "market_cap_rank": 226,
+    "category": "small"
+  },
+  {
+    "symbol": "ECLERX",
+    "name": "eClerx Services Ltd",
+    "market_cap_rank": 227,
+    "category": "small"
+  },
+  {
+    "symbol": "EDELWEISS",
+    "name": "Edelweiss Financial Services Ltd",
+    "market_cap_rank": 228,
+    "category": "small"
+  },
+  {
+    "symbol": "EIDPARRY",
+    "name": "E.I.D. - Parry (India) Ltd",
+    "market_cap_rank": 229,
+    "category": "small"
+  },
+  {
+    "symbol": "ELECON",
+    "name": "Elecon Engineering Company Ltd",
+    "market_cap_rank": 230,
+    "category": "small"
+  },
+  {
+    "symbol": "ENGINERSIN",
+    "name": "Engineers India Ltd",
+    "market_cap_rank": 231,
+    "category": "small"
+  },
+  {
+    "symbol": "EQUITASBNK",
+    "name": "Equitas Small Finance Bank Ltd",
+    "market_cap_rank": 232,
+    "category": "small"
+  },
+  {
+    "symbol": "FDC",
+    "name": "FDC Ltd",
+    "market_cap_rank": 233,
+    "category": "small"
+  },
+  {
+    "symbol": "FINPIPE",
+    "name": "Finolex Industries Ltd",
+    "market_cap_rank": 234,
+    "category": "small"
+  },
+  {
+    "symbol": "GARFIBRES",
+    "name": "Garware Technical Fibres Ltd",
+    "market_cap_rank": 235,
+    "category": "small"
+  },
+  {
+    "symbol": "GATEWAY",
+    "name": "Gateway Distriparks Ltd",
+    "market_cap_rank": 236,
+    "category": "small"
+  },
+  {
+    "symbol": "GHCL",
+    "name": "GHCL Ltd",
+    "market_cap_rank": 237,
+    "category": "small"
+  },
+  {
+    "symbol": "GLENMARK",
+    "name": "Glenmark Pharmaceuticals Ltd",
+    "market_cap_rank": 238,
+    "category": "small"
+  },
+  {
+    "symbol": "GNFC",
+    "name": "Gujarat Narmada Valley Fertilizers & Chemicals Ltd",
+    "market_cap_rank": 239,
+    "category": "small"
+  },
+  {
+    "symbol": "GODFRYPHLP",
+    "name": "Godfrey Phillips India Ltd",
+    "market_cap_rank": 240,
+    "category": "small"
+  },
+  {
+    "symbol": "GRANULES",
+    "name": "Granules India Ltd",
+    "market_cap_rank": 241,
+    "category": "small"
+  },
+  {
+    "symbol": "GRAPHITE",
+    "name": "Graphite India Ltd",
+    "market_cap_rank": 242,
+    "category": "small"
+  },
+  {
+    "symbol": "GREENPANEL",
+    "name": "Greenpanel Industries Ltd",
+    "market_cap_rank": 243,
+    "category": "small"
+  },
+  {
+    "symbol": "GRINDWELL",
+    "name": "Grindwell Norton Ltd",
+    "market_cap_rank": 244,
+    "category": "small"
+  },
+  {
+    "symbol": "GSFC",
+    "name": "Gujarat State Fertilizers & Chemicals Ltd",
+    "market_cap_rank": 245,
+    "category": "small"
+  },
+  {
+    "symbol": "HEGAM",
+    "name": "HEG Advanced Materials Ltd",
+    "market_cap_rank": 246,
+    "category": "small"
+  },
+  {
+    "symbol": "HERITGFOOD",
+    "name": "Heritage Foods Ltd",
+    "market_cap_rank": 247,
+    "category": "small"
+  },
+  {
+    "symbol": "HIKAL",
+    "name": "Hikal Ltd",
+    "market_cap_rank": 248,
+    "category": "small"
+  },
+  {
+    "symbol": "HIMATSEIDE",
+    "name": "Himatsingka Seide Ltd",
+    "market_cap_rank": 249,
+    "category": "small"
+  },
+  {
+    "symbol": "HINDCOPPER",
+    "name": "Hindustan Copper Ltd",
+    "market_cap_rank": 250,
+    "category": "small"
+  },
+  {
+    "symbol": "HONAUT",
+    "name": "Honeywell Automation India Ltd",
+    "market_cap_rank": 251,
+    "category": "small"
+  },
+  {
+    "symbol": "SHAREINDIA",
+    "name": "Share India Securities Ltd",
+    "market_cap_rank": 252,
+    "category": "small"
+  },
+  {
+    "symbol": "IFCI",
+    "name": "IFCI Ltd",
+    "market_cap_rank": 253,
+    "category": "small"
+  },
+  {
+    "symbol": "MASFIN",
+    "name": "MAS Financial Services Ltd",
+    "market_cap_rank": 254,
+    "category": "small"
+  },
+  {
+    "symbol": "IMAGICAA",
+    "name": "Imagicaaworld Entertainment Ltd",
+    "market_cap_rank": 255,
+    "category": "small"
+  },
+  {
+    "symbol": "INDIACEM",
+    "name": "The India Cements Ltd",
+    "market_cap_rank": 256,
+    "category": "small"
+  },
+  {
+    "symbol": "INDIAGLYCO",
+    "name": "India Glycols Ltd",
+    "market_cap_rank": 257,
+    "category": "small"
+  },
+  {
+    "symbol": "ANDHRSUGAR",
+    "name": "The Andhra Sugars Ltd",
+    "market_cap_rank": 258,
+    "category": "small"
+  },
+  {
+    "symbol": "INOXWIND",
+    "name": "Inox Wind Ltd",
+    "market_cap_rank": 259,
+    "category": "small"
+  },
+  {
+    "symbol": "IONEXCHANG",
+    "name": "Ion Exchange (India) Ltd",
+    "market_cap_rank": 260,
+    "category": "small"
+  },
+  {
+    "symbol": "IPCALAB",
+    "name": "IPCA Laboratories Ltd",
+    "market_cap_rank": 261,
+    "category": "small"
+  },
+  {
+    "symbol": "ITDC",
+    "name": "India Tourism Development Corp Ltd",
+    "market_cap_rank": 262,
+    "category": "small"
+  },
+  {
+    "symbol": "J&KBANK",
+    "name": "The Jammu & Kashmir Bank Ltd",
+    "market_cap_rank": 263,
+    "category": "small"
+  },
+  {
+    "symbol": "JAGRAN",
+    "name": "Jagran Prakashan Ltd",
+    "market_cap_rank": 264,
+    "category": "small"
+  },
+  {
+    "symbol": "JAICORPLTD",
+    "name": "Jai Corp Ltd",
+    "market_cap_rank": 265,
+    "category": "small"
+  },
+  {
+    "symbol": "JAMNAAUTO",
+    "name": "Jamna Auto Industries Ltd",
+    "market_cap_rank": 266,
+    "category": "small"
+  },
+  {
+    "symbol": "JISLJALEQS",
+    "name": "Jain Irrigation Systems Ltd",
+    "market_cap_rank": 267,
+    "category": "small"
+  },
+  {
+    "symbol": "JKCEMENT",
+    "name": "JK Cement Ltd",
+    "market_cap_rank": 268,
+    "category": "small"
+  },
+  {
+    "symbol": "JKPAPER",
+    "name": "JK Paper Ltd",
+    "market_cap_rank": 269,
+    "category": "small"
+  },
+  {
+    "symbol": "JKTYRE",
+    "name": "JK Tyre & Industries Ltd",
+    "market_cap_rank": 270,
+    "category": "small"
+  },
+  {
+    "symbol": "JSL",
+    "name": "Jindal Stainless Ltd",
+    "market_cap_rank": 271,
+    "category": "small"
+  },
+  {
+    "symbol": "JTEKTINDIA",
+    "name": "JTEKT India Ltd",
+    "market_cap_rank": 272,
+    "category": "small"
+  },
+  {
+    "symbol": "JUSTDIAL",
+    "name": "Just Dial Ltd",
+    "market_cap_rank": 273,
+    "category": "small"
+  },
+  {
+    "symbol": "JYOTHYLAB",
+    "name": "Jyothy Labs Ltd",
+    "market_cap_rank": 274,
+    "category": "small"
+  },
+  {
+    "symbol": "KAJARIACER",
+    "name": "Kajaria Ceramics Ltd",
+    "market_cap_rank": 275,
+    "category": "small"
+  },
+  {
+    "symbol": "KPIL",
+    "name": "Kalpataru Projects International Ltd",
+    "market_cap_rank": 276,
+    "category": "small"
+  },
+  {
+    "symbol": "KARURVYSYA",
+    "name": "The Karur Vysya Bank Ltd",
+    "market_cap_rank": 277,
+    "category": "small"
+  },
+  {
+    "symbol": "KIRLOSENG",
+    "name": "Kirloskar Oil Engines Ltd",
+    "market_cap_rank": 278,
+    "category": "small"
+  },
+  {
+    "symbol": "KNRCON",
+    "name": "KNR Constructions Ltd",
+    "market_cap_rank": 279,
+    "category": "small"
+  },
+  {
+    "symbol": "KRBL",
+    "name": "KRBL Ltd",
+    "market_cap_rank": 280,
+    "category": "small"
+  },
+  {
+    "symbol": "KSB",
+    "name": "KSB Ltd",
+    "market_cap_rank": 281,
+    "category": "small"
+  },
+  {
+    "symbol": "KSCL",
+    "name": "Kaveri Seed Company Ltd",
+    "market_cap_rank": 282,
+    "category": "small"
+  },
+  {
+    "symbol": "KTKBANK",
+    "name": "The Karnataka Bank Ltd",
+    "market_cap_rank": 283,
+    "category": "small"
+  },
+  {
+    "symbol": "LATENTVIEW",
+    "name": "Latent View Analytics Ltd",
+    "market_cap_rank": 284,
+    "category": "small"
+  },
+  {
+    "symbol": "LAURUSLABS",
+    "name": "Laurus Labs Ltd",
+    "market_cap_rank": 285,
+    "category": "small"
+  },
+  {
+    "symbol": "LUXIND",
+    "name": "Lux Industries Ltd",
+    "market_cap_rank": 286,
+    "category": "small"
+  },
+  {
+    "symbol": "MAPMYINDIA",
+    "name": "CE Info Systems Ltd",
+    "market_cap_rank": 287,
+    "category": "small"
+  },
+  {
+    "symbol": "MAHLOG",
+    "name": "Mahindra Logistics Ltd",
+    "market_cap_rank": 288,
+    "category": "small"
+  },
+  {
+    "symbol": "MANAPPURAM",
+    "name": "Manappuram Finance Ltd",
+    "market_cap_rank": 289,
+    "category": "small"
+  },
+  {
+    "symbol": "MARKSANS",
+    "name": "Marksans Pharma Ltd",
+    "market_cap_rank": 290,
+    "category": "small"
+  },
+  {
+    "symbol": "MOIL",
+    "name": "MOIL Ltd",
+    "market_cap_rank": 291,
+    "category": "small"
+  },
+  {
+    "symbol": "MOTILALOFS",
+    "name": "Motilal Oswal Financial Services Ltd",
+    "market_cap_rank": 292,
+    "category": "small"
+  },
+  {
+    "symbol": "MTARTECH-BE",
+    "name": "MTAR Technologies Ltd",
+    "market_cap_rank": 293,
+    "category": "small"
+  },
+  {
+    "symbol": "RITES",
+    "name": "RITES Ltd",
+    "market_cap_rank": 294,
+    "category": "small"
+  },
+  {
+    "symbol": "NEOGEN",
+    "name": "Neogen Chemicals Ltd",
+    "market_cap_rank": 295,
+    "category": "small"
+  },
+  {
+    "symbol": "TRIVENI",
+    "name": "Triveni Engineering & Industries Ltd",
+    "market_cap_rank": 296,
+    "category": "small"
+  },
+  {
+    "symbol": "PRAJIND",
+    "name": "Praj Industries Ltd",
+    "market_cap_rank": 297,
+    "category": "small"
+  },
+  {
+    "symbol": "PRINCEPIPE",
+    "name": "Prince Pipes and Fittings Ltd",
+    "market_cap_rank": 298,
+    "category": "small"
+  },
+  {
+    "symbol": "RAIN",
+    "name": "Rain Industries Ltd",
+    "market_cap_rank": 299,
+    "category": "small"
+  },
+  {
+    "symbol": "RCF",
+    "name": "Rashtriya Chemicals and Fertilizers Ltd",
+    "market_cap_rank": 300,
+    "category": "small"
+  },
+  {
+    "symbol": "ADANIPOWER",
+    "name": "ADANI POWER",
+    "market_cap_rank": 301,
+    "category": "small"
+  },
+  {
+    "symbol": "TATATECH",
+    "name": "TATA TECHNOLOGIES",
+    "market_cap_rank": 302,
+    "category": "small"
+  },
+  {
+    "symbol": "PAYTM",
+    "name": "ONE 97 COMMUNICATIONS",
+    "market_cap_rank": 303,
+    "category": "small"
+  },
+  {
+    "symbol": "POLICYBZR",
+    "name": "PB FINTECH",
+    "market_cap_rank": 304,
+    "category": "small"
+  },
+  {
+    "symbol": "RVNL",
+    "name": "RAIL VIKAS NIGAM",
+    "market_cap_rank": 305,
+    "category": "small"
+  },
+  {
+    "symbol": "DIXON",
+    "name": "DIXON TECHNO (INDIA)",
+    "market_cap_rank": 306,
+    "category": "small"
+  },
+  {
+    "symbol": "MAZDOCK",
+    "name": "MAZAGON DOCK SHIPBUIL",
+    "market_cap_rank": 307,
+    "category": "small"
+  },
+  {
+    "symbol": "HUDCO",
+    "name": "HSG & URBAN DEV CORPN",
+    "market_cap_rank": 308,
+    "category": "small"
+  },
+  {
+    "symbol": "NHPC",
+    "name": "NHPC",
+    "market_cap_rank": 309,
+    "category": "small"
+  },
+  {
+    "symbol": "SJVN",
+    "name": "SJVN",
+    "market_cap_rank": 310,
+    "category": "small"
+  },
+  {
+    "symbol": "IDBI",
+    "name": "IDBI BANK",
+    "market_cap_rank": 311,
+    "category": "small"
+  },
+  {
+    "symbol": "ASTRAL",
+    "name": "ASTRAL",
+    "market_cap_rank": 312,
+    "category": "small"
+  },
+  {
+    "symbol": "ATGL",
+    "name": "ADANI TOTAL GAS",
+    "market_cap_rank": 313,
+    "category": "small"
+  },
+  {
+    "symbol": "AWL",
+    "name": "AWL AGRI BUSINESS",
+    "market_cap_rank": 314,
+    "category": "small"
+  },
+  {
+    "symbol": "ACC",
+    "name": "ACC",
+    "market_cap_rank": 315,
+    "category": "small"
+  },
+  {
+    "symbol": "AFFLE",
+    "name": "AFFLE 3I",
+    "market_cap_rank": 316,
+    "category": "small"
+  },
+  {
+    "symbol": "EASEMYTRIP",
+    "name": "EASY TRIP PLANNERS",
+    "market_cap_rank": 317,
+    "category": "small"
+  },
+  {
+    "symbol": "MEDANTA",
+    "name": "GLOBAL HEALTH",
+    "market_cap_rank": 318,
+    "category": "small"
+  },
+  {
+    "symbol": "POONAWALLA",
+    "name": "POONAWALLA FINCORP",
+    "market_cap_rank": 319,
+    "category": "small"
+  },
+  {
+    "symbol": "PRESTIGE",
+    "name": "PRESTIGE ESTATE",
+    "market_cap_rank": 320,
+    "category": "small"
+  },
+  {
+    "symbol": "TIINDIA",
+    "name": "TUBE INVEST OF INDIA",
+    "market_cap_rank": 321,
+    "category": "small"
+  },
+  {
+    "symbol": "FORTIS",
+    "name": "FORTIS HEALTHCARE",
+    "market_cap_rank": 322,
+    "category": "small"
+  },
+  {
+    "symbol": "GLAND",
+    "name": "GLAND PHARMA",
+    "market_cap_rank": 323,
+    "category": "small"
+  },
+  {
+    "symbol": "ITI",
+    "name": "ITI",
+    "market_cap_rank": 324,
+    "category": "small"
+  },
+  {
+    "symbol": "JINDALSAW",
+    "name": "JINDAL SAW",
+    "market_cap_rank": 325,
+    "category": "small"
+  },
+  {
+    "symbol": "KALYANKJIL",
+    "name": "KALYAN JEWELLERS IND",
+    "market_cap_rank": 326,
+    "category": "small"
+  },
+  {
+    "symbol": "KEI",
+    "name": "KEI INDUSTRIES",
+    "market_cap_rank": 327,
+    "category": "small"
+  },
+  {
+    "symbol": "KIOCL",
+    "name": "KIOCL",
+    "market_cap_rank": 328,
+    "category": "small"
+  },
+  {
+    "symbol": "MSUMI",
+    "name": "MOTHERSON SUMI WRNG IND L",
+    "market_cap_rank": 329,
+    "category": "small"
+  },
+  {
+    "symbol": "OIL",
+    "name": "OIL INDIA",
+    "market_cap_rank": 330,
+    "category": "small"
+  },
+  {
+    "symbol": "PHOENIXLTD",
+    "name": "THE PHOENIX MILLS",
+    "market_cap_rank": 331,
+    "category": "small"
+  },
+  {
+    "symbol": "TEJASNET",
+    "name": "TEJAS NETWORKS",
+    "market_cap_rank": 332,
+    "category": "small"
+  },
+  {
+    "symbol": "TRITURBINE",
+    "name": "TRIVENI TURBINE",
+    "market_cap_rank": 333,
+    "category": "small"
+  },
+  {
+    "symbol": "UNOMINDA",
+    "name": "UNO MINDA",
+    "market_cap_rank": 334,
+    "category": "small"
+  },
+  {
+    "symbol": "UPL",
+    "name": "UPL",
+    "market_cap_rank": 335,
+    "category": "small"
+  },
+  {
+    "symbol": "VGUARD",
+    "name": "V-GUARD IND",
+    "market_cap_rank": 336,
+    "category": "small"
+  },
+  {
+    "symbol": "AAVAS",
+    "name": "AAVAS FINANCIERS",
+    "market_cap_rank": 337,
+    "category": "small"
+  },
+  {
+    "symbol": "ABCAPITAL",
+    "name": "ADITYA BIRLA CAPITAL",
+    "market_cap_rank": 338,
+    "category": "small"
+  },
+  {
+    "symbol": "AGI",
+    "name": "AGI GREENPAC",
+    "market_cap_rank": 339,
+    "category": "small"
+  },
+  {
+    "symbol": "APLAPOLLO",
+    "name": "APL APOLLO TUBES",
+    "market_cap_rank": 340,
+    "category": "small"
+  },
+  {
+    "symbol": "DELHIVERY",
+    "name": "DELHIVERY",
+    "market_cap_rank": 341,
+    "category": "small"
+  },
+  {
+    "symbol": "DEVYANI",
+    "name": "DEVYANI INTERNATIONAL",
+    "market_cap_rank": 342,
+    "category": "small"
+  },
+  {
+    "symbol": "ENDURANCE",
+    "name": "ENDURANCE TECHNO.",
+    "market_cap_rank": 343,
+    "category": "small"
+  },
+  {
+    "symbol": "FACT",
+    "name": "FACT",
+    "market_cap_rank": 344,
+    "category": "small"
+  },
+  {
+    "symbol": "HOMEFIRST",
+    "name": "HOME FIRST FIN CO IND",
+    "market_cap_rank": 345,
+    "category": "small"
+  },
+  {
+    "symbol": "RADICO",
+    "name": "RADICO KHAITAN",
+    "market_cap_rank": 346,
+    "category": "small"
+  },
+  {
+    "symbol": "RHIM",
+    "name": "RHI MAGNESITA INDIA",
+    "market_cap_rank": 347,
+    "category": "small"
+  },
+  {
+    "symbol": "SBFC",
+    "name": "SBFC FINANCE",
+    "market_cap_rank": 348,
+    "category": "small"
+  },
+  {
+    "symbol": "SCHAEFFLER",
+    "name": "SCHAEFFLER INDIA",
+    "market_cap_rank": 349,
+    "category": "small"
+  },
+  {
+    "symbol": "SOBHA",
+    "name": "SOBHA",
+    "market_cap_rank": 350,
+    "category": "small"
+  },
+  {
+    "symbol": "STARHEALTH",
+    "name": "STAR HEALTH & AL INS CO L",
+    "market_cap_rank": 351,
+    "category": "small"
+  },
+  {
+    "symbol": "SUMICHEM",
+    "name": "SUMITOMO CHEM INDIA",
+    "market_cap_rank": 352,
+    "category": "small"
+  },
+  {
+    "symbol": "SUPREMEIND",
+    "name": "SUPREME INDUSTRIES",
+    "market_cap_rank": 353,
+    "category": "small"
+  },
+  {
+    "symbol": "SYRMA",
+    "name": "SYRMA SGS TECHNOLOGY",
+    "market_cap_rank": 354,
+    "category": "small"
+  },
+  {
+    "symbol": "TRIDENT",
+    "name": "TRIDENT",
+    "market_cap_rank": 355,
+    "category": "small"
+  },
+  {
+    "symbol": "UTIAMC",
+    "name": "UTI ASSET MNGMT CO",
+    "market_cap_rank": 356,
+    "category": "small"
+  },
+  {
+    "symbol": "APCOTEXIND",
+    "name": "APCOTEX INDUSTRIES LIMITE",
+    "market_cap_rank": 357,
+    "category": "small"
+  },
+  {
+    "symbol": "ANDHRAPAP",
+    "name": "ANDHRA PAPER",
+    "market_cap_rank": 358,
+    "category": "small"
+  },
+  {
+    "symbol": "ARENTERP",
+    "name": "RAJDARSHAN INDUSTRIES",
+    "market_cap_rank": 359,
+    "category": "small"
+  },
+  {
+    "symbol": "TCPLPACK",
+    "name": "TCPL PACKAGING",
+    "market_cap_rank": 360,
+    "category": "small"
+  },
+  {
+    "symbol": "ARVIND",
+    "name": "ARVIND",
+    "market_cap_rank": 361,
+    "category": "small"
+  },
+  {
+    "symbol": "UNIDT",
+    "name": "UNITED DRILLING TOOLS",
+    "market_cap_rank": 362,
+    "category": "small"
+  },
+  {
+    "symbol": "ASHAPURMIN",
+    "name": "ASHAPURA MINECHEM",
+    "market_cap_rank": 363,
+    "category": "small"
+  },
+  {
+    "symbol": "ASHIMASYN",
+    "name": "ASHIMA",
+    "market_cap_rank": 364,
+    "category": "small"
+  },
+  {
+    "symbol": "AAKASH",
+    "name": "AAKASH EXPLORATION SER L",
+    "market_cap_rank": 365,
+    "category": "small"
+  },
+  {
+    "symbol": "ADL",
+    "name": "ARCHIDPLY DECOR",
+    "market_cap_rank": 366,
+    "category": "small"
+  },
+  {
+    "symbol": "NIRAJ",
+    "name": "NIRAJ CEMENT STRUC",
+    "market_cap_rank": 367,
+    "category": "small"
+  },
+  {
+    "symbol": "CHEMCON",
+    "name": "CHEMCON SPECIAL CHEM",
+    "market_cap_rank": 368,
+    "category": "small"
+  },
+  {
+    "symbol": "GICRE",
+    "name": "GENERAL INS CORP OF INDIA",
+    "market_cap_rank": 369,
+    "category": "small"
+  },
+  {
+    "symbol": "AUTOAXLES",
+    "name": "AUTOMOTIVE AXLES",
+    "market_cap_rank": 370,
+    "category": "small"
+  },
+  {
+    "symbol": "BAJAJHLDNG",
+    "name": "BAJAJ HOLDINGS & INVS",
+    "market_cap_rank": 371,
+    "category": "small"
+  },
+  {
+    "symbol": "BAJAJHIND",
+    "name": "BAJAJ HINDUSTHAN SUGAR LT",
+    "market_cap_rank": 372,
+    "category": "small"
+  },
+  {
+    "symbol": "VALIANTORG",
+    "name": "VALIANT ORGANICS",
+    "market_cap_rank": 373,
+    "category": "small"
+  },
+  {
+    "symbol": "BALMLAWRIE",
+    "name": "BALMER LAWRIE & CO",
+    "market_cap_rank": 374,
+    "category": "small"
+  },
+  {
+    "symbol": "BANARBEADS",
+    "name": "BANARAS BEADS",
+    "market_cap_rank": 375,
+    "category": "small"
+  },
+  {
+    "symbol": "BANARISUG",
+    "name": "BANNARI AMMAN SUGARS",
+    "market_cap_rank": 376,
+    "category": "small"
+  },
+  {
+    "symbol": "ROML",
+    "name": "RAJ OIL MILLS",
+    "market_cap_rank": 377,
+    "category": "small"
+  },
+  {
+    "symbol": "BASF",
+    "name": "BASF INDIA",
+    "market_cap_rank": 378,
+    "category": "small"
+  },
+  {
+    "symbol": "BBTC",
+    "name": "BOMBAY BURMAH TRADING COR",
+    "market_cap_rank": 379,
+    "category": "small"
+  },
+  {
+    "symbol": "SINTERCOM",
+    "name": "SINTERCOM INDIA",
+    "market_cap_rank": 380,
+    "category": "small"
+  },
+  {
+    "symbol": "GLOBE",
+    "name": "GLOBE ENTERPRISE (I)",
+    "market_cap_rank": 381,
+    "category": "small"
+  },
+  {
+    "symbol": "NIACL",
+    "name": "THE NEW INDIA ASSU CO",
+    "market_cap_rank": 382,
+    "category": "small"
+  },
+  {
+    "symbol": "BERGEPAINT",
+    "name": "BERGER PAINTS (I)",
+    "market_cap_rank": 383,
+    "category": "small"
+  },
+  {
+    "symbol": "BEPL",
+    "name": "BHANSALI ENG. POLYMERS LT",
+    "market_cap_rank": 384,
+    "category": "small"
+  },
+  {
+    "symbol": "IFGLEXPOR",
+    "name": "IFGL REFRACTORIES",
+    "market_cap_rank": 385,
+    "category": "small"
+  },
+  {
+    "symbol": "OSWALGREEN",
+    "name": "OSWAL GREENTECH",
+    "market_cap_rank": 386,
+    "category": "small"
+  },
+  {
+    "symbol": "BIRLACABLE",
+    "name": "BIRLA CABLE",
+    "market_cap_rank": 387,
+    "category": "small"
+  },
+  {
+    "symbol": "BIRLACORPN",
+    "name": "BIRLA CORPORATION",
+    "market_cap_rank": 388,
+    "category": "small"
+  },
+  {
+    "symbol": "ICEMAKE",
+    "name": "ICE MAKE REFRIGERAT",
+    "market_cap_rank": 389,
+    "category": "small"
+  },
+  {
+    "symbol": "BLUEDART",
+    "name": "BLUE DART EXPRESS",
+    "market_cap_rank": 390,
+    "category": "small"
+  },
+  {
+    "symbol": "BPL",
+    "name": "BPL",
+    "market_cap_rank": 391,
+    "category": "small"
+  },
+  {
+    "symbol": "BSL",
+    "name": "BSL",
+    "market_cap_rank": 392,
+    "category": "small"
+  },
+  {
+    "symbol": "LIKHITHA",
+    "name": "LIKHITHA INFRASTRUC",
+    "market_cap_rank": 393,
+    "category": "small"
+  },
+  {
+    "symbol": "CENTENKA",
+    "name": "CENTURY ENKA",
+    "market_cap_rank": 394,
+    "category": "small"
+  },
+  {
+    "symbol": "ABREL",
+    "name": "ADITYA BIRLA REAL EST",
+    "market_cap_rank": 395,
+    "category": "small"
+  },
+  {
+    "symbol": "IGARASHI",
+    "name": "IGARASHI MOTORS INDIA",
+    "market_cap_rank": 396,
+    "category": "small"
+  },
+  {
+    "symbol": "DNAMEDIA",
+    "name": "DILIGENT MEDIA CORP",
+    "market_cap_rank": 397,
+    "category": "small"
+  },
+  {
+    "symbol": "HEMIPROP",
+    "name": "HEMISPHERE PROP IND",
+    "market_cap_rank": 398,
+    "category": "small"
+  },
+  {
+    "symbol": "DICIND",
+    "name": "DIC INDIA",
+    "market_cap_rank": 399,
+    "category": "small"
+  },
+  {
+    "symbol": "SHRADHA",
+    "name": "SHRADHA REALTY",
+    "market_cap_rank": 400,
+    "category": "small"
+  },
+  {
+    "symbol": "SHALBY",
+    "name": "SHALBY",
+    "market_cap_rank": 401,
+    "category": "small"
+  },
+  {
+    "symbol": "SUDARCOLOR",
+    "name": "SUDARSHAN COLORNT IND",
+    "market_cap_rank": 402,
+    "category": "small"
+  },
+  {
+    "symbol": "COROMANDEL",
+    "name": "COROMANDEL INTERNTL.",
+    "market_cap_rank": 403,
+    "category": "small"
+  },
+  {
+    "symbol": "COSMOFIRST",
+    "name": "COSMO FIRST",
+    "market_cap_rank": 404,
+    "category": "small"
+  },
+  {
+    "symbol": "CRISIL",
+    "name": "CRISIL",
+    "market_cap_rank": 405,
+    "category": "small"
+  },
+  {
+    "symbol": "KEEPLEARN",
+    "name": "DSJ KEEP LEARNING",
+    "market_cap_rank": 406,
+    "category": "small"
+  },
+  {
+    "symbol": "DALMIASUG",
+    "name": "DALMIA BHARAT SUG IN",
+    "market_cap_rank": 407,
+    "category": "small"
+  },
+  {
+    "symbol": "SHIVATEX",
+    "name": "SHIVA TEXYARN",
+    "market_cap_rank": 408,
+    "category": "small"
+  },
+  {
+    "symbol": "DCM",
+    "name": "DCM",
+    "market_cap_rank": 409,
+    "category": "small"
+  },
+  {
+    "symbol": "BSHSL",
+    "name": "BOMBAY SUPER HYBRID SEEDS",
+    "market_cap_rank": 410,
+    "category": "small"
+  },
+  {
+    "symbol": "DCW",
+    "name": "DCW",
+    "market_cap_rank": 411,
+    "category": "small"
+  },
+  {
+    "symbol": "BANKA",
+    "name": "BANKA BIOLOO",
+    "market_cap_rank": 412,
+    "category": "small"
+  },
+  {
+    "symbol": "DHAMPURSUG",
+    "name": "DHAMPUR SUGAR MILLS",
+    "market_cap_rank": 413,
+    "category": "small"
+  },
+  {
+    "symbol": "KHAICHEM",
+    "name": "KHAITAN CHEM & FERT",
+    "market_cap_rank": 414,
+    "category": "small"
+  },
+  {
+    "symbol": "EIHOTEL",
+    "name": "EIH  - OBEROI HOTELS",
+    "market_cap_rank": 415,
+    "category": "small"
+  },
+  {
+    "symbol": "ORCHPHARMA",
+    "name": "ORCHID PHARMA",
+    "market_cap_rank": 416,
+    "category": "small"
+  },
+  {
+    "symbol": "ELECTCAST",
+    "name": "ELECTROSTEEL CASTINGS",
+    "market_cap_rank": 417,
+    "category": "small"
+  },
+  {
+    "symbol": "DPABHUSHAN",
+    "name": "D. P. ABHUSHAN",
+    "market_cap_rank": 418,
+    "category": "small"
+  },
+  {
+    "symbol": "ELGIEQUIP",
+    "name": "ELGI EQUIPMENTS",
+    "market_cap_rank": 419,
+    "category": "small"
+  },
+  {
+    "symbol": "PGHL",
+    "name": "PROCTER & GAMBLE HEALTH L",
+    "market_cap_rank": 420,
+    "category": "small"
+  },
+  {
+    "symbol": "ESABINDIA",
+    "name": "ESAB INDIA",
+    "market_cap_rank": 421,
+    "category": "small"
+  },
+  {
+    "symbol": "SUBEXLTD",
+    "name": "SUBEX",
+    "market_cap_rank": 422,
+    "category": "small"
+  },
+  {
+    "symbol": "EPL",
+    "name": "EPL",
+    "market_cap_rank": 423,
+    "category": "small"
+  },
+  {
+    "symbol": "EUROTEXIND",
+    "name": "EUROTEX INDUSTRIES",
+    "market_cap_rank": 424,
+    "category": "small"
+  },
+  {
+    "symbol": "AARON",
+    "name": "AARON INDUSTRIES",
+    "market_cap_rank": 425,
+    "category": "small"
+  },
+  {
+    "symbol": "FINCABLES",
+    "name": "FINOLEX CABLES",
+    "market_cap_rank": 426,
+    "category": "small"
+  },
+  {
+    "symbol": "UFLEX",
+    "name": "UFLEX",
+    "market_cap_rank": 427,
+    "category": "small"
+  },
+  {
+    "symbol": "FOSECOIND",
+    "name": "FOSECO INDIA",
+    "market_cap_rank": 428,
+    "category": "small"
+  },
+  {
+    "symbol": "GABRIEL",
+    "name": "GABRIEL INDIA",
+    "market_cap_rank": 429,
+    "category": "small"
+  },
+  {
+    "symbol": "DANGEE",
+    "name": "DANGEE DUMS",
+    "market_cap_rank": 430,
+    "category": "small"
+  },
+  {
+    "symbol": "GTECJAINX",
+    "name": "G-TEC JAINX EDUCATION",
+    "market_cap_rank": 431,
+    "category": "small"
+  },
+  {
+    "symbol": "APOLLO",
+    "name": "APOLLO MICRO SYSTEMS",
+    "market_cap_rank": 432,
+    "category": "small"
+  },
+  {
+    "symbol": "GICHSGFIN",
+    "name": "GIC HOUSING FINANCE",
+    "market_cap_rank": 433,
+    "category": "small"
+  },
+  {
+    "symbol": "GIPCL",
+    "name": "GUJ IND POW CO.",
+    "market_cap_rank": 434,
+    "category": "small"
+  },
+  {
+    "symbol": "GLAXO",
+    "name": "GLAXOSMITHKLINE PHARMA LT",
+    "market_cap_rank": 435,
+    "category": "small"
+  },
+  {
+    "symbol": "GLFL",
+    "name": "GUJARAT LEASE FINANCING L",
+    "market_cap_rank": 436,
+    "category": "small"
+  },
+  {
+    "symbol": "GTL",
+    "name": "GTL",
+    "market_cap_rank": 437,
+    "category": "small"
+  },
+  {
+    "symbol": "NEWGEN",
+    "name": "NEWGEN SOFTWARE TECH",
+    "market_cap_rank": 438,
+    "category": "small"
+  },
+  {
+    "symbol": "GMBREW",
+    "name": "G M BREWERIES",
+    "market_cap_rank": 439,
+    "category": "small"
+  },
+  {
+    "symbol": "AMBER",
+    "name": "AMBER ENTERPRISES (I)",
+    "market_cap_rank": 440,
+    "category": "small"
+  },
+  {
+    "symbol": "FMGOETZE",
+    "name": "FEDERAL-MOGUL GOETZE (IND",
+    "market_cap_rank": 441,
+    "category": "small"
+  },
+  {
+    "symbol": "KANSAINER",
+    "name": "KANSAI NEROLAC PAINTS",
+    "market_cap_rank": 442,
+    "category": "small"
+  },
+  {
+    "symbol": "PRAXIS",
+    "name": "PRAXIS HOME RETAIL",
+    "market_cap_rank": 443,
+    "category": "small"
+  },
+  {
+    "symbol": "GOODYEAR",
+    "name": "GOODYEAR INDIA",
+    "market_cap_rank": 444,
+    "category": "small"
+  },
+  {
+    "symbol": "DELTAMAGNT",
+    "name": "DELTA MANUFACTURING",
+    "market_cap_rank": 445,
+    "category": "small"
+  },
+  {
+    "symbol": "CASTROLIND",
+    "name": "CASTROL INDIA",
+    "market_cap_rank": 446,
+    "category": "small"
+  },
+  {
+    "symbol": "GUJALKALI",
+    "name": "GUJARAT ALKALIES & CHEM",
+    "market_cap_rank": 447,
+    "category": "small"
+  },
+  {
+    "symbol": "GFLLIMITED",
+    "name": "GFL",
+    "market_cap_rank": 448,
+    "category": "small"
+  },
+  {
+    "symbol": "HARRMALAYA",
+    "name": "HARRISON MALAYALAM",
+    "market_cap_rank": 449,
+    "category": "small"
+  },
+  {
+    "symbol": "GALAXYSURF",
+    "name": "GALAXY SURFACTANTS",
+    "market_cap_rank": 450,
+    "category": "small"
+  },
+  {
+    "symbol": "MARINE",
+    "name": "MARINE ELECTRICAL (I)",
+    "market_cap_rank": 451,
+    "category": "small"
+  },
+  {
+    "symbol": "SDBL",
+    "name": "SOM DIST & BREW",
+    "market_cap_rank": 452,
+    "category": "small"
+  },
+  {
+    "symbol": "HINDCOMPOS",
+    "name": "HINDUSTAN COMPOSITES",
+    "market_cap_rank": 453,
+    "category": "small"
+  },
+  {
+    "symbol": "HCC",
+    "name": "HINDUSTAN CONSTRUCTION CO",
+    "market_cap_rank": 454,
+    "category": "small"
+  },
+  {
+    "symbol": "HINDOILEXP",
+    "name": "HINDUSTAN OIL EXPLORATION",
+    "market_cap_rank": 455,
+    "category": "small"
+  },
+  {
+    "symbol": "HINDPETRO",
+    "name": "HINDUSTAN PETROLEUM CORPORATION  - HPCL",
+    "market_cap_rank": 456,
+    "category": "small"
+  },
+  {
+    "symbol": "GLOBAL",
+    "name": "GLOBAL EDUCATION",
+    "market_cap_rank": 457,
+    "category": "small"
+  },
+  {
+    "symbol": "HINDZINC",
+    "name": "HINDUSTAN ZINC",
+    "market_cap_rank": 458,
+    "category": "small"
+  },
+  {
+    "symbol": "SANOFI",
+    "name": "SANOFI INDIA",
+    "market_cap_rank": 459,
+    "category": "small"
+  },
+  {
+    "symbol": "HLVLTD",
+    "name": "HLV",
+    "market_cap_rank": 460,
+    "category": "small"
+  },
+  {
+    "symbol": "BIRLANU",
+    "name": "BIRLANU",
+    "market_cap_rank": 461,
+    "category": "small"
+  },
+  {
+    "symbol": "JSWDULUX",
+    "name": "JSW DULUX",
+    "market_cap_rank": 462,
+    "category": "small"
+  },
+  {
+    "symbol": "REPL",
+    "name": "RUDRABHISHEK ENTERP",
+    "market_cap_rank": 463,
+    "category": "small"
+  },
+  {
+    "symbol": "IFBAGRO",
+    "name": "IFB AGRO INDUSTRIES",
+    "market_cap_rank": 464,
+    "category": "small"
+  },
+  {
+    "symbol": "IFBIND",
+    "name": "IFB INDUSTRIES",
+    "market_cap_rank": 465,
+    "category": "small"
+  },
+  {
+    "symbol": "RBA",
+    "name": "RESTAURANT BRAND ASIA",
+    "market_cap_rank": 466,
+    "category": "small"
+  },
+  {
+    "symbol": "SHIVAMILLS",
+    "name": "SHIVA MILLS",
+    "market_cap_rank": 467,
+    "category": "small"
+  },
+  {
+    "symbol": "INDIANHUME",
+    "name": "INDIAN HUME PIPE CO.",
+    "market_cap_rank": 468,
+    "category": "small"
+  },
+  {
+    "symbol": "RVHL",
+    "name": "RAVINDER HEIGHTS",
+    "market_cap_rank": 469,
+    "category": "small"
+  },
+  {
+    "symbol": "GMMPFAUDLR",
+    "name": "GMM PFAUDLER",
+    "market_cap_rank": 470,
+    "category": "small"
+  },
+  {
+    "symbol": "GILLETTE",
+    "name": "GILLETTE INDIA",
+    "market_cap_rank": 471,
+    "category": "small"
+  },
+  {
+    "symbol": "TARC",
+    "name": "TARC",
+    "market_cap_rank": 472,
+    "category": "small"
+  },
+  {
+    "symbol": "MGEL",
+    "name": "MANGALAM GLOBAL ENT",
+    "market_cap_rank": 473,
+    "category": "small"
+  },
+  {
+    "symbol": "INGERRAND",
+    "name": "INGERSOLL-RAND INDIA",
+    "market_cap_rank": 474,
+    "category": "small"
+  },
+  {
+    "symbol": "LINDEINDIA",
+    "name": "LINDE INDIA",
+    "market_cap_rank": 475,
+    "category": "small"
+  },
+  {
+    "symbol": "BECTORFOOD",
+    "name": "MRS BECTORS FOOD SPE",
+    "market_cap_rank": 476,
+    "category": "small"
+  },
+  {
+    "symbol": "SUNDROP",
+    "name": "SUNDROP BRANDS",
+    "market_cap_rank": 477,
+    "category": "small"
+  },
+  {
+    "symbol": "JAYBARMARU",
+    "name": "JAY BHARAT MARUTI",
+    "market_cap_rank": 478,
+    "category": "small"
+  },
+  {
+    "symbol": "JAYSREETEA",
+    "name": "JAYSHREE TEA & INDUSTRIES",
+    "market_cap_rank": 479,
+    "category": "small"
+  },
+  {
+    "symbol": "JINDALPOLY",
+    "name": "JINDAL POLY FILMS",
+    "market_cap_rank": 480,
+    "category": "small"
+  },
+  {
+    "symbol": "KANPRPLA",
+    "name": "KANPUR PLASTIPACK",
+    "market_cap_rank": 481,
+    "category": "small"
+  },
+  {
+    "symbol": "AWHCL",
+    "name": "ANTONY WASTE HDG CELL",
+    "market_cap_rank": 482,
+    "category": "small"
+  },
+  {
+    "symbol": "JYOTISTRUC",
+    "name": "JYOTI STRUCTURES",
+    "market_cap_rank": 483,
+    "category": "small"
+  },
+  {
+    "symbol": "KAKATCEM",
+    "name": "KAKATIYA CEM SUGAR &IND L",
+    "market_cap_rank": 484,
+    "category": "small"
+  },
+  {
+    "symbol": "KAMATHOTEL",
+    "name": "KAMAT HOTELS (I)",
+    "market_cap_rank": 485,
+    "category": "small"
+  },
+  {
+    "symbol": "KCP",
+    "name": "KCP",
+    "market_cap_rank": 486,
+    "category": "small"
+  },
+  {
+    "symbol": "KESORAMIND",
+    "name": "KESORAM INDUSTRIES",
+    "market_cap_rank": 487,
+    "category": "small"
+  },
+  {
+    "symbol": "CARYSIL",
+    "name": "CARYSIL",
+    "market_cap_rank": 488,
+    "category": "small"
+  },
+  {
+    "symbol": "KOPRAN",
+    "name": "KOPRAN",
+    "market_cap_rank": 489,
+    "category": "small"
+  },
+  {
+    "symbol": "WEALTH",
+    "name": "WEALTH FRST PORT. MG.",
+    "market_cap_rank": 490,
+    "category": "small"
+  },
+  {
+    "symbol": "KREBSBIO",
+    "name": "KREBS BIOCHEMICALS & IND",
+    "market_cap_rank": 491,
+    "category": "small"
+  },
+  {
+    "symbol": "LMW",
+    "name": "LMW",
+    "market_cap_rank": 492,
+    "category": "small"
+  },
+  {
+    "symbol": "LIBERTSHOE",
+    "name": "LIBERTY SHOES",
+    "market_cap_rank": 493,
+    "category": "small"
+  },
+  {
+    "symbol": "AHLADA",
+    "name": "AHLADA ENGINEERS",
+    "market_cap_rank": 494,
+    "category": "small"
+  },
+  {
+    "symbol": "LUMAXIND",
+    "name": "LUMAX INDUSTRIES",
+    "market_cap_rank": 495,
+    "category": "small"
+  },
+  {
+    "symbol": "INDIGOPNTS",
+    "name": "INDIGO PAINTS",
+    "market_cap_rank": 496,
+    "category": "small"
+  },
+  {
+    "symbol": "VTL",
+    "name": "VARDHMAN TEXTILES",
+    "market_cap_rank": 497,
+    "category": "small"
+  },
+  {
+    "symbol": "MAHSCOOTER",
+    "name": "MAHARASHTRA SCOOTERS",
+    "market_cap_rank": 498,
+    "category": "small"
+  },
+  {
+    "symbol": "MAHSEAMLES",
+    "name": "MAHARASHTRA SEAMLESS",
+    "market_cap_rank": 499,
+    "category": "small"
+  },
+  {
+    "symbol": "MANGLMCEM",
+    "name": "MANGALAM CEMENT",
+    "market_cap_rank": 500,
+    "category": "small"
+  },
+  {
+    "symbol": "STOVEKRAFT",
+    "name": "STOVE KRAFT",
+    "market_cap_rank": 501,
+    "category": "small"
+  },
+  {
+    "symbol": "MARALOVER",
+    "name": "MARAL OVERSEAS",
+    "market_cap_rank": 502,
+    "category": "small"
+  },
+  {
+    "symbol": "BDL",
+    "name": "BHARAT DYNAMICS",
+    "market_cap_rank": 503,
+    "category": "small"
+  },
+  {
+    "symbol": "RAJMET",
+    "name": "RAJNANDINI METAL",
+    "market_cap_rank": 504,
+    "category": "small"
+  },
+  {
+    "symbol": "AKG",
+    "name": "AKG EXIM",
+    "market_cap_rank": 505,
+    "category": "small"
+  },
+  {
+    "symbol": "TSFINV",
+    "name": "TSF INVESTMENTS",
+    "market_cap_rank": 506,
+    "category": "small"
+  },
+  {
+    "symbol": "GENCON",
+    "name": "GENERIC ENG CONS PROJ",
+    "market_cap_rank": 507,
+    "category": "small"
+  },
+  {
+    "symbol": "ONIDA",
+    "name": "ONIDA ELECTRONICS",
+    "market_cap_rank": 508,
+    "category": "small"
+  },
+  {
+    "symbol": "MODIRUBBER",
+    "name": "MODI RUBBER",
+    "market_cap_rank": 509,
+    "category": "small"
+  },
+  {
+    "symbol": "MODTHREAD",
+    "name": "MODERN THREADS INDIA",
+    "market_cap_rank": 510,
+    "category": "small"
+  },
+  {
+    "symbol": "PENINLAND",
+    "name": "PENINSULA LAND",
+    "market_cap_rank": 511,
+    "category": "small"
+  },
+  {
+    "symbol": "MOREPENLAB",
+    "name": "MOREPEN LAB.",
+    "market_cap_rank": 512,
+    "category": "small"
+  },
+  {
+    "symbol": "MOTOGENFIN",
+    "name": "MOTOR & GENERAL FINANCE L",
+    "market_cap_rank": 513,
+    "category": "small"
+  },
+  {
+    "symbol": "IRISDOREME",
+    "name": "IRIS CLOTHINGS",
+    "market_cap_rank": 514,
+    "category": "small"
+  },
+  {
+    "symbol": "MRPL",
+    "name": "MRPL",
+    "market_cap_rank": 515,
+    "category": "small"
+  },
+  {
+    "symbol": "HLEGLAS",
+    "name": "HLE GLASCOAT",
+    "market_cap_rank": 516,
+    "category": "small"
+  },
+  {
+    "symbol": "MTNL",
+    "name": "MAHANAGAR TELEPHONE NIGAM",
+    "market_cap_rank": 517,
+    "category": "small"
+  },
+  {
+    "symbol": "BESTAGRO",
+    "name": "BEST AGROLIFE",
+    "market_cap_rank": 518,
+    "category": "small"
+  },
+  {
+    "symbol": "MUNJALSHOW",
+    "name": "MUNJAL SHOWA",
+    "market_cap_rank": 519,
+    "category": "small"
+  },
+  {
+    "symbol": "MURUDCERA",
+    "name": "MURUDESHWAR CERAMICS",
+    "market_cap_rank": 520,
+    "category": "small"
+  },
+  {
+    "symbol": "HEIDELBERG",
+    "name": "HEIDELBERGCEMENT (I)",
+    "market_cap_rank": 521,
+    "category": "small"
+  },
+  {
+    "symbol": "NCC",
+    "name": "NCC",
+    "market_cap_rank": 522,
+    "category": "small"
+  },
+  {
+    "symbol": "SMCGLOBAL",
+    "name": "SMC GLOBAL SECURITIES",
+    "market_cap_rank": 523,
+    "category": "small"
+  },
+  {
+    "symbol": "JAYNECOIND",
+    "name": "JAYASWAL NECO INDUSTR",
+    "market_cap_rank": 524,
+    "category": "small"
+  },
+  {
+    "symbol": "NAVNETEDUL",
+    "name": "NAVNEET EDUCATION",
+    "market_cap_rank": 525,
+    "category": "small"
+  },
+  {
+    "symbol": "NELCO",
+    "name": "NELCO",
+    "market_cap_rank": 526,
+    "category": "small"
+  },
+  {
+    "symbol": "SANDHAR",
+    "name": "SANDHAR TECHNOLOGIES",
+    "market_cap_rank": 527,
+    "category": "small"
+  },
+  {
+    "symbol": "NEULANDLAB",
+    "name": "NEULAND LAB",
+    "market_cap_rank": 528,
+    "category": "small"
+  },
+  {
+    "symbol": "NILKAMAL",
+    "name": "NILKAMAL",
+    "market_cap_rank": 529,
+    "category": "small"
+  },
+  {
+    "symbol": "RAILTEL",
+    "name": "RAILTEL CORP OF IND",
+    "market_cap_rank": 530,
+    "category": "small"
+  },
+  {
+    "symbol": "NIRLON",
+    "name": "NIRLON",
+    "market_cap_rank": 531,
+    "category": "small"
+  },
+  {
+    "symbol": "NKIND",
+    "name": "NK INDUSTRIES",
+    "market_cap_rank": 532,
+    "category": "small"
+  },
+  {
+    "symbol": "CENTRUM",
+    "name": "CENTRUM CAPITAL",
+    "market_cap_rank": 533,
+    "category": "small"
+  },
+  {
+    "symbol": "MIDHANI",
+    "name": "MISHRA DHATU NIGAM",
+    "market_cap_rank": 534,
+    "category": "small"
+  },
+  {
+    "symbol": "ONWARDTEC",
+    "name": "ONWARD TECHNOLOGIES",
+    "market_cap_rank": 535,
+    "category": "small"
+  },
+  {
+    "symbol": "SILGO",
+    "name": "SILGO RETAIL",
+    "market_cap_rank": 536,
+    "category": "small"
+  },
+  {
+    "symbol": "ORIENTHOT",
+    "name": "ORIENT HOTELS",
+    "market_cap_rank": 537,
+    "category": "small"
+  },
+  {
+    "symbol": "ORIENTPPR",
+    "name": "ORIENT PAPER AND INDS",
+    "market_cap_rank": 538,
+    "category": "small"
+  },
+  {
+    "symbol": "BCLIND",
+    "name": "BCL INDUSTRIES",
+    "market_cap_rank": 539,
+    "category": "small"
+  },
+  {
+    "symbol": "OSWALAGRO",
+    "name": "OSWAL AGRO MILLS",
+    "market_cap_rank": 540,
+    "category": "small"
+  },
+  {
+    "symbol": "PGHH",
+    "name": "P&G HYGIENE & HEALTH CARE",
+    "market_cap_rank": 541,
+    "category": "small"
+  },
+  {
+    "symbol": "HUHTAMAKI",
+    "name": "HUHTAMAKI INDIA",
+    "market_cap_rank": 542,
+    "category": "small"
+  },
+  {
+    "symbol": "AMJLAND",
+    "name": "AMJ LAND HOLDINGS",
+    "market_cap_rank": 543,
+    "category": "small"
+  },
+  {
+    "symbol": "PEARLPOLY",
+    "name": "PEARL POLYMERS",
+    "market_cap_rank": 544,
+    "category": "small"
+  },
+  {
+    "symbol": "HERANBA",
+    "name": "HERANBA INDUSTRIES",
+    "market_cap_rank": 545,
+    "category": "small"
+  },
+  {
+    "symbol": "SEAMECLTD",
+    "name": "SEAMEC",
+    "market_cap_rank": 546,
+    "category": "small"
+  },
+  {
+    "symbol": "PFIZER",
+    "name": "PFIZER",
+    "market_cap_rank": 547,
+    "category": "small"
+  },
+  {
+    "symbol": "DRCSYSTEMS",
+    "name": "DRC SYSTEMS INDIA",
+    "market_cap_rank": 548,
+    "category": "small"
+  },
+  {
+    "symbol": "PCBL",
+    "name": "PCBL CHEMICAL",
+    "market_cap_rank": 549,
+    "category": "small"
+  },
+  {
+    "symbol": "PHOENXINTL",
+    "name": "PHOENIX INTERNATIONAL",
+    "market_cap_rank": 550,
+    "category": "small"
+  },
+  {
+    "symbol": "POLYPLEX",
+    "name": "POLYPLEX CORPORATION",
+    "market_cap_rank": 551,
+    "category": "small"
+  },
+  {
+    "symbol": "PRAKASH",
+    "name": "PRAKASH INDUSTRIES",
+    "market_cap_rank": 552,
+    "category": "small"
+  },
+  {
+    "symbol": "PRECOT",
+    "name": "PRECOT",
+    "market_cap_rank": 553,
+    "category": "small"
+  },
+  {
+    "symbol": "BUTTERFLY",
+    "name": "BTRFLY GANDHI APPL",
+    "market_cap_rank": 554,
+    "category": "small"
+  },
+  {
+    "symbol": "PRECWIRE",
+    "name": "PRECISION WIRES INDIA",
+    "market_cap_rank": 555,
+    "category": "small"
+  },
+  {
+    "symbol": "PRSMJOHNSN",
+    "name": "PRISM JOHNSON",
+    "market_cap_rank": 556,
+    "category": "small"
+  },
+  {
+    "symbol": "JUBLINGREA",
+    "name": "JUBILANT INGREVIA",
+    "market_cap_rank": 557,
+    "category": "small"
+  },
+  {
+    "symbol": "RSWM",
+    "name": "RSWM",
+    "market_cap_rank": 558,
+    "category": "small"
+  },
+  {
+    "symbol": "CHEMFAB",
+    "name": "CHEMFAB ALKALIS",
+    "market_cap_rank": 559,
+    "category": "small"
+  },
+  {
+    "symbol": "RAJSREESUG",
+    "name": "RAJSHREE SUGAR & CHEMICAL",
+    "market_cap_rank": 560,
+    "category": "small"
+  },
+  {
+    "symbol": "ARVEE",
+    "name": "ARVEE LABORATORIES I",
+    "market_cap_rank": 561,
+    "category": "small"
+  },
+  {
+    "symbol": "RALLIS",
+    "name": "RALLIS INDIA",
+    "market_cap_rank": 562,
+    "category": "small"
+  },
+  {
+    "symbol": "ANURAS",
+    "name": "ANUPAM RASAYAN INDIA",
+    "market_cap_rank": 563,
+    "category": "small"
+  },
+  {
+    "symbol": "RANASUG",
+    "name": "RANA SUGARS",
+    "market_cap_rank": 564,
+    "category": "small"
+  },
+  {
+    "symbol": "LXCHEM",
+    "name": "LAXMI ORGANIC INDUS",
+    "market_cap_rank": 565,
+    "category": "small"
+  },
+  {
+    "symbol": "RANEHOLDIN",
+    "name": "RANE HOLDINGS",
+    "market_cap_rank": 566,
+    "category": "small"
+  },
+  {
+    "symbol": "HITECH",
+    "name": "HI-TECH PIPES",
+    "market_cap_rank": 567,
+    "category": "small"
+  },
+  {
+    "symbol": "RICOAUTO",
+    "name": "RICO AUTO INDUSTRIES",
+    "market_cap_rank": 568,
+    "category": "small"
+  },
+  {
+    "symbol": "RIIL",
+    "name": "RELIANCE INDUSTRIAL INFRA",
+    "market_cap_rank": 569,
+    "category": "small"
+  },
+  {
+    "symbol": "RUBYMILLS",
+    "name": "THE RUBY MILLS",
+    "market_cap_rank": 570,
+    "category": "small"
+  },
+  {
+    "symbol": "SAKHTISUG",
+    "name": "SAKTHI SUGARS",
+    "market_cap_rank": 571,
+    "category": "small"
+  },
+  {
+    "symbol": "SURYODAY",
+    "name": "SURYODAY SMALL FIN BK",
+    "market_cap_rank": 572,
+    "category": "small"
+  },
+  {
+    "symbol": "ORTINGLOBE",
+    "name": "ORTIN GLOBAL",
+    "market_cap_rank": 573,
+    "category": "small"
+  },
+  {
+    "symbol": "NAZARA",
+    "name": "NAZARA TECHNOLOGIES",
+    "market_cap_rank": 574,
+    "category": "small"
+  },
+  {
+    "symbol": "SANDESH",
+    "name": "SANDESH",
+    "market_cap_rank": 575,
+    "category": "small"
+  },
+  {
+    "symbol": "SUVIDHAA",
+    "name": "SUVIDHAA INFOSERVE",
+    "market_cap_rank": 576,
+    "category": "small"
+  },
+  {
+    "symbol": "WONDERLA",
+    "name": "WONDERLA HOLIDAYS",
+    "market_cap_rank": 577,
+    "category": "small"
+  },
+  {
+    "symbol": "KOHINOOR",
+    "name": "KOHINOOR FOODS",
+    "market_cap_rank": 578,
+    "category": "small"
+  },
+  {
+    "symbol": "SAURASHCEM",
+    "name": "SAURASHTRA CEMENT",
+    "market_cap_rank": 579,
+    "category": "small"
+  },
+  {
+    "symbol": "SOTL",
+    "name": "SAVITA OIL TECHNOLO.",
+    "market_cap_rank": 580,
+    "category": "small"
+  },
+  {
+    "symbol": "SCI",
+    "name": "SHIPPING CORP OF INDIA LT",
+    "market_cap_rank": 581,
+    "category": "small"
+  },
+  {
+    "symbol": "SESHAPAPER",
+    "name": "SESHASAYEE PAPER & BOARDS",
+    "market_cap_rank": 582,
+    "category": "small"
+  },
+  {
+    "symbol": "SHANTIGEAR",
+    "name": "SHANTHI GEARS",
+    "market_cap_rank": 583,
+    "category": "small"
+  },
+  {
+    "symbol": "INDOSTAR",
+    "name": "INDOSTAR CAPITAL FIN",
+    "market_cap_rank": 584,
+    "category": "small"
+  },
+  {
+    "symbol": "SHREDIGCEM",
+    "name": "SHREE DIGVIJAY CEM CO",
+    "market_cap_rank": 585,
+    "category": "small"
+  },
+  {
+    "symbol": "SHREECEM",
+    "name": "SHREE CEMENT",
+    "market_cap_rank": 586,
+    "category": "small"
+  },
+  {
+    "symbol": "SHREYANIND",
+    "name": "SHREYANS INDUSTRIES",
+    "market_cap_rank": 587,
+    "category": "small"
+  },
+  {
+    "symbol": "HONDAPOWER",
+    "name": "HONDA I POWER PRODUCT",
+    "market_cap_rank": 588,
+    "category": "small"
+  },
+  {
+    "symbol": "SIEL",
+    "name": "SUPERIOR INDUSTRIAL ENT L",
+    "market_cap_rank": 589,
+    "category": "small"
+  },
+  {
+    "symbol": "BORORENEW",
+    "name": "BOROSIL RENEWABLES",
+    "market_cap_rank": 590,
+    "category": "small"
+  },
+  {
+    "symbol": "SIMPLEXINF",
+    "name": "SIMPLEX INFRASTRUCTURES L",
+    "market_cap_rank": 591,
+    "category": "small"
+  },
+  {
+    "symbol": "SKFINDIA",
+    "name": "SKF INDIA",
+    "market_cap_rank": 592,
+    "category": "small"
+  },
+  {
+    "symbol": "LODHA",
+    "name": "LODHA DEVELOPERS",
+    "market_cap_rank": 593,
+    "category": "small"
+  },
+  {
+    "symbol": "NITIRAJ",
+    "name": "NITIRAJ ENGINEERS",
+    "market_cap_rank": 594,
+    "category": "small"
+  },
+  {
+    "symbol": "SPIC",
+    "name": "SPIC",
+    "market_cap_rank": 595,
+    "category": "small"
+  },
+  {
+    "symbol": "SRF",
+    "name": "SRF",
+    "market_cap_rank": 596,
+    "category": "small"
+  },
+  {
+    "symbol": "TEMBO",
+    "name": "TEMBO GLOBAL IND",
+    "market_cap_rank": 597,
+    "category": "small"
+  },
+  {
+    "symbol": "STARPAPER",
+    "name": "STAR PAPER MILLS",
+    "market_cap_rank": 598,
+    "category": "small"
+  },
+  {
+    "symbol": "DEEPINDS",
+    "name": "DEEP INDUSTRIES",
+    "market_cap_rank": 599,
+    "category": "small"
+  },
+  {
+    "symbol": "SUBROS",
+    "name": "SUBROS",
+    "market_cap_rank": 600,
+    "category": "small"
+  },
+  {
+    "symbol": "SUDARSCHEM",
+    "name": "SUDARSHAN CHEMICAL INDS L",
+    "market_cap_rank": 601,
+    "category": "small"
+  },
+  {
+    "symbol": "ISGEC",
+    "name": "ISGEC HEAVY ENG",
+    "market_cap_rank": 602,
+    "category": "small"
+  },
+  {
+    "symbol": "SUNDRMFAST",
+    "name": "SUNDRAM FASTENERS",
+    "market_cap_rank": 603,
+    "category": "small"
+  },
+  {
+    "symbol": "SUNFLAG",
+    "name": "SUNFLAG IRON AND STEEL CO",
+    "market_cap_rank": 604,
+    "category": "small"
+  },
+  {
+    "symbol": "SURYAROSNI",
+    "name": "SURYA ROSHNI",
+    "market_cap_rank": 605,
+    "category": "small"
+  },
+  {
+    "symbol": "SWARAJENG",
+    "name": "SWARAJ ENGINES",
+    "market_cap_rank": 606,
+    "category": "small"
+  },
+  {
+    "symbol": "SMLMAH",
+    "name": "SML MAHINDRA",
+    "market_cap_rank": 607,
+    "category": "small"
+  },
+  {
+    "symbol": "AGARIND",
+    "name": "AGARWAL INDS CORP",
+    "market_cap_rank": 608,
+    "category": "small"
+  },
+  {
+    "symbol": "TAINWALCHM",
+    "name": "TAINWALA CHEMICAL AND PLA",
+    "market_cap_rank": 609,
+    "category": "small"
+  },
+  {
+    "symbol": "AJOONI",
+    "name": "AJOONI BIOTECH",
+    "market_cap_rank": 610,
+    "category": "small"
+  },
+  {
+    "symbol": "BBOX",
+    "name": "BLACK BOX",
+    "market_cap_rank": 611,
+    "category": "small"
+  },
+  {
+    "symbol": "TECILCHEM",
+    "name": "TECIL CHEMICALS",
+    "market_cap_rank": 612,
+    "category": "small"
+  },
+  {
+    "symbol": "TFCILTD",
+    "name": "TOURISM FINANCE CORP. OF",
+    "market_cap_rank": 613,
+    "category": "small"
+  },
+  {
+    "symbol": "THERMAX",
+    "name": "THERMAX",
+    "market_cap_rank": 614,
+    "category": "small"
+  },
+  {
+    "symbol": "THOMASCOOK",
+    "name": "THOMAS COOK (INDIA)",
+    "market_cap_rank": 615,
+    "category": "small"
+  },
+  {
+    "symbol": "CLSEL",
+    "name": "CHAMAN LAL SETIA EXP",
+    "market_cap_rank": 616,
+    "category": "small"
+  },
+  {
+    "symbol": "TIRUMALCHM",
+    "name": "THIRUMALAI CHEMICALS",
+    "market_cap_rank": 617,
+    "category": "small"
+  },
+  {
+    "symbol": "TNPETRO",
+    "name": "TAMILNADU PETROPRODUCTS L",
+    "market_cap_rank": 618,
+    "category": "small"
+  },
+  {
+    "symbol": "TNTELE",
+    "name": "TAMILNADU TELECOMMUNICATI",
+    "market_cap_rank": 619,
+    "category": "small"
+  },
+  {
+    "symbol": "TTKPRESTIG",
+    "name": "TTK PRESTIGE",
+    "market_cap_rank": 620,
+    "category": "small"
+  },
+  {
+    "symbol": "UNICHEMLAB",
+    "name": "UNICHEM LABORATORIES",
+    "market_cap_rank": 621,
+    "category": "small"
+  },
+  {
+    "symbol": "MOKSH",
+    "name": "MOKSH ORNAMENTS",
+    "market_cap_rank": 622,
+    "category": "small"
+  },
+  {
+    "symbol": "UNITECH",
+    "name": "UNITECH",
+    "market_cap_rank": 623,
+    "category": "small"
+  },
+  {
+    "symbol": "UNIVCABLES",
+    "name": "UNIVERSAL CABLES",
+    "market_cap_rank": 624,
+    "category": "small"
+  },
+  {
+    "symbol": "JUBLPHARMA",
+    "name": "JUBILANT PHARMOVA",
+    "market_cap_rank": 625,
+    "category": "small"
+  },
+  {
+    "symbol": "VARDMNPOLY",
+    "name": "VARDHMAN POLYTEX",
+    "market_cap_rank": 626,
+    "category": "small"
+  },
+  {
+    "symbol": "SOLARA",
+    "name": "SOLARA ACTIVE PHA SCI",
+    "market_cap_rank": 627,
+    "category": "small"
+  },
+  {
+    "symbol": "VESUVIUS",
+    "name": "VESUVIUS INDIA",
+    "market_cap_rank": 628,
+    "category": "small"
+  },
+  {
+    "symbol": "GAYAHWS",
+    "name": "GAYATRI HIGHWAYS",
+    "market_cap_rank": 629,
+    "category": "small"
+  },
+  {
+    "symbol": "VINDHYATEL",
+    "name": "VINDHYA TELELINKS",
+    "market_cap_rank": 630,
+    "category": "small"
+  },
+  {
+    "symbol": "VLSFINANCE",
+    "name": "VLS FINANCE",
+    "market_cap_rank": 631,
+    "category": "small"
+  },
+  {
+    "symbol": "VSTIND",
+    "name": "VST INDUSTRIES",
+    "market_cap_rank": 632,
+    "category": "small"
+  },
+  {
+    "symbol": "WALCHANNAG",
+    "name": "WALCHANDNAGAR INDUSTRIES",
+    "market_cap_rank": 633,
+    "category": "small"
+  },
+  {
+    "symbol": "FINEORG",
+    "name": "FINE ORGANIC IND.",
+    "market_cap_rank": 634,
+    "category": "small"
+  },
+  {
+    "symbol": "WATERBASE",
+    "name": "WATERBASE",
+    "market_cap_rank": 635,
+    "category": "small"
+  },
+  {
+    "symbol": "WEIZMANIND",
+    "name": "WEIZMANN",
+    "market_cap_rank": 636,
+    "category": "small"
+  },
+  {
+    "symbol": "VENKEYS",
+    "name": "VENKY S (INDIA)",
+    "market_cap_rank": 637,
+    "category": "small"
+  },
+  {
+    "symbol": "WHEELS",
+    "name": "WHEELS INDIA",
+    "market_cap_rank": 638,
+    "category": "small"
+  },
+  {
+    "symbol": "WILLAMAGOR",
+    "name": "WILLIAMSON MAGOR",
+    "market_cap_rank": 639,
+    "category": "small"
+  },
+  {
+    "symbol": "WIPRO",
+    "name": "WIPRO",
+    "market_cap_rank": 640,
+    "category": "small"
+  },
+  {
+    "symbol": "WSTCSTPAPR",
+    "name": "WEST COAST PAPER MILLS LT",
+    "market_cap_rank": 641,
+    "category": "small"
+  },
+  {
+    "symbol": "VINEETLAB",
+    "name": "VINEET LABORATORIES",
+    "market_cap_rank": 642,
+    "category": "small"
+  },
+  {
+    "symbol": "ARIHANTCAP",
+    "name": "ARIHANT CAPITAL MKTS",
+    "market_cap_rank": 643,
+    "category": "small"
+  },
+  {
+    "symbol": "ZODIACLOTH",
+    "name": "ZODIAC CLOTHING CO.",
+    "market_cap_rank": 644,
+    "category": "small"
+  },
+  {
+    "symbol": "ZUARIIND",
+    "name": "ZUARI INDUSTRIES",
+    "market_cap_rank": 645,
+    "category": "small"
+  },
+  {
+    "symbol": "BHARATRAS",
+    "name": "BHARAT RASAYAN",
+    "market_cap_rank": 646,
+    "category": "small"
+  },
+  {
+    "symbol": "TOKYOPLAST",
+    "name": "TOKYO PLAST INTL",
+    "market_cap_rank": 647,
+    "category": "small"
+  },
+  {
+    "symbol": "VARROC",
+    "name": "VARROC ENGINEERING",
+    "market_cap_rank": 648,
+    "category": "small"
+  },
+  {
+    "symbol": "SOMANYCERA",
+    "name": "SOMANY CERAMICS",
+    "market_cap_rank": 649,
+    "category": "small"
+  },
+  {
+    "symbol": "HATSUN",
+    "name": "HATSUN AGRO PRODUCT",
+    "market_cap_rank": 650,
+    "category": "small"
+  },
+  {
+    "symbol": "PREMIERPOL",
+    "name": "PREMIER POLYFILM",
+    "market_cap_rank": 651,
+    "category": "small"
+  },
+  {
+    "symbol": "KHAITANLTD",
+    "name": "KHAITAN (INDIA)LTD.",
+    "market_cap_rank": 652,
+    "category": "small"
+  },
+  {
+    "symbol": "NATCOPHARM",
+    "name": "NATCO PHARMA",
+    "market_cap_rank": 653,
+    "category": "small"
+  },
+  {
+    "symbol": "GOCLCORP",
+    "name": "GOCL CORPORATION",
+    "market_cap_rank": 654,
+    "category": "small"
+  },
+  {
+    "symbol": "REMSONSIND",
+    "name": "REMSONS INDUSTRIES",
+    "market_cap_rank": 655,
+    "category": "small"
+  },
+  {
+    "symbol": "PARASPETRO",
+    "name": "PARAS PETROFILS",
+    "market_cap_rank": 656,
+    "category": "small"
+  },
+  {
+    "symbol": "TNPL",
+    "name": "TAMILNADU NEWSPRT & PAPER",
+    "market_cap_rank": 657,
+    "category": "small"
+  },
+  {
+    "symbol": "GREENPLY",
+    "name": "GREENPLY INDUSTRIES",
+    "market_cap_rank": 658,
+    "category": "small"
+  },
+  {
+    "symbol": "CORALFINAC",
+    "name": "CORAL INDIA FIN & HOUS LT",
+    "market_cap_rank": 659,
+    "category": "small"
+  },
+  {
+    "symbol": "PVP",
+    "name": "PVP VENTURES",
+    "market_cap_rank": 660,
+    "category": "small"
+  },
+  {
+    "symbol": "NAVA",
+    "name": "NAVA",
+    "market_cap_rank": 661,
+    "category": "small"
+  },
+  {
+    "symbol": "AUSOMENT",
+    "name": "AUSOM ENTERPRISE",
+    "market_cap_rank": 662,
+    "category": "small"
+  },
+  {
+    "symbol": "EIMCOELECO",
+    "name": "EIMCO ELECON (INDIA)",
+    "market_cap_rank": 663,
+    "category": "small"
+  },
+  {
+    "symbol": "JAYAGROGN",
+    "name": "JAYANT AGRO ORGANICS",
+    "market_cap_rank": 664,
+    "category": "small"
+  },
+  {
+    "symbol": "PANACEABIO",
+    "name": "PANACEA BIOTEC",
+    "market_cap_rank": 665,
+    "category": "small"
+  },
+  {
+    "symbol": "MARICO",
+    "name": "MARICO",
+    "market_cap_rank": 666,
+    "category": "small"
+  },
+  {
+    "symbol": "SILINV",
+    "name": "SIL INVESTMENTS",
+    "market_cap_rank": 667,
+    "category": "small"
+  },
+  {
+    "symbol": "HBSL",
+    "name": "HB STOCKHOLDINGS",
+    "market_cap_rank": 668,
+    "category": "small"
+  },
+  {
+    "symbol": "SAMBHAAV",
+    "name": "SAMBHAAV MEDIA",
+    "market_cap_rank": 669,
+    "category": "small"
+  },
+  {
+    "symbol": "REGENCERAM",
+    "name": "REGENCY CERAMICS",
+    "market_cap_rank": 670,
+    "category": "small"
+  },
+  {
+    "symbol": "BIOFILCHEM",
+    "name": "BIOFIL CHEM & PHARMA",
+    "market_cap_rank": 671,
+    "category": "small"
+  },
+  {
+    "symbol": "KEYFINSERV",
+    "name": "KEYNOTE FIN SERV",
+    "market_cap_rank": 672,
+    "category": "small"
+  },
+  {
+    "symbol": "NORBTEAEXP",
+    "name": "NORBEN TEA & EXPORTS",
+    "market_cap_rank": 673,
+    "category": "small"
+  },
+  {
+    "symbol": "ZENITHEXPO",
+    "name": "ZENITH EXPORTS",
+    "market_cap_rank": 674,
+    "category": "small"
+  },
+  {
+    "symbol": "SUNDRMBRAK",
+    "name": "SUNDARAM BRAK LININGS",
+    "market_cap_rank": 675,
+    "category": "small"
+  },
+  {
+    "symbol": "SANGAMIND",
+    "name": "SANGAM (INDIA)",
+    "market_cap_rank": 676,
+    "category": "small"
+  },
+  {
+    "symbol": "SOMATEX",
+    "name": "SOMA TEXTILES & INDUST LT",
+    "market_cap_rank": 677,
+    "category": "small"
+  },
+  {
+    "symbol": "ZFSTEERING",
+    "name": "Z F STEERING GEAR (I)",
+    "market_cap_rank": 678,
+    "category": "small"
+  },
+  {
+    "symbol": "WENDT",
+    "name": "WENDT (INDIA)",
+    "market_cap_rank": 679,
+    "category": "small"
+  },
+  {
+    "symbol": "HDFCAMC",
+    "name": "HDFC AMC",
+    "market_cap_rank": 680,
+    "category": "small"
+  },
+  {
+    "symbol": "DENORA",
+    "name": "DE NORA INDIA",
+    "market_cap_rank": 681,
+    "category": "small"
+  },
+  {
+    "symbol": "STERTOOLS",
+    "name": "STERLING TOOLS",
+    "market_cap_rank": 682,
+    "category": "small"
+  },
+  {
+    "symbol": "PUNJABCHEM",
+    "name": "PUNJAB CHEM & CROP PROT L",
+    "market_cap_rank": 683,
+    "category": "small"
+  },
+  {
+    "symbol": "GULFOILLUB",
+    "name": "GULF OIL LUB. IND.",
+    "market_cap_rank": 684,
+    "category": "small"
+  },
+  {
+    "symbol": "MIRZAINT",
+    "name": "MIRZA INTERNATIONAL LIMIT",
+    "market_cap_rank": 685,
+    "category": "small"
+  },
+  {
+    "symbol": "CREDITACC",
+    "name": "CREDITACCESS GRAMEEN",
+    "market_cap_rank": 686,
+    "category": "small"
+  },
+  {
+    "symbol": "INDIANCARD",
+    "name": "INDIAN CARD CLOTHING CO.",
+    "market_cap_rank": 687,
+    "category": "small"
+  },
+  {
+    "symbol": "HAWKINCOOK",
+    "name": "HAWKINS COOKERS",
+    "market_cap_rank": 688,
+    "category": "small"
+  },
+  {
+    "symbol": "ELECTHERM",
+    "name": "ELECTROTHERM (I)",
+    "market_cap_rank": 689,
+    "category": "small"
+  },
+  {
+    "symbol": "ELPROINTL",
+    "name": "ELPRO INTERNATIONAL",
+    "market_cap_rank": 690,
+    "category": "small"
+  },
+  {
+    "symbol": "DYNAMATECH",
+    "name": "DYNAMATIC TECHNOLOGIES",
+    "market_cap_rank": 691,
+    "category": "small"
+  },
+  {
+    "symbol": "GUJRAFFIA",
+    "name": "GUJARAT RAFFIA INDUST",
+    "market_cap_rank": 692,
+    "category": "small"
+  },
+  {
+    "symbol": "ATLASCYCLE",
+    "name": "ATLAS CYCLE (HARYANA)",
+    "market_cap_rank": 693,
+    "category": "small"
+  },
+  {
+    "symbol": "RAMCOIND",
+    "name": "RAMCO INDUSTRIES",
+    "market_cap_rank": 694,
+    "category": "small"
+  },
+  {
+    "symbol": "KOTHARIPET",
+    "name": "KOTHARI PETROCHEM",
+    "market_cap_rank": 695,
+    "category": "small"
+  },
+  {
+    "symbol": "SBCL",
+    "name": "SHIVALIK BIMETAL CON.",
+    "market_cap_rank": 696,
+    "category": "small"
+  },
+  {
+    "symbol": "SHYAMMETL",
+    "name": "SHYAM METALICS AND ENGY L",
+    "market_cap_rank": 697,
+    "category": "small"
+  },
+  {
+    "symbol": "SKMEGGPROD",
+    "name": "SKM EGG PROD EXPORT(I) LT",
+    "market_cap_rank": 698,
+    "category": "small"
+  },
+  {
+    "symbol": "BANKINDIA",
+    "name": "BANK OF INDIA",
+    "market_cap_rank": 699,
+    "category": "small"
+  },
+  {
+    "symbol": "INDNIPPON",
+    "name": "INDIA NIPPON ELECT",
+    "market_cap_rank": 700,
+    "category": "small"
+  }
+]

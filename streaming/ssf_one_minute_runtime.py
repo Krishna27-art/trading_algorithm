@@ -63,18 +63,109 @@ class SSFOneMinuteRuntime:
 
         all_symbols = list(self._stock_symbols | self._index_symbols)
 
-        # Build token_to_symbol map
+        # Build token_to_symbol map using ONLY real resolved Kite tokens.
         token_to_sym: Dict[int, str] = {}
+
         for sym in all_symbols:
             tok = None
-            if kite_client is not None:
-                try:
-                    tok = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
-                except Exception:
-                    tok = None
+
+            if kite_client is None:
+                logger.warning(
+                    "[SSFOneMinuteRuntime] No Kite client; "
+                    "cannot resolve token for %s",
+                    sym,
+                )
+                continue
+
+            try:
+                tok = instrument_resolver.resolve_token(
+                    sym,
+                    exchange="NSE",
+                    kite_client=kite_client,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[SSFOneMinuteRuntime] Token resolution failed "
+                    "for %s: %s: %s",
+                    sym,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+
             if tok is None:
-                tok = abs(hash(sym)) % 10000000
-            token_to_sym[int(tok)] = sym
+                logger.error(
+                    "[SSFOneMinuteRuntime] No real NSE Kite token "
+                    "resolved for %s; symbol will not be subscribed.",
+                    sym,
+                )
+                continue
+
+            try:
+                real_token = int(tok)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                logger.error(
+                    "[SSFOneMinuteRuntime] Invalid Kite token for %s: %r",
+                    sym,
+                    tok,
+                )
+                continue
+
+            if real_token <= 0:
+                logger.error(
+                    "[SSFOneMinuteRuntime] Non-positive Kite token for %s: %s",
+                    sym,
+                    real_token,
+                )
+                continue
+
+            existing = token_to_sym.get(
+                real_token
+            )
+
+            if (
+                existing is not None
+                and existing != sym
+            ):
+                logger.error(
+                    "[SSFOneMinuteRuntime] Kite token collision: "
+                    "token=%s already belongs to %s, rejecting %s.",
+                    real_token,
+                    existing,
+                    sym,
+                )
+                continue
+
+            token_to_sym[
+                real_token
+            ] = sym
+
+        if not token_to_sym:
+            raise RuntimeError(
+                "SSFOneMinuteRuntime cannot start: "
+                "no valid real Kite instrument tokens were resolved."
+            )
+
+        resolved_stock_count = sum(
+            1
+            for sym in self._stock_symbols
+            if any(
+                mapped_sym == sym
+                for mapped_sym in token_to_sym.values()
+            )
+        )
+
+        resolved_index_count = sum(
+            1
+            for sym in self._index_symbols
+            if any(
+                mapped_sym == sym
+                for mapped_sym in token_to_sym.values()
+            )
+        )
 
         # 1-minute aggregator with require_vwap_for_callback=False (indices don't have VWAP)
         self._aggregator = MultiSymbolCandleAggregator(
@@ -89,8 +180,11 @@ class SSFOneMinuteRuntime:
 
         self._running = True
         logger.info(
-            "[SSFOneMinuteRuntime] Initialized for %d stocks and %d sector indices.",
+            "[SSFOneMinuteRuntime] Real token resolution: "
+            "%d/%d stocks, %d/%d sector indices.",
+            resolved_stock_count,
             len(self._stock_symbols),
+            resolved_index_count,
             len(self._index_symbols),
         )
 

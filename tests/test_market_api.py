@@ -1,7 +1,4 @@
-"""
-Unit and integration tests for GET /api/market/prices (300-stock live market endpoint).
-"""
-
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -18,9 +15,10 @@ def test_market_prices_unauthenticated():
         assert res["stocks"] == []
 
 
-def test_market_prices_authenticated_300_stocks():
-    """When Kite is connected, return all 300 stocks with calculated change and percentage."""
+def test_market_prices_authenticated_700_stocks():
+    """When Kite is connected, return all 700 stocks with calculated change and percentage."""
     mock_kite = MagicMock()
+    now = datetime.now()
     
     # Mock quote response for sample instruments
     def mock_quote(instruments):
@@ -38,6 +36,7 @@ def test_market_prices_authenticated_300_stocks():
                 },
                 "volume": 500000,
                 "average_price": 995.0,
+                "timestamp": now,
             }
         return res
 
@@ -47,15 +46,15 @@ def test_market_prices_authenticated_300_stocks():
         res = get_market_prices()
         assert res["status"] == "success"
         assert res["data_source"] == "REAL_KITE"
-        assert res["count"] == 300
-        assert len(res["stocks"]) == 300
+        assert res["count"] == 700
+        assert len(res["stocks"]) == 700
 
-        # Verify quote batching was called in batches of 150
-        assert mock_kite.quote.call_count == 2
+        # Verify quote batching was called in batches of 150 (700 stocks -> 4 * 150 + 1 * 100 = 5 calls)
+        assert mock_kite.quote.call_count == 5
         batch1 = mock_kite.quote.call_args_list[0][0][0]
-        batch2 = mock_kite.quote.call_args_list[1][0][0]
+        batch5 = mock_kite.quote.call_args_list[4][0][0]
         assert len(batch1) == 150
-        assert len(batch2) == 150
+        assert len(batch5) == 100
 
         # Verify stock calculations
         sample = res["stocks"][0]
@@ -70,7 +69,7 @@ def test_market_prices_authenticated_300_stocks():
 
 
 def test_market_prices_partial_data_unavailable():
-    """When some quotes fail or are omitted, those rows are marked DATA_UNAVAILABLE while 300 rows are still returned."""
+    """When some quotes fail or are omitted, those rows are marked DATA_UNAVAILABLE while 700 rows are still returned."""
     mock_kite = MagicMock()
     # Return quotes only for RELIANCE
     mock_kite.quote.return_value = {
@@ -80,14 +79,15 @@ def test_market_prices_partial_data_unavailable():
             "ohlc": {"open": 1400.0, "close": 1400.0},
             "volume": 1000000,
             "average_price": 1410.0,
+            "timestamp": datetime.now(),
         }
     }
 
     with patch("backend.market.get_active_kite_with_diagnostics", return_value=(mock_kite, None)):
         res = get_market_prices()
-        assert res["status"] == "success"
-        assert res["count"] == 300
-        assert len(res["stocks"]) == 300
+        assert res["status"] in ("success", "PARTIAL")
+        assert res["count"] == 700
+        assert len(res["stocks"]) == 700
 
         reliance = next(s for s in res["stocks"] if s["symbol"] == "RELIANCE")
         assert reliance["status"] == "LIVE"
@@ -96,3 +96,4 @@ def test_market_prices_partial_data_unavailable():
         other = next(s for s in res["stocks"] if s["symbol"] != "RELIANCE")
         assert other["status"] == "DATA_UNAVAILABLE"
         assert other["ltp"] is None
+

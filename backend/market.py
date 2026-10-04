@@ -1,33 +1,80 @@
 """
-Lightweight real-time market data endpoint for the 300-stock universe.
+Lightweight real-time market data endpoint for the stock universe.
 
-Provides GET /api/market/prices, fetching live quotes in batches of 150 from
-authenticated Zerodha Kite Connect without running heavy scanner/ATR calculations.
+GET /api/market/prices fetches live quotes in batches from authenticated
+Zerodha Kite Connect.
+
+Data-integrity rules enforced here:
+  * A missing quote field is returned as None. It is NEVER replaced by LTP
+    (previously prev_close/open/vwap silently defaulted to LTP, which made
+    change% read 0 and VWAP-distance read 0 for incomplete quotes).
+  * A failed quote batch is reported explicitly (failed_batches, per-symbol
+    DATA_UNAVAILABLE, response status PARTIAL / DATA_UNAVAILABLE).
+  * Per-symbol timestamp is the EXCHANGE timestamp from the quote (or None),
+    not the server's "now". Freshness is reported as LIVE or STALE.
 """
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 
 from broker.kite_adapter import get_active_kite_with_diagnostics
 from config.universe import StockUniverse, resolve_universe_tokens
-from data.time_utils import now_ist_iso
+from data.time_utils import now_ist_iso, now_ist_naive
 
 logger = logging.getLogger("backend_api.market")
 
 router = APIRouter()
 
+QUOTE_BATCH_SIZE = 150
+# A quote whose exchange timestamp is older than this is reported STALE.
+QUOTE_STALE_AFTER_SECONDS = 120
+
+
+def _opt_float(value: Any) -> Optional[float]:
+    """float(value) or None when absent/invalid. Zero is treated as unavailable
+    only by callers that know zero is not a valid value for that field."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _quote_timestamp(q_data: Dict[str, Any]) -> Optional[datetime]:
+    """Exchange timestamp of the quote as naive IST, or None if absent."""
+    ts = q_data.get("timestamp") or q_data.get("last_trade_time")
+    if isinstance(ts, datetime):
+        return ts.replace(tzinfo=None)
+    return None
+
+
+def _unavailable_row(record, token, reason: str) -> Dict[str, Any]:
+    return {
+        "rank": record.market_cap_rank,
+        "symbol": record.symbol,
+        "name": record.name,
+        "category": record.category,
+        "token": token,
+        "ltp": None,
+        "prev_close": None,
+        "open_price": None,
+        "change": None,
+        "change_pct": None,
+        "volume": None,
+        "vwap": None,
+        "status": "DATA_UNAVAILABLE",
+        "reason": reason,
+        "timestamp": None,
+    }
+
 
 @router.get("/api/market/prices")
 def get_market_prices() -> Dict[str, Any]:
-    """
-    Lightweight read-only live market prices for the 300-stock universe.
-    
-    Loads the master 300-stock universe, resolves instrument tokens, and fetches
-    real quotes in batches of 150 from Zerodha Kite Connect.
-    """
+    """Read-only live market prices for the stock universe (real Kite quotes only)."""
     now_iso = now_ist_iso()
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
 
@@ -37,71 +84,73 @@ def get_market_prices() -> Dict[str, Any]:
             "data_source": "NONE",
             "count": 0,
             "timestamp": now_iso,
-            "message": "Zerodha Kite Connect session is not authenticated.",
+            "message": auth_err or "Zerodha Kite Connect session is not authenticated.",
             "stocks": [],
         }
 
-    universe = StockUniverse()
-    all_records = universe.all_stocks
+    all_records = StockUniverse().all_stocks
     symbols = [r.symbol for r in all_records]
 
     token_map = resolve_universe_tokens(kite_client=kite)
 
-    # Fetch quotes in batches of 150
-    quotes: Dict[str, Any] = {}
-    batch_size = 150
     client = getattr(kite, "kite", None) if not hasattr(kite, "quote") else kite
     if client is None:
         client = kite
 
-    for i in range(0, len(symbols), batch_size):
-        chunk = symbols[i : i + batch_size]
-        quote_instruments = [f"NSE:{sym}" for sym in chunk]
+    quotes: Dict[str, Any] = {}
+    failed_symbols: Dict[str, str] = {}
+    failed_batches: List[Dict[str, Any]] = []
+
+    for i in range(0, len(symbols), QUOTE_BATCH_SIZE):
+        chunk = symbols[i : i + QUOTE_BATCH_SIZE]
         try:
-            chunk_quotes = client.quote(quote_instruments)
+            chunk_quotes = client.quote([f"NSE:{sym}" for sym in chunk])
             if chunk_quotes:
                 quotes.update(chunk_quotes)
         except Exception as e:
-            logger.warning(f"Failed to fetch market quotes for batch [{i}:{i+batch_size}]: {e}")
+            logger.error(
+                "Quote batch failed component=market.prices batch=[%d:%d] error=%s",
+                i, i + QUOTE_BATCH_SIZE, e,
+            )
+            failed_batches.append({"start": i, "end": i + len(chunk), "error": type(e).__name__})
+            for sym in chunk:
+                failed_symbols[sym] = f"quote batch failed: {type(e).__name__}"
 
+    now_naive = now_ist_naive()
     stocks_list: List[Dict[str, Any]] = []
 
     for record in all_records:
         sym = record.symbol
-        q_key = f"NSE:{sym}"
-        q_data = quotes.get(q_key)
+        q_data = quotes.get(f"NSE:{sym}")
         token = token_map.get(sym) or (q_data.get("instrument_token") if q_data else None)
 
-        if not q_data or "last_price" not in q_data:
-            stocks_list.append(
-                {
-                    "rank": record.market_cap_rank,
-                    "symbol": sym,
-                    "name": record.name,
-                    "category": record.category,
-                    "token": token,
-                    "ltp": None,
-                    "prev_close": None,
-                    "open_price": None,
-                    "change": None,
-                    "change_pct": None,
-                    "volume": 0,
-                    "vwap": None,
-                    "status": "DATA_UNAVAILABLE",
-                    "timestamp": now_iso,
-                }
-            )
+        ltp = _opt_float(q_data.get("last_price")) if q_data else None
+        if ltp is None or ltp <= 0:
+            reason = failed_symbols.get(sym, "no quote returned for symbol")
+            stocks_list.append(_unavailable_row(record, token, reason))
             continue
 
-        ltp = float(q_data.get("last_price", 0.0))
-        ohlc = q_data.get("ohlc", {})
-        prev_close = float(ohlc.get("close", ltp))
-        open_price = float(ohlc.get("open", ltp))
-        volume = int(q_data.get("volume", 0))
-        vwap = float(q_data.get("average_price", 0.0)) or ltp
+        ohlc = q_data.get("ohlc") or {}
+        prev_close = _opt_float(ohlc.get("close"))
+        open_price = _opt_float(ohlc.get("open"))
+        if prev_close is not None and prev_close <= 0:
+            prev_close = None
+        avg_price = _opt_float(q_data.get("average_price"))
+        vwap = avg_price if avg_price and avg_price > 0 else None  # never fall back to LTP
+        raw_volume = q_data.get("volume")
+        volume = int(raw_volume) if raw_volume is not None else None
 
-        change = round(ltp - prev_close, 2) if prev_close else 0.0
-        change_pct = round(((ltp - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+        change = round(ltp - prev_close, 2) if prev_close is not None else None
+        change_pct = (
+            round(((ltp - prev_close) / prev_close) * 100, 2) if prev_close is not None else None
+        )
+
+        q_ts = _quote_timestamp(q_data)
+        if q_ts is None:
+            freshness = "STALE"  # cannot prove freshness without an exchange timestamp
+        else:
+            age = (now_naive - q_ts).total_seconds()
+            freshness = "LIVE" if age <= QUOTE_STALE_AFTER_SECONDS else "STALE"
 
         stocks_list.append(
             {
@@ -117,15 +166,25 @@ def get_market_prices() -> Dict[str, Any]:
                 "change_pct": change_pct,
                 "volume": volume,
                 "vwap": vwap,
-                "status": "LIVE",
-                "timestamp": now_iso,
+                "status": freshness,
+                "timestamp": q_ts.isoformat() if q_ts else None,
             }
         )
 
+    available = sum(1 for s in stocks_list if s["status"] != "DATA_UNAVAILABLE")
+    if available == 0:
+        overall = "DATA_UNAVAILABLE"
+    elif available < len(stocks_list):
+        overall = "PARTIAL"
+    else:
+        overall = "success"
+
     return {
-        "status": "success",
-        "data_source": "REAL_KITE",
+        "status": overall,
+        "data_source": "REAL_KITE" if available else "NONE",
         "count": len(stocks_list),
+        "available_count": available,
+        "failed_batches": failed_batches,
         "timestamp": now_iso,
         "stocks": stocks_list,
     }

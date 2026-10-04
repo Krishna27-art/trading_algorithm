@@ -1,7 +1,7 @@
 """
 Background daily historical-context warmer.
 
-The live scanner must NEVER block on 300 historical Kite API requests.
+The live scanner must NEVER block on 700 historical Kite API requests.
 
 This module refreshes the daily scanner context cache outside the request
 path. The scanner then reads the cached daily context synchronously.
@@ -23,9 +23,9 @@ from monitoring.logger import logger
 
 class DailyHistoryContextWarmer:
     """
-    Background refresher for the 300-stock daily context cache.
+    Background refresher for the 700-stock daily context cache.
 
-    The expensive 300 Historical API requests run here, never inside
+    The expensive 700 Historical API requests run here, never inside
     /api/research/live.
     """
 
@@ -144,7 +144,7 @@ class DailyHistoryContextWarmer:
         target_date: date,
     ) -> None:
         """
-        Refresh all 300 daily-context caches.
+        Refresh all 700 daily-context caches.
 
         This may take ~100+ seconds. That is intentional because this
         method runs outside the live HTTP request path.

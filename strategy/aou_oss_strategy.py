@@ -68,8 +68,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from math import erf, exp, log, pi, sqrt
+from math import log, pi, sqrt
 from typing import Any, Dict, List, Optional, Tuple
+
+from scipy.special import erfcx
 
 import numpy as np
 import pandas as pd
@@ -595,12 +597,7 @@ def _expected_ou_hitting_time_to_mean(
         )
 
     def integrand(u: float) -> float:
-        # erfc(u) = 1-erf(u)
-        erfc_u = max(1.0 - erf(u), 0.0)
-
-        exponent = min(u * u, 60.0)
-
-        return exp(exponent) * erfc_u
+        return float(erfcx(u))
 
     try:
         integral, _ = quad(
@@ -1418,14 +1415,11 @@ class AouOssStrategy(BaseStrategy):
     ) -> Optional[VolatilityState]:
         """
         Compare current 20-bar Garman-Klass volatility against
-        the historical median over the preceding 120-bar window.
+        the historical median over the preceding history window.
 
-        Current window:
-            most recent `volatility_window` bars
-
-        Historical reference:
-            rolling GK volatility values across the preceding
-            `volatility_history_window` bars
+        This implementation is mathematically equivalent to the previous
+        rolling calculation but avoids rebuilding every 20-bar DataFrame
+        window in a Python loop.
         """
         required = (
             self.volatility_history_window
@@ -1435,54 +1429,65 @@ class AouOssStrategy(BaseStrategy):
         if len(bars) < required:
             return None
 
-        working = bars.tail(
-            required
-        ).copy()
+        working = bars.tail(required)
 
-        # Current realized volatility.
-        current_gk = _garman_klass_volatility(
-            working.tail(
-                self.volatility_window
-            ),
-            self.volatility_window,
+        # --------------------------------------------------------------
+        # Calculate each candle's GK variance exactly once.
+        # --------------------------------------------------------------
+        bar_variance = _garman_klass_bar_variance(
+            working
         )
+
+        if bar_variance.empty:
+            return None
+
+        # --------------------------------------------------------------
+        # Calculate every rolling GK volatility window vectorially.
+        #
+        # GK volatility = sqrt(mean(GK variance over N bars))
+        # --------------------------------------------------------------
+        rolling_mean_variance = (
+            bar_variance
+            .rolling(
+                window=self.volatility_window,
+                min_periods=self.volatility_window,
+            )
+            .mean()
+        )
+
+        rolling_gk = np.sqrt(
+            rolling_mean_variance.clip(lower=0.0)
+        )
+
+        current_gk = rolling_gk.iloc[-1]
 
         if not np.isfinite(current_gk):
             return None
 
-        # Build historical GK values one bar at a time.
-        historical_source = working.head(
-            -self.volatility_window
-        ).copy()
-
-        historical_values: List[float] = []
-
-        for end in range(
-            self.volatility_window,
-            len(historical_source) + 1,
-        ):
-            chunk = historical_source.iloc[
-                end - self.volatility_window:
-                end
+        # --------------------------------------------------------------
+        # The original implementation excluded the latest
+        # volatility_window bars from the historical reference.
+        #
+        # Since `working` contains:
+        #     history_window + volatility_window
+        # bars, removing the final volatility_window rolling values
+        # preserves that exact definition.
+        # --------------------------------------------------------------
+        historical_values = (
+            rolling_gk.iloc[
+                : -self.volatility_window
             ]
+            .dropna()
+        )
 
-            val = _garman_klass_volatility(
-                chunk,
-                self.volatility_window,
-            )
-
-            if np.isfinite(val):
-                historical_values.append(
-                    float(val)
-                )
-
-        # At least a reasonable number of reference values.
         if len(historical_values) < 20:
             return None
 
         historical_median = float(
             np.median(
-                historical_values
+                historical_values.to_numpy(
+                    dtype=float
+                )
             )
         )
 
@@ -1495,7 +1500,7 @@ class AouOssStrategy(BaseStrategy):
             return None
 
         ratio = (
-            current_gk
+            float(current_gk)
             / historical_median
         )
 
@@ -1506,9 +1511,7 @@ class AouOssStrategy(BaseStrategy):
 
         return VolatilityState(
             current_gk=float(current_gk),
-            historical_median_gk=float(
-                historical_median
-            ),
+            historical_median_gk=historical_median,
             ratio=float(ratio),
             passed=bool(passed),
         )
@@ -1729,38 +1732,41 @@ class AouOssStrategy(BaseStrategy):
         if not np.isfinite(latest_spread):
             return False
 
-        # Numerical optimal stopping boundaries.
-        long_entry = (
-            _solve_numerical_entry_boundary(
-                ou=ou,
-                side="LONG",
-                transaction_cost_fraction=(
-                    self.transaction_friction
-                ),
-                stop_sigma_multiple=(
-                    self.stop_sigma_multiple
-                ),
-                entry_exclusion_fraction=(
-                    self.entry_exclusion_fraction
-                ),
-            )
+        # --------------------------------------------------------------
+        # Numerical optimal-stopping boundary.
+        #
+        # The LONG and SHORT problems are symmetric around OU equilibrium:
+        #
+        #     LONG  = mu - distance
+        #     SHORT = mu + distance
+        #
+        # The objective depends only on |entry - mu|, so solving the
+        # symmetric problem twice is unnecessary.
+        # --------------------------------------------------------------
+        long_entry = _solve_numerical_entry_boundary(
+            ou=ou,
+            side="LONG",
+            transaction_cost_fraction=(
+                self.transaction_friction
+            ),
+            stop_sigma_multiple=(
+                self.stop_sigma_multiple
+            ),
+            entry_exclusion_fraction=(
+                self.entry_exclusion_fraction
+            ),
         )
 
-        short_entry = (
-            _solve_numerical_entry_boundary(
-                ou=ou,
-                side="SHORT",
-                transaction_cost_fraction=(
-                    self.transaction_friction
-                ),
-                stop_sigma_multiple=(
-                    self.stop_sigma_multiple
-                ),
-                entry_exclusion_fraction=(
-                    self.entry_exclusion_fraction
-                ),
+        short_entry = None
+
+        if long_entry is not None:
+            short_entry = (
+                2.0 * float(ou.mu)
+                - float(long_entry)
             )
-        )
+
+            if not np.isfinite(short_entry):
+                short_entry = None
 
         if (
             long_entry is None

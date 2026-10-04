@@ -1,5 +1,5 @@
 """
-Liquidity Filter Layer for the 300-Stock Scanning Universe.
+Liquidity Filter Layer for the 700-Stock Scanning Universe.
 
 Evaluates raw stock market data against configurable liquidity, price, turnover,
 and circuit limits before strategy execution. Handles missing stock data
@@ -44,7 +44,7 @@ class LiquidityFilterResult:
 
 class LiquidityFilter:
     """
-    Separate liquidity filter layer evaluating 300 stocks against threshold rules.
+    Separate liquidity filter layer evaluating 700 stocks against threshold rules.
     """
 
     def __init__(self, config: Optional[LiquidityFilterConfig] = None):

@@ -94,6 +94,7 @@ def test_live_market_state_and_signal_engine_candle_close():
         "volume": 5000,
     }
     live_market_state.update_candle_close(today_candle, vwap=2458.0)
+    live_signal_engine.record_tick_price("RELIANCE", 2460.0, datetime.now())
 
     # Trigger live signal engine
     res = live_signal_engine.on_candle_close(today_candle, vwap=2458.0)
@@ -164,6 +165,10 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
     from unittest.mock import MagicMock
 
     fake_kite = MagicMock()
+    fake_kite.instruments.return_value = [
+        {"instrument_token": 738561, "tradingsymbol": "RELIANCE", "exchange": "NSE", "lot_size": 1},
+        {"instrument_token": 260000, "tradingsymbol": "NIFTY ENERGY", "exchange": "NSE", "lot_size": 1},
+    ]
     mod = sys.modules["streaming.market_stream_manager"]
     monkeypatch.setattr(mod, "get_active_kite", lambda: fake_kite)
     monkeypatch.setattr(mod, "get_saved_session", lambda: {"api_key": "k", "access_token": "tok"})
@@ -189,6 +194,7 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
     # Set history ready so strategy evaluation is not skipped
     with market_stream_manager._history_lock:
         market_stream_manager._history_ready_symbols.add("RELIANCE")
+    market_stream_manager._first_observed_candle.pop("RELIANCE", None)
 
     # Trigger aggregator's candle close callback
     candle = {
@@ -200,7 +206,11 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
         "close": 2505.0,
         "volume": 1000,
     }
+    live_signal_engine.record_tick_price("RELIANCE", 2505.0, datetime.now())
     market_stream_manager.aggregator.on_candle_close(candle, vwap=2502.0)
+
+    import time
+    time.sleep(0.2)
 
     assert len(passed_client) == 1
     assert passed_client[0] is fake_kite

@@ -183,7 +183,7 @@ class InstrumentResolver:
         target_symbols: Set[str],
     ) -> Optional[Dict[str, int]]:
         """
-        Load the 300-stock token cache only when all integrity checks pass.
+        Load the 700-stock token cache only when all integrity checks pass.
 
         Cache requirements:
           - correct schema/version
@@ -305,7 +305,7 @@ class InstrumentResolver:
         force_refresh: bool = False,
     ) -> Tuple[Dict[str, int], List[str]]:
         """
-        Resolve the exact 300-stock universe using the authoritative Kite NSE
+        Resolve the exact 700-stock universe using the authoritative Kite NSE
         instrument master.
 
         Cache is used only when it is:
@@ -318,7 +318,7 @@ class InstrumentResolver:
         No static/hardcoded token fallback is used.
         """
         target_cache = cache_path or (
-            self.cache_dir / "universe_300_tokens.json"
+            self.cache_dir / "universe_700_tokens.json"
         )
 
         target_symbols: Set[str] = {

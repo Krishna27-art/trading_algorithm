@@ -33,7 +33,7 @@ def test_valid_cache_is_accepted(tmp_path):
         "TCS": 2953217,
     }
 
-    cache = tmp_path / "universe_300_tokens.json"
+    cache = tmp_path / "universe_700_tokens.json"
     _write_cache(cache, symbols, tokens)
 
     result = resolver._load_valid_universe_cache(
@@ -53,7 +53,7 @@ def test_stale_cache_is_rejected(tmp_path):
         "TCS": 2953217,
     }
 
-    cache = tmp_path / "universe_300_tokens.json"
+    cache = tmp_path / "universe_700_tokens.json"
 
     old_time = datetime.now() - timedelta(hours=25)
 
@@ -81,7 +81,7 @@ def test_partial_cache_is_rejected(tmp_path):
         "HDFCBANK",
     }
 
-    cache = tmp_path / "universe_300_tokens.json"
+    cache = tmp_path / "universe_700_tokens.json"
 
     _write_cache(
         cache,
@@ -108,7 +108,7 @@ def test_duplicate_tokens_in_cache_are_rejected(tmp_path):
         "TCS",
     }
 
-    cache = tmp_path / "universe_300_tokens.json"
+    cache = tmp_path / "universe_700_tokens.json"
 
     _write_cache(
         cache,
@@ -135,7 +135,7 @@ def test_legacy_plain_dict_cache_is_rejected(tmp_path):
         "TCS",
     }
 
-    cache = tmp_path / "universe_300_tokens.json"
+    cache = tmp_path / "universe_700_tokens.json"
 
     cache.write_text(
         json.dumps(
@@ -171,7 +171,7 @@ def test_duplicate_tokens_from_kite_are_not_cached(tmp_path):
                 },
             ]
 
-    cache = tmp_path / "universe_300_tokens.json"
+    cache = tmp_path / "universe_700_tokens.json"
 
     resolved, unresolved = resolver.resolve_universe(
         symbols=["RELIANCE", "TCS"],

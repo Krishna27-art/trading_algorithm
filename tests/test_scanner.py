@@ -18,10 +18,10 @@ from scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
 
 def test_universe_constituent_count_and_resolution():
     universe = StockUniverse()
-    assert len(universe.all_symbols) == 300
-    assert len(universe.large_cap_100) == 100
-    assert len(universe.mid_cap_100) == 100
-    assert len(universe.small_cap_100) == 100
+    assert len(universe.all_symbols) == 700
+    assert len(universe.large_cap_stocks) == 100
+    assert len(universe.mid_cap_stocks) == 100
+    assert len(universe.small_cap_stocks) == 500
     assert "RELIANCE" in universe.all_symbols
     assert "TCS" in universe.all_symbols
     assert "HDFCBANK" in universe.all_symbols
@@ -48,7 +48,7 @@ def test_universe_token_resolution_uses_kite_master(tmp_path):
     tokens, unresolved = resolver.resolve_universe(
         symbols=["RELIANCE", "TCS"],
         kite_client=FakeKite(),
-        cache_path=tmp_path / "universe_300_tokens.json",
+        cache_path=tmp_path / "universe_700_tokens.json",
         force_refresh=True,
     )
 
@@ -150,7 +150,8 @@ def test_create_instrument_config_for_equity():
 
 
 def test_fastapi_scanner_and_multi_symbol_endpoints(monkeypatch):
-    from backend.signals import get_strategy_telemetry, get_universe_scan, trigger_backtest
+    from backend.signals import get_universe_scan
+    from backend.backtest_routes import trigger_backtest
     from data.historical_loader import HistoricalDataLoader
 
     # Unauthenticated scanner returns AUTH_REQUIRED
@@ -174,10 +175,6 @@ def test_fastapi_scanner_and_multi_symbol_endpoints(monkeypatch):
     assert bt_res["success"] is True
     assert bt_res["report"]["symbol"] == "RELIANCE"
 
-    tel_res = get_strategy_telemetry(symbol="TCS")
-    assert tel_res["symbol"] == "TCS"
-    assert tel_res["authenticated"] is False
-    assert tel_res["data_source"] == "NONE"
 
 
 def test_scanner_fails_closed_without_kite():
@@ -186,14 +183,14 @@ def test_scanner_fails_closed_without_kite():
         scanner.scan_universe(kite_client=None, top_n=5, allow_synthetic=False)
 
 
-def test_300_stock_universe_abstraction():
+def test_700_stock_universe_abstraction():
     from config.universe import StockUniverse
 
     universe = StockUniverse()
-    assert len(universe.large_cap_100) == 100
-    assert len(universe.mid_cap_100) == 100
-    assert len(universe.small_cap_100) == 100
-    assert len(universe.all_stocks) == 300
+    assert len(universe.large_cap_stocks) == 100
+    assert len(universe.mid_cap_stocks) == 100
+    assert len(universe.small_cap_stocks) == 500
+    assert len(universe.all_stocks) == 700
 
     rec = universe.all_stocks[0]
     assert hasattr(rec, "symbol")
@@ -243,28 +240,28 @@ def test_scanning_pipeline_summary_counters():
     candidates, data_source = scanner.scan_universe(kite_client=None, top_n=10, allow_synthetic=True)
 
     summary = scanner.last_pipeline_summary
-    assert summary["universe_count"] == 300
+    assert summary["universe_count"] == 700
     assert summary["tradable_count"] > 0
     assert summary["setup_count"] == summary["tradable_count"]
     assert "strong_signal_count" in summary
 
 
-def test_300_stock_universe_exact_counts_and_zero_duplicates():
+def test_700_stock_universe_exact_counts_and_zero_duplicates():
     from config.universe import StockUniverse
 
     universe = StockUniverse()
     all_stocks = universe.all_stocks
-    large = universe.large_cap_100
-    mid = universe.mid_cap_100
-    small = universe.small_cap_100
+    large = universe.large_cap_stocks
+    mid = universe.mid_cap_stocks
+    small = universe.small_cap_stocks
 
-    assert len(all_stocks) == 300
+    assert len(all_stocks) == 700
     assert len(large) == 100
     assert len(mid) == 100
-    assert len(small) == 100
+    assert len(small) == 500
 
     symbols = [r.symbol for r in all_stocks]
-    assert len(set(symbols)) == 300, "Duplicate symbols found in universe!"
+    assert len(set(symbols)) == 700, "Duplicate symbols found in universe!"
 
     # Verify each stock has required scanner fields
     for s in all_stocks:
@@ -332,14 +329,14 @@ def test_instrument_resolver_300_universe_and_unresolved_reporting():
     assert "UNKNOWN_XYZ_999" not in resolved_map
 
 
-def test_scanner_uses_300_stocks_without_nifty50_fallback():
+def test_scanner_uses_700_stocks_without_nifty50_fallback():
     from scanner.stock_ranker import StockUniverseScanner
 
     scanner = StockUniverseScanner()
-    assert len(scanner.universe.all_stocks) == 300
+    assert len(scanner.universe.all_stocks) == 700
 
     candidates, data_source = scanner.scan_universe(kite_client=None, top_n=5, allow_synthetic=True)
-    assert scanner.last_pipeline_summary["universe_count"] == 300
+    assert scanner.last_pipeline_summary["universe_count"] == 700
     assert len(candidates) == 5
 
 

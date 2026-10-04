@@ -228,73 +228,86 @@ class LiveSignalEngine:
     def _read_live_ltp(
         self,
         symbol: str,
-        candle_close: float,
-    ) -> Tuple[float, str, Optional[datetime]]:
+    ) -> Tuple[
+        Optional[float],
+        str,
+        Optional[datetime],
+    ]:
         """
-        Resolve the most recent real market price.
+        Resolve only a FRESH real market LTP.
 
-        Priority:
-            1. Latest Level-5 snapshot LTP from the stream.
-            2. Previously captured live LTP maintained by this engine.
-            3. LiveMarketState LTP if it is fresh.
-            4. Completed candle close as a last-resort display value.
+        Allowed sources:
+            1. Fresh Level-5 snapshot LTP.
+            2. Fresh engine-captured tick LTP.
 
-        The final fallback is explicitly marked STALE_CANDLE_CLOSE and is
-        NEVER represented as a live tick.
+        A completed candle close is NEVER used as current_ltp.
         """
         state = live_market_state.get_symbol_state(
             symbol
         )
+
         now = now_ist().replace(
             tzinfo=None
         )
 
-        # 1. L5 BookSnapshot carries the latest real LTP and survives the
-        # candle-close state update in the current New20 wiring.
-        if state is not None and state.book_snapshot is not None:
+        # --------------------------------------------------------------
+        # 1. Fresh Level-5 snapshot
+        # --------------------------------------------------------------
+        if (
+            state is not None
+            and state.book_snapshot is not None
+        ):
             snapshot = state.book_snapshot
+
             snapshot_ltp = getattr(
                 snapshot,
                 "ltp",
                 None,
             )
+
             snapshot_ts = self._normalize_timestamp(
-                getattr(snapshot, "timestamp", None)
+                getattr(
+                    snapshot,
+                    "timestamp",
+                    None,
+                )
             )
 
             if self._valid_price(snapshot_ltp):
-                if snapshot_ts is None:
-                    # Price is real, but timestamp quality is unknown.
-                    return (
-                        float(snapshot_ltp),
-                        "L5_STREAM",
-                        None,
-                    )
+                if snapshot_ts is not None:
+                    age = (
+                        now - snapshot_ts
+                    ).total_seconds()
 
-                age = (
-                    now - snapshot_ts
-                ).total_seconds()
+                    if (
+                        0 <= age
+                        <= self._max_ltp_age_seconds
+                    ):
+                        return (
+                            float(snapshot_ltp),
+                            "L5_STREAM",
+                            snapshot_ts,
+                        )
 
-                if 0 <= age <= self._max_ltp_age_seconds:
-                    return (
-                        float(snapshot_ltp),
-                        "L5_STREAM",
-                        snapshot_ts,
-                    )
-
-        # 2. Engine-captured fresh LTP.
+        # --------------------------------------------------------------
+        # 2. Fresh engine tick cache
+        # --------------------------------------------------------------
         with self._lock:
-            cached = self._latest_ltp.get(symbol)
+            cached = self._latest_ltp.get(
+                symbol
+            )
 
         if cached is not None:
             cached_price, cached_ts = cached
+
             age = (
                 now - cached_ts
             ).total_seconds()
 
             if (
                 self._valid_price(cached_price)
-                and 0 <= age <= self._max_ltp_age_seconds
+                and 0 <= age
+                <= self._max_ltp_age_seconds
             ):
                 return (
                     float(cached_price),
@@ -302,15 +315,12 @@ class LiveSignalEngine:
                     cached_ts,
                 )
 
-        # 3. The current New20 callback order updates LiveMarketState.ltp to
-        # the completed candle close immediately before this engine runs. Do
-        # not treat that value as a live tick.
-        #
-        # 4. Explicitly stale fallback. This is allowed for deterministic
-        # output, but it is never mislabeled as live market price.
+        # --------------------------------------------------------------
+        # 3. No fresh market price
+        # --------------------------------------------------------------
         return (
-            float(candle_close),
-            "STALE_CANDLE_CLOSE",
+            None,
+            "LIVE_LTP_UNAVAILABLE",
             None,
         )
 
@@ -479,9 +489,62 @@ class LiveSignalEngine:
             live_ltp, ltp_source, ltp_timestamp = (
                 self._read_live_ltp(
                     symbol=symbol,
-                    candle_close=candle_close,
                 )
             )
+
+            if live_ltp is None:
+                unavailable_result = {
+                    "symbol": symbol,
+                    "token": (
+                        live_market_state.get_symbol_state(
+                            symbol
+                        ).token
+                        if live_market_state.get_symbol_state(
+                            symbol
+                        )
+                        else None
+                    ),
+                    "ltp": None,
+                    "ltp_source": "LIVE_LTP_UNAVAILABLE",
+                    "ltp_timestamp": None,
+                    "candle_close": round(
+                        candle_close,
+                        2,
+                    ),
+                    "candle_timestamp": (
+                        candle_timestamp.isoformat()
+                    ),
+                    "vwap": (
+                        round(float(vwap), 4)
+                        if self._valid_price(vwap)
+                        else None
+                    ),
+                    "predictions": {},
+                    "consensus": {
+                        "direction": "NEUTRAL",
+                        "agreeing_strategies": 0,
+                        "total_strategies": 0,
+                        "evaluable_strategies": 0,
+                        "consensus_agreement_pct": None,
+                        "label": "UNAVAILABLE",
+                        "consensus_strategies": [],
+                        "excluded_strategies": [],
+                    },
+                    "timestamp": now_ist_iso(),
+                    "data_source": "KITE_STREAM",
+                    "status": "UNAVAILABLE",
+                    "error": (
+                        "No fresh real-time LTP is available "
+                        "for live strategy evaluation."
+                    ),
+                }
+
+                self._store_result(
+                    symbol,
+                    unavailable_result,
+                )
+
+                return unavailable_result
 
             state = live_market_state.get_symbol_state(
                 symbol
@@ -595,8 +658,8 @@ class LiveSignalEngine:
                     if live_market_state.get_symbol_state(symbol)
                     else None
                 ),
-                "ltp": float(candle_dict["close"]),
-                "ltp_source": "ERROR_FALLBACK",
+                "ltp": None,
+                "ltp_source": "ERROR",
                 "ltp_timestamp": None,
                 "candle_close": float(candle_dict["close"]),
                 "candle_timestamp": candle_timestamp.isoformat(),

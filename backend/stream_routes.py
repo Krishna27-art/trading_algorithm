@@ -1,97 +1,87 @@
 """
-WebSocket Market Stream management routes.
-Exposes /api/stream/start, /api/stream/stop, /api/stream/status, and /api/stream/signals
-controlling and querying the streaming market pipeline.
+Canonical live-data routes: /api/stream/start|stop|status|signals|market.
+
+Instrument tokens are always resolved server-side from the authoritative
+universe. The previous client-supplied `tokens` override was removed: it let a
+caller subscribe arbitrary/fabricated instrument tokens.
 """
 
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Dict
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend.security import verify_shared_secret
-from monitoring.logger import logger
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
 from streaming.market_stream_manager import market_stream_manager
 
+logger = logging.getLogger("backend_api.stream")
+
 router = APIRouter()
 
 
-@router.post(
-    "/api/stream/start",
-    dependencies=[Depends(verify_shared_secret)],
-)
-def start_stream(tokens: Optional[Dict[str, str]] = None):
-    """
-    Start the KiteTicker WebSocket stream.
-    If tokens mapping is not provided or empty, authoritative universe tokens
-    are automatically resolved.
-    """
-    token_to_symbol: Optional[Dict[int, str]] = None
-    if tokens:
-        try:
-            token_to_symbol = {int(k): str(v) for k, v in tokens.items()}
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid token format: {e}",
-            )
-
+def _stream_state() -> str:
     try:
-        result = market_stream_manager.start_stream(token_to_symbol=token_to_symbol)
+        return str((market_stream_manager.get_status() or {}).get("state", "UNKNOWN"))
+    except Exception:
+        logger.exception("component=stream_routes check=stream_status")
+        return "ERROR"
+
+
+@router.post("/api/stream/start", dependencies=[Depends(verify_shared_secret)])
+def start_stream() -> Dict[str, Any]:
+    """Start the KiteTicker stream with authoritative universe tokens."""
+    try:
+        result = market_stream_manager.start_stream(token_to_symbol=None)
         return {
             "status": "started",
             "subscribed_tokens": result.get("subscribed_tokens", 0),
             "symbols_count": result.get("symbols_count", 0),
         }
     except RuntimeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(e),
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
-    except Exception as e:
-        logger.error(f"Error starting stream: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        logger.exception("component=stream_routes action=start_stream")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start stream: {e}",
+            detail="Failed to start stream. See server logs.",
         )
 
 
-@router.post(
-    "/api/stream/stop",
-    dependencies=[Depends(verify_shared_secret)],
-)
+@router.post("/api/stream/stop", dependencies=[Depends(verify_shared_secret)])
 def stop_stream():
-    """Stop the currently active KiteTicker WebSocket stream."""
+    """Stop the currently active KiteTicker stream."""
     return market_stream_manager.stop_stream()
 
 
 @router.get("/api/stream/status")
 def stream_status():
-    """Returns the comprehensive connection and health state of the KiteTicker stream."""
+    """Connection and health state of the KiteTicker stream."""
     return market_stream_manager.get_status()
 
 
 @router.get("/api/stream/signals")
 def stream_signals():
-    """Returns the latest live strategy signals computed from the streaming market pipeline."""
+    """Latest signals from the streaming pipeline, tagged with stream freshness."""
+    signals = live_signal_engine.get_all_predictions()  # single snapshot (was called twice)
     return {
         "status": "success",
-        "signals": live_signal_engine.get_all_predictions(),
-        "count": len(live_signal_engine.get_all_predictions()),
+        "stream_state": _stream_state(),
+        "signals": signals,
+        "count": len(signals),
     }
 
 
 @router.get("/api/stream/market")
 def stream_market():
-    """Returns the latest in-memory market states (LTP, VWAP, Candle count) for all streaming symbols."""
+    """In-memory market state (LTP, VWAP, candle count) for all streaming symbols."""
     symbols_state = live_market_state.get_all_symbols_state()
     return {
         "status": "success",
+        "stream_state": _stream_state(),
         "instruments": {sym: state.to_dict() for sym, state in symbols_state.items()},
         "count": len(symbols_state),
     }

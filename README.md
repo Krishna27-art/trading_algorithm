@@ -1,7 +1,7 @@
 # Institutional NSE Intraday Signal & Research Workstation
-### Multi-Strategy Quantitative Engine, 300-Stock Universe Scanner & Real-Time Kite Stream
+### Multi-Strategy Quantitative Engine, 700-Stock Universe Scanner & Real-Time Kite Stream
 
-A high-performance quantitative research and intraday signal generation platform for the **National Stock Exchange of India (NSE)**, calibrated for **NIFTY Index** and liquid equities from the **NSE 300-stock universe**.
+A high-performance quantitative research and intraday signal generation platform for the **National Stock Exchange of India (NSE)**, calibrated for **NIFTY Index** and liquid equities from the **NSE 700-stock universe**.
 
 > **Note on Execution Model**: This application is **read-only with respect to broker order execution**. It ingests real Zerodha Kite market data, runs intraday strategy engines, and generates actionable signals and consensus. All order placement and trade execution are performed manually by the trader outside the application.
 
@@ -42,7 +42,7 @@ Continuous-time mean-reversion model operating on rolling volume-weighted anchor
 
 ---
 
-## 🔍 300-Stock Universe Scanner (`scanner/stock_ranker.py`)
+## 🔍 700-Stock Universe Scanner (`scanner/stock_ranker.py`)
 
 A quantitative 100-point scoring algorithm evaluating candidates across Large, Mid, and Small cap NSE segments:
 - **RVOL (30 pts)**: Institutional volume participation vs 20-day full-session baseline ($\text{RVOL} = \text{Day Volume} / \text{Avg 20D Volume}$).
@@ -119,7 +119,7 @@ trading algorithm/
 │   └── paper_adapter.py         # Isolated simulation adapter
 ├── config/
 │   ├── settings.py              # Pydantic configuration, instrument schemas, risk rules
-│   └── universe.py              # 300-stock universe master & token resolver
+│   └── universe.py              # 700-stock universe master & token resolver
 ├── data/
 │   ├── candle_aggregator.py     # Real-time tick to 15m candle & VWAP aggregator
 │   ├── historical_loader.py     # Validated cache loader & Kite Historical API fetcher
@@ -185,7 +185,7 @@ python run_algo.py --mode rolling --strategy cpr
 python run_algo.py --mode rolling --strategy orb
 ```
 
-### 4. 300-Stock Universe Scanner
+### 4. 700-Stock Universe Scanner
 ```bash
 # Scan and rank top 5 momentum candidates
 python run_algo.py --mode scan --top-n 5

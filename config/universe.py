@@ -1,21 +1,8 @@
 """
-300-Stock Master Scanner Universe Definition and Token Resolution.
+700-Stock Master Scanner Universe Definition and Token Resolution.
 
-Maintains the single source of truth for the 300-stock scanning universe
-(100 Large Cap, 100 Mid Cap, 100 Small Cap) loaded from data/universe/300_stocks.json.
-
-REMOVED vs. the original: the hardcoded NIFTY_50_CONSTITUENTS and
-NIFTY_100_CONSTITUENTS lists. They were dead weight — the file's own
-comments called them "kept for historical reference/testing", and the only
-non-test reference was get_universe()'s fallback below. data/universe/300_stocks.json
-(loaded by StockUniverse) is the actual, validated single source of truth
-for the scanning universe; these hardcoded lists duplicated a subset of it
-and could silently drift out of sync.
-
-Note: tests/test_scanner.py asserts against NIFTY_50_CONSTITUENTS directly
-and will need its own update (inline the ~3 symbols it checks, or assert
-against StockUniverse().large_cap_100 instead) — that file is outside the
-scope of this change.
+Maintains the single source of truth for the 700-stock scanning universe
+(100 Large Cap, 100 Mid Cap, 500 Small Cap) loaded from data/universe/700_stocks.json.
 """
 
 from __future__ import annotations
@@ -38,7 +25,7 @@ def get_universe(
     Point-in-time accessor for a ~100-stock reference universe (kept for
     historical index analysis). Prefers a dated membership CSV when one is
     supplied; otherwise falls back to the large-cap 100 slice of the
-    validated 300-stock master universe (data/universe/300_stocks.json).
+    validated 700-stock master universe (data/universe/700_stocks.json).
     """
     csv_path = membership_csv or (settings.base_dir / "data" / "cache" / "nifty100_membership.csv")
 
@@ -58,9 +45,6 @@ def get_universe(
 
     fallback = sorted(r.symbol for r in StockUniverse().large_cap_100)
     return fallback
-
-
-
 
 
 def create_instrument_config_for_equity(
@@ -107,18 +91,19 @@ class StockRecord:
         }
 
 
-DEFAULT_300_CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "cache" / "universe_300_tokens.json"
+DEFAULT_700_CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "cache" / "universe_700_tokens.json"
+DEFAULT_300_CACHE_FILE = DEFAULT_700_CACHE_FILE  # Compatibility alias
 
 
 class StockUniverse:
     """
-    Single source of truth for the 300-stock scanning universe (100 Large Cap, 100 Mid Cap, 100 Small Cap).
+    Single source of truth for the 700-stock scanning universe (100 Large Cap, 100 Mid Cap, 500 Small Cap).
     Enforces strict validation on load and raises ValueError/RuntimeError on dataset defects.
     """
 
     def __init__(self, json_path: Optional[Path] = None):
         self.json_path = json_path or (
-            Path(__file__).resolve().parent.parent / "data" / "universe" / "300_stocks.json"
+            Path(__file__).resolve().parent.parent / "data" / "universe" / "700_stocks.json"
         )
         self._records: List[StockRecord] = []
         self._symbol_map: Dict[str, StockRecord] = {}
@@ -133,7 +118,7 @@ class StockUniverse:
             with open(self.json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            raise RuntimeError(f"Failed to parse master 300-stock universe JSON at {self.json_path}: {e}")
+            raise RuntimeError(f"Failed to parse master 700-stock universe JSON at {self.json_path}: {e}")
 
         if not isinstance(data, list):
             raise ValueError(f"Master universe file {self.json_path} must contain a JSON array of stock objects.")
@@ -180,24 +165,20 @@ class StockUniverse:
 
             records.append(StockRecord(symbol=sym, name=name, market_cap_rank=rank_int, category=cat))
 
-
         large_cnt = sum(1 for r in records if r.category == "large")
         mid_cnt = sum(1 for r in records if r.category == "mid")
         small_cnt = sum(1 for r in records if r.category == "small")
         total_cnt = len(records)
 
-        # Fix 3.4: Soft-degrade on count mismatch rather than hard-crashing.
-        # Log warnings for any category that is off, but proceed with whatever
-        # stocks are actually in the file so the scanner remains usable.
         count_warnings = []
-        if total_cnt != 300:
-            count_warnings.append(f"Total stock count is {total_cnt}, expected 300.")
+        if total_cnt != 700:
+            count_warnings.append(f"Total stock count is {total_cnt}, expected 700.")
         if large_cnt != 100:
             count_warnings.append(f"Large cap count is {large_cnt}, expected 100.")
         if mid_cnt != 100:
             count_warnings.append(f"Mid cap count is {mid_cnt}, expected 100.")
-        if small_cnt != 100:
-            count_warnings.append(f"Small cap count is {small_cnt}, expected 100.")
+        if small_cnt != 500:
+            count_warnings.append(f"Small cap count is {small_cnt}, expected 500.")
         if count_warnings:
             logger.warning(
                 f"Universe JSON count mismatch in {self.json_path}: "
@@ -206,21 +187,16 @@ class StockUniverse:
             )
 
         if validation_errors:
-            # Symbol/name/rank errors are harder failures — log them but still
-            # proceed with the valid records; don't crash the whole backend.
             error_msg = (
-                f"300-Stock Universe validation issues ({self.json_path}):\n"
+                f"700-Stock Universe validation issues ({self.json_path}):\n"
                 + "\n".join(f" - {err}" for err in validation_errors)
             )
             logger.error(error_msg)
 
-        # Only keep records with a valid (non-empty) symbol so the scanner
-        # doesn't receive incomplete entries even in partial-degrade mode.
         records = [r for r in records if r.symbol]
 
         self._records = records
         self._symbol_map = {r.symbol: r for r in records}
-
 
     @property
     def large_cap_stocks(self) -> List[StockRecord]:
@@ -291,9 +267,9 @@ class StockUniverse:
         Prints startup validation summary for Large/Mid/Small cap categories
         and instrument token resolution state.
         """
-        large_cnt = len(self.large_cap_100)
-        mid_cnt = len(self.mid_cap_100)
-        small_cnt = len(self.small_cap_100)
+        large_cnt = len(self.large_cap_stocks)
+        mid_cnt = len(self.mid_cap_stocks)
+        small_cnt = len(self.small_cap_stocks)
         total_cnt = len(self.all_stocks)
 
         self._tokens_cache.update({k: v for k, v in token_map.items() if v is not None})
@@ -333,13 +309,13 @@ class StockUniverse:
         }
 
 
-def resolve_300_universe_tokens(
+def resolve_700_universe_tokens(
     kite_client: Optional[Any] = None,
     cache_path: Optional[Path] = None,
     force_refresh: bool = False,
 ) -> Dict[str, int]:
     """
-    Resolve tokens for the complete 300-stock universe through
+    Resolve tokens for the complete 700-stock universe through
     InstrumentResolver.
 
     No hardcoded token fallback is permitted.
@@ -365,11 +341,21 @@ def resolve_300_universe_tokens(
     return resolved_map
 
 
+def resolve_300_universe_tokens(
+    kite_client: Optional[Any] = None,
+    cache_path: Optional[Path] = None,
+    force_refresh: bool = False,
+) -> Dict[str, int]:
+    """Compatibility alias delegating to resolve_700_universe_tokens."""
+    return resolve_700_universe_tokens(kite_client=kite_client, cache_path=cache_path, force_refresh=force_refresh)
+
+
 def resolve_universe_tokens(
     kite_client: Optional[Any] = None,
     cache_path: Optional[Path] = None,
     force_refresh: bool = False,
 ) -> Dict[str, int]:
-    """Compatibility alias delegating to resolve_300_universe_tokens."""
-    return resolve_300_universe_tokens(kite_client=kite_client, cache_path=cache_path, force_refresh=force_refresh)
+    """Compatibility alias delegating to resolve_700_universe_tokens."""
+    return resolve_700_universe_tokens(kite_client=kite_client, cache_path=cache_path, force_refresh=force_refresh)
+
 

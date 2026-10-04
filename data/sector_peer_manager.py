@@ -1,7 +1,7 @@
 """
 Sector and Peer Relationship Manager.
 Provides sector classification, sector leaders, and PeerContext construction
-for SectorImpulseStrategy across the 300-stock universe.
+for SectorImpulseStrategy across the 700-stock universe.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class SectorDefinition:
     constituents: Tuple[str, ...] = ()
 
 
-# Authoritative sector groupings for Indian Equities (NSE 300 Universe)
+# Authoritative sector groupings for Indian Equities (NSE 700 Universe)
 SECTOR_DEFINITIONS: Dict[str, SectorDefinition] = {
     "IT": SectorDefinition(
         name="IT",

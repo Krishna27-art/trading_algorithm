@@ -1,40 +1,28 @@
 """
-Kite Connect authentication & account routes.
+Kite Connect authentication routes (signal-only system).
 
 Owns the OAuth redirect flow (/kite/login -> /kite/callback), session
-status/logout, and the two account-info reads (profile, margins) that
-depend directly on the active Kite session.
+status and logout.
 
-REMOVED vs. the old backend/main.py:
-  - POST /api/login-url and POST /api/login: dead duplicates of the real
-    OAuth flow. Both simply called kite_login() and ignored their request
-    body. The frontend (frontend/src/api/auth.js) never calls them — it
-    only uses GET /kite/login, GET /kite/status, POST /kite/logout.
-  - GET /api/status: explicitly marked "Legacy/compatibility wrapper" in
-    its own docstring; superseded by GET /kite/status. Also unused by the
-    frontend.
+REMOVED (signal-only system; the frontend only uses GET /kite/login,
+GET /kite/status, POST /kite/logout):
+  - GET /api/profile, GET /api/margins: account/margin reads that do not
+    belong in a signal-only system.
+  - POST /api/logout: exact duplicate of POST /kite/logout.
+  - POST /api/login-url, POST /api/login, GET /api/status: earlier dead routes.
 """
 
 import logging
 import os
 from typing import Optional
-from urllib.parse import quote
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    Header,
-    HTTPException,
-    Query,
-    status,
-)
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
 
 from backend.security import verify_shared_secret
 from broker.kite_adapter import (
     clear_session,
-    get_active_kite,
     get_active_kite_with_diagnostics,
     get_saved_session,
     save_session,
@@ -63,16 +51,14 @@ def kite_login():
 def kite_callback(
     request_token: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
-    # Renamed from `status` (the Kite redirect's literal query param name) to
-    # `auth_status` so it doesn't shadow fastapi's `status` module, which the
-    # error branches below rely on. The query string the browser sends is
-    # unaffected — `alias="status"` keeps binding to `?status=...`.
+    # `alias="status"` binds to the literal ?status= Kite sends, without
+    # shadowing fastapi's `status` module used below.
     auth_status: Optional[str] = Query(None, alias="status"),
 ):
     """
-    Automatic Zerodha OAuth redirect callback endpoint.
-    Exchanges request_token for access_token, persists session token,
-    updates active Kite client, and redirects user back to the frontend.
+    Zerodha OAuth redirect callback. Exchanges request_token for access_token,
+    persists the session, and redirects back to the frontend.
+    The request_token is never logged.
     """
     frontend_url = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
 
@@ -109,8 +95,8 @@ def kite_callback(
         )
 
         logger.info(
-            f"Successfully authenticated Kite session for user "
-            f"{session_data.get('user_id', '')} ({session_data.get('user_name', 'Trader')})."
+            "Successfully authenticated Kite session for user %s",
+            session_data.get("user_id", ""),
         )
         return RedirectResponse(url=frontend_url, status_code=307)
 
@@ -139,104 +125,31 @@ def kite_status():
     profile = None
     try:
         profile = kite.profile()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Session validated above, so profile is cosmetic — but never swallow silently.
+        logger.warning("kite.profile() failed during /kite/status: %s", exc)
 
-    user_id = profile.get("user_id") if profile else session.get("user_id", "")
-    user_name = profile.get("user_name") if profile else session.get("user_name", "Trader")
-    products = profile.get("products", ["CNC", "NRML", "MIS", "BO", "CO"]) if profile else []
-    exchanges = profile.get("exchanges", ["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]) if profile else []
-
+    # No invented defaults: if Kite did not return it, it is empty/unknown.
     return {
         "connected": True,
-        "user_id": user_id,
-        "user_name": user_name,
-        "products": products,
-        "exchanges": exchanges,
+        "user_id": (profile.get("user_id") if profile else None) or session.get("user_id", ""),
+        "user_name": (profile.get("user_name") if profile else None) or session.get("user_name", ""),
+        "products": (profile.get("products") if profile else None) or [],
+        "exchanges": (profile.get("exchanges") if profile else None) or [],
     }
 
 
-@router.post(
-    "/kite/logout",
-    dependencies=[Depends(verify_shared_secret)],
-)
-def kite_logout():
+@router.post("/kite/logout")
+def kite_logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
     """Clears local access token and session state."""
-    clear_session()
-    return {
-        "success": True,
-        "message": "Logged out successfully",
-    }
-
-
-@router.get(
-    "/api/profile",
-    dependencies=[Depends(verify_shared_secret)],
-)
-def get_user_profile():
-    """Fetches user profile details."""
-    kite = get_active_kite()
-    if not kite:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated or session expired. Please log in.",
-        )
-
-    try:
-        profile = kite.profile()
-        return {
-            "user_name": profile.get("user_name", "N/A"),
-            "user_id": profile.get("user_id", "N/A"),
-            "email": profile.get("email", "N/A"),
-            "broker": profile.get("broker", "ZERODHA"),
-            "user_type": profile.get("user_type", "individual"),
-            "products": profile.get("products", ["CNC", "NRML", "MIS", "BO", "CO"]),
-            "exchanges": profile.get("exchanges", ["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]),
-            "order_types": profile.get("order_types", ["MARKET", "LIMIT", "SL", "SL-M"]),
-            "avatar_url": profile.get("avatar_url", None),
-        }
-    except Exception as e:
-        logger.error(f"Error fetching profile: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not fetch profile from Zerodha: {str(e)}",
-        )
-
-
-@router.get(
-    "/api/margins",
-    dependencies=[Depends(verify_shared_secret)],
-)
-def get_user_margins():
-    """Fetches equity and commodity account margins."""
-    kite = get_active_kite()
-    if not kite:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated.",
-        )
-
-    try:
-        margins = kite.margins()
-        return margins
-    except Exception as e:
-        logger.error(f"Error fetching margins: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not fetch margins: {str(e)}",
-        )
-
-
-@router.post("/api/logout")
-def logout(
-    x_shared_secret: Optional[str] = Header(
-        None,
-        alias="X-Shared-Secret",
-    ),
-):
     verify_shared_secret(x_shared_secret)
     clear_session()
     return {
         "success": True,
         "message": "Logged out successfully",
     }
+
+
+logout = kite_logout
+
+

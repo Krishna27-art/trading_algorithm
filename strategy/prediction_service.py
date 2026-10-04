@@ -19,9 +19,10 @@ This module is a signal/decision-support layer only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta
 import math
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -247,6 +248,23 @@ class CandidatePrediction:
         }
 
 
+@dataclass
+class _AouRuntime:
+    """
+    Persistent live AOU runtime for one symbol/session.
+
+    The strategy object is kept alive between live evaluations so
+    completed candles are processed exactly once.
+    """
+    strategy: AouOssStrategy
+    session_date: date
+    last_candle_open: Optional[datetime] = None
+    last_signal: Optional[StrategySignal] = None
+    lock: Any = field(
+        default_factory=Lock
+    )
+
+
 class PredictionService:
     """
     Single source of truth for strategy evaluation and consensus.
@@ -271,6 +289,17 @@ class PredictionService:
             parents=True,
             exist_ok=True,
         )
+
+        # Persistent live AOU state.
+        #
+        # One runtime per symbol. This prevents replaying the entire
+        # current trading session on every live evaluation.
+        self._aou_runtimes: Dict[
+            str,
+            _AouRuntime,
+        ] = {}
+
+        self._aou_runtimes_lock = Lock()
 
     # ================================================================
     # INPUT VALIDATION / PREPARATION
@@ -2111,6 +2140,65 @@ class PredictionService:
     # AOU-OSS
     # ================================================================
 
+    def _get_or_create_aou_runtime(
+        self,
+        symbol: str,
+        inst: InstrumentConfig,
+        session_date: date,
+        lookback_df: pd.DataFrame,
+    ) -> _AouRuntime:
+        """
+        Return the persistent AOU runtime for a symbol/session.
+
+        A new runtime is created only when:
+            - the symbol has never been evaluated, or
+            - the trading session has changed.
+        """
+        clean_symbol = (
+            str(symbol)
+            .strip()
+            .upper()
+        )
+
+        with self._aou_runtimes_lock:
+            runtime = self._aou_runtimes.get(
+                clean_symbol
+            )
+
+            if (
+                runtime is not None
+                and runtime.session_date == session_date
+            ):
+                return runtime
+
+            strategy = AouOssStrategy(
+                inst,
+                self.settings.strategy,
+            )
+
+            if (
+                lookback_df is not None
+                and not lookback_df.empty
+            ):
+                strategy.seed_context(
+                    lookback_df
+                )
+
+            strategy.reset_session(
+                session_date
+            )
+
+            runtime = _AouRuntime(
+                strategy=strategy,
+                session_date=session_date,
+            )
+
+            self._aou_runtimes[
+                clean_symbol
+            ] = runtime
+
+            return runtime
+
     def _evaluate_aou_oss(
         self,
         inst: InstrumentConfig,
@@ -2119,8 +2207,9 @@ class PredictionService:
         book_snapshot: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
         """
-        Evaluate AOU-OSS (Analytic Ornstein-Uhlenbeck Optimal Stopping System).
-        Completely independent strategy #7.
+        Evaluate AOU-OSS using a persistent per-symbol live runtime.
+
+        Only new completed candles are passed to AouOssStrategy.on_candle().
         """
         if df_15m.empty:
             return SingleStrategyPrediction(
@@ -2130,7 +2219,9 @@ class PredictionService:
                 metrics={},
             )
 
-        _, days = self._prepare_data(df_15m)
+        _, days = self._prepare_data(
+            df_15m
+        )
 
         if not days:
             return SingleStrategyPrediction(
@@ -2143,122 +2234,328 @@ class PredictionService:
                 metrics={},
             )
 
-        total_bars = sum(len(d[1]) for d in days)
+        # --------------------------------------------------------------
+        # LIVE SAFETY GATE
+        # --------------------------------------------------------------
+        now = now_ist_naive()
+        today = now.date()
+
+        if not MarketCalendar.is_trading_day(
+            today
+        ):
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "AOU-OSS live evaluation is unavailable "
+                    "because today is not a trading session."
+                ),
+                levels={},
+                metrics={},
+            )
+
+        latest_date, today_df = days[-1]
+
+        # Never evaluate a stale previous session as today's live model.
+        if latest_date != today:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "AOU-OSS live data is stale: "
+                    f"latest completed session is "
+                    f"{latest_date}, current session is {today}."
+                ),
+                levels={},
+                metrics={},
+            )
+
+        total_bars = sum(
+            len(day_df)
+            for _, day_df in days
+        )
+
         if total_bars < 152:
             return SingleStrategyPrediction(
                 status="UNAVAILABLE",
-                reason="Insufficient 15-minute history for AOU-OSS calibration.",
+                reason=(
+                    "Insufficient 15-minute history for "
+                    "AOU-OSS calibration."
+                ),
                 levels={},
                 metrics={},
             )
 
         lookback_df = (
-            pd.concat([day_df for _, day_df in days[:-1]], ignore_index=True)
+            pd.concat(
+                [
+                    day_df
+                    for _, day_df in days[:-1]
+                ],
+                ignore_index=True,
+            )
             if len(days) > 1
             else pd.DataFrame()
         )
 
-        latest_date, today_df = days[-1]
-
-        strategy = AouOssStrategy(
-            inst,
-            self.settings.strategy,
+        runtime = self._get_or_create_aou_runtime(
+            symbol=inst.symbol,
+            inst=inst,
+            session_date=latest_date,
+            lookback_df=lookback_df,
         )
 
-        if not lookback_df.empty:
-            strategy.seed_context(lookback_df)
+        with runtime.lock:
+            strategy = runtime.strategy
 
-        strategy.reset_session(latest_date)
+            # ----------------------------------------------------------
+            # Update current L2 context every evaluation.
+            # ----------------------------------------------------------
+            if book_snapshot is not None:
+                best_bid = None
+                best_ask = None
 
-        # Optional live Level-2 market context
-        if book_snapshot is not None:
-            best_bid = None
-            best_ask = None
-            bids = getattr(book_snapshot, "bids", None)
-            asks = getattr(book_snapshot, "asks", None)
-            if bids and len(bids) > 0 and len(bids[0]) > 0:
-                best_bid = float(bids[0][0])
-            if asks and len(asks) > 0 and len(asks[0]) > 0:
-                best_ask = float(asks[0][0])
-            strategy.set_market_context(
-                best_bid=best_bid,
-                best_ask=best_ask,
+                bids = getattr(
+                    book_snapshot,
+                    "bids",
+                    None,
+                )
+                asks = getattr(
+                    book_snapshot,
+                    "asks",
+                    None,
+                )
+
+                if (
+                    bids
+                    and len(bids) > 0
+                    and len(bids[0]) > 0
+                ):
+                    try:
+                        best_bid = float(
+                            bids[0][0]
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        best_bid = None
+
+                if (
+                    asks
+                    and len(asks) > 0
+                    and len(asks[0]) > 0
+                ):
+                    try:
+                        best_ask = float(
+                            asks[0][0]
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        best_ask = None
+
+                strategy.set_market_context(
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                )
+
+            # ----------------------------------------------------------
+            # Process ONLY candles that have not been processed before.
+            # ----------------------------------------------------------
+            if runtime.last_candle_open is None:
+                new_candles = today_df
+            else:
+                new_candles = today_df[
+                    today_df["datetime"]
+                    > runtime.last_candle_open
+                ]
+
+            for _, row in new_candles.iterrows():
+                candle = self._candle_dict(
+                    row
+                )
+
+                close_p = _positive_number(
+                    row.get("close")
+                )
+
+                if close_p is None:
+                    continue
+
+                signal = strategy.on_candle(
+                    candle,
+                    vwap=float(close_p),
+                )
+
+                runtime.last_candle_open = (
+                    row["datetime"]
+                )
+
+                if signal is not None:
+                    runtime.last_signal = signal
+
+            current_signal = (
+                runtime.last_signal
             )
 
-        current_signal = None
-        for _, row in today_df.iterrows():
-            candle = self._candle_dict(row)
-            close_p = _positive_number(row.get("close")) or ltp
-            sig = strategy.on_candle(candle, vwap=float(close_p))
-            if sig is not None:
-                current_signal = sig
+            st = strategy.get_state()
 
-        st = strategy.get_state()
         levels: Dict[str, Any] = {
-            "rolling_vwap": _finite_number(st.get("rolling_vwap")),
-            "spread": _finite_number(st.get("spread")),
-            "equilibrium": _finite_number(st.get("equilibrium")),
-            "half_life_minutes": _finite_number(st.get("half_life_minutes")),
-            "volatility_ratio": _finite_number(st.get("volatility_ratio")),
-            "entry_boundary_long": _finite_number(st.get("entry_boundary_long")),
-            "entry_boundary_short": _finite_number(st.get("entry_boundary_short")),
-            "stop_boundary_long": _finite_number(st.get("stop_boundary_long")),
-            "stop_boundary_short": _finite_number(st.get("stop_boundary_short")),
-            "l2_spread_bps": _finite_number(st.get("l2_spread_bps")),
+            "rolling_vwap": _finite_number(
+                st.get("rolling_vwap")
+            ),
+            "spread": _finite_number(
+                st.get("spread")
+            ),
+            "equilibrium": _finite_number(
+                st.get("equilibrium")
+            ),
+            "half_life_minutes": _finite_number(
+                st.get("half_life_minutes")
+            ),
+            "volatility_ratio": _finite_number(
+                st.get("volatility_ratio")
+            ),
+            "entry_boundary_long": _finite_number(
+                st.get("entry_boundary_long")
+            ),
+            "entry_boundary_short": _finite_number(
+                st.get("entry_boundary_short")
+            ),
+            "stop_boundary_long": _finite_number(
+                st.get("stop_boundary_long")
+            ),
+            "stop_boundary_short": _finite_number(
+                st.get("stop_boundary_short")
+            ),
+            "l2_spread_bps": _finite_number(
+                st.get("l2_spread_bps")
+            ),
         }
+
         levels = {
-            k: round(v, 4) if isinstance(v, float) else v
-            for k, v in levels.items()
-            if v is not None
+            key: (
+                round(value, 4)
+                if isinstance(value, float)
+                else value
+            )
+            for key, value in levels.items()
+            if value is not None
         }
 
         if current_signal is not None:
-            if current_signal.action == SignalAction.BUY:
-                return self._prediction_from_signal(
-                    status="AOU_LONG",
-                    signal=current_signal,
-                    ltp=ltp,
-                    default_reason=(
-                        current_signal.reason
-                        or "AOU-OSS optimal stopping generated a validated LONG signal."
-                    ),
-                    levels=levels,
+            if (
+                current_signal.action
+                == SignalAction.BUY
+            ):
+                prediction = (
+                    self._prediction_from_signal(
+                        status="AOU_LONG",
+                        signal=current_signal,
+                        ltp=ltp,
+                        default_reason=(
+                            current_signal.reason
+                            or
+                            "AOU-OSS optimal stopping "
+                            "generated a validated LONG signal."
+                        ),
+                        levels=levels,
+                    )
                 )
+                return prediction
 
-            if current_signal.action == SignalAction.SELL:
-                return self._prediction_from_signal(
-                    status="AOU_SHORT",
-                    signal=current_signal,
-                    ltp=ltp,
-                    default_reason=(
-                        current_signal.reason
-                        or "AOU-OSS optimal stopping generated a validated SHORT signal."
-                    ),
-                    levels=levels,
+            if (
+                current_signal.action
+                == SignalAction.SELL
+            ):
+                prediction = (
+                    self._prediction_from_signal(
+                        status="AOU_SHORT",
+                        signal=current_signal,
+                        ltp=ltp,
+                        default_reason=(
+                            current_signal.reason
+                            or
+                            "AOU-OSS optimal stopping "
+                            "generated a validated SHORT signal."
+                        ),
+                        levels=levels,
+                    )
                 )
+                return prediction
 
         if not st.get("ready"):
-            vol_passed = st.get("volatility_passed", False)
-            hl = st.get("half_life_minutes")
-            if hl is not None and (hl < 15.0 or hl > 60.0):
-                reason = f"AOU half-life ({hl:.1f}m) outside 15-60m mean-reverting gate."
-            elif not vol_passed and st.get("volatility_ratio") is not None:
-                reason = f"AOU volatility ratio ({st.get('volatility_ratio'):.2f}) exceeds threshold."
-            elif not st.get("l2_passed", True):
-                reason = "AOU Level-2 bid/ask spread exceeds threshold."
+            vol_passed = st.get(
+                "volatility_passed",
+                False,
+            )
+
+            hl = st.get(
+                "half_life_minutes"
+            )
+
+            if (
+                hl is not None
+                and (
+                    hl < 15.0
+                    or hl > 60.0
+                )
+            ):
+                reason = (
+                    f"AOU half-life "
+                    f"({hl:.1f}m) outside "
+                    "15-60m mean-reverting gate."
+                )
+
+            elif (
+                not vol_passed
+                and st.get(
+                    "volatility_ratio"
+                ) is not None
+            ):
+                reason = (
+                    f"AOU volatility ratio "
+                    f"({st.get('volatility_ratio'):.2f}) "
+                    "exceeds threshold."
+                )
+
+            elif not st.get(
+                "l2_passed",
+                True,
+            ):
+                reason = (
+                    "AOU Level-2 bid/ask spread "
+                    "exceeds threshold."
+                )
+
             else:
-                reason = "AOU-OSS calibration not ready or gates not satisfied."
+                reason = (
+                    "AOU-OSS calibration not ready "
+                    "or gates not satisfied."
+                )
+
             return SingleStrategyPrediction(
                 status="NO_TRADE",
                 reason=reason,
                 levels=levels,
             )
 
-        spread_val = st.get("spread")
-        spread_text = f"{spread_val:.4f}" if spread_val is not None else "0.00"
+        spread_val = st.get(
+            "spread"
+        )
+
+        spread_text = (
+            f"{spread_val:.4f}"
+            if spread_val is not None
+            else "0.00"
+        )
+
         return SingleStrategyPrediction(
             status="WAITING",
-            reason=f"Awaiting AOU-OSS boundary trigger (spread={spread_text}).",
+            reason=(
+                "Awaiting AOU-OSS boundary trigger "
+                f"(spread={spread_text})."
+            ),
             levels=levels,
         )
 

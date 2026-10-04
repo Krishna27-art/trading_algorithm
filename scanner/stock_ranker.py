@@ -1,5 +1,5 @@
 """
-300-stock master scanner and explainable stock ranker.
+700-stock master scanner and explainable stock ranker.
 
 Live path:
     StockUniverse
@@ -113,7 +113,7 @@ class StockUniverseScanner:
                 symbols=symbols,
                 kite_client=kite_client,
                 cache_path=(
-                    self.cache_dir / "universe_300_tokens.json"
+                    self.cache_dir / "universe_700_tokens.json"
                 ),
                 force_refresh=force_refresh,
             )
@@ -383,7 +383,7 @@ class StockUniverseScanner:
                 )
             except Exception as exc:
                 logger.error(
-                    f"Real Kite 300-stock scan failed: {exc}"
+                    f"Real Kite 700-stock scan failed: {exc}"
                 )
 
                 if not allow_synthetic:
@@ -928,7 +928,7 @@ class StockUniverseScanner:
 
         The main live scanner deliberately uses
         `_load_cached_historical_context()` so ranking a universe scan does
-        not issue 300 individual historical API requests.
+        not issue 700 individual historical API requests.
         """
         if token is None:
             logger.warning(

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backend.signals import get_live_research, get_strategy_telemetry
+from backend.signals import get_universe_scan
 from config.settings import InstrumentConfig, InstrumentType, settings
 from strategy.apex_engine import ApexAivemStrategy, EngineConfig
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
@@ -185,13 +185,13 @@ def test_apex_dynamic_reweighting_without_fabricated_zeros():
     assert apex.last_analysis.get("status") in ("APEX_LONG", "APEX_SHORT", "WAITING", "NO_TRADE")
 
 
-def test_backend_live_research_unauthenticated_gating():
-    """Assertion 8, 9, 10: When Kite is unauthenticated, live research returns AUTH_REQUIRED with zero synthetic candidates."""
-    with patch("backend.signals.get_active_kite_with_diagnostics", return_value=(None, "Session inactive")):
-        res = get_live_research(top_n=5)
+def test_backend_scanner_unauthenticated_gating():
+    """Assertion 8, 9, 10: When Kite is unauthenticated, scanner returns AUTH_REQUIRED with zero synthetic candidates."""
+    with patch("backend.signals.get_active_kite", return_value=None):
+        res = get_universe_scan(top_n=5)
         assert res["status"] == "AUTH_REQUIRED"
         assert res["data_source"] == "NONE"
-        assert res["returned_count"] == 0
+        assert res["count"] == 0
         assert res["candidates"] == []
 
 

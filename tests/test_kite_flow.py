@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from data.instrument_resolver import InstrumentResolver, instrument_resolver
 from data.historical_loader import HistoricalDataLoader
 from backend.kite import get_saved_session, get_active_kite_with_diagnostics
-from backend.signals import trigger_backtest
+from backend.backtest_routes import trigger_backtest
 
 
 def test_instrument_resolver_canonical_indices():

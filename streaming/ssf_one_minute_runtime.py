@@ -60,8 +60,16 @@ class SSFOneMinuteRuntime:
 
         for sym in self._stock_symbols:
             idx = get_sector_index_symbol(sym)
-            self._symbol_to_index[sym] = idx
-            self._index_symbols.add(idx)
+
+            if idx is not None:
+                self._symbol_to_index[sym] = idx
+                self._index_symbols.add(idx)
+            else:
+                logger.warning(
+                    "[SSFOneMinuteRuntime] No authoritative sector index for %s; "
+                    "sector context unavailable.",
+                    sym,
+                )
 
         all_symbols = list(self._stock_symbols | self._index_symbols)
 
@@ -282,7 +290,7 @@ class SSFOneMinuteRuntime:
                 symbol,
                 token,
                 candle,
-                vwap or 0.0,
+                vwap,
             )
 
             # Update sector and stock returns in SSFContextStore

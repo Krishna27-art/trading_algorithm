@@ -1005,10 +1005,26 @@ class ApexAivemStrategy(BaseStrategy):
         stop_loss, target, risk_distance = levels
         actual_rr = abs(target - close) / risk_distance
 
+        oir_txt = (
+            "UNAVAILABLE"
+            if features.get("oir") is None
+            else f"{features['oir']:.2f}"
+        )
+        gap_atr_txt = (
+            "UNAVAILABLE"
+            if gap_atr is None
+            else f"{gap_atr:.2f}"
+        )
+        rvol_txt = (
+            "UNAVAILABLE"
+            if rvol is None
+            else f"{rvol:.2f}"
+        )
+
         reason = (
             f"APEX {direction}: score={score:.3f}, "
-            f"gapATR={gap_atr:.2f}, RVOL={rvol:.2f}, "
-            f"OIR={features['oir']:.2f}, VWAP confirmation"
+            f"gapATR={gap_atr_txt}, RVOL={rvol_txt}, "
+            f"OIR={oir_txt}, VWAP confirmation"
         )
 
         self.last_analysis = {

@@ -19,17 +19,4 @@ export const getStatus = getKiteStatus
 export const getLoginUrl = getKiteLoginUrl
 export const logout = kiteLogout
 
-// GET /api/profile -> user profile fields
-export const getProfile = () =>
-  apiGet(
-    '/api/profile',
-    { requireSecret: true },
-  )
-
-// GET /api/margins -> raw Kite margins object
-export const getMargins = () =>
-  apiGet(
-    '/api/margins',
-    { requireSecret: true },
-  )
 

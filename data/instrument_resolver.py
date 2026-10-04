@@ -8,10 +8,11 @@ from datetime import datetime, timedelta
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config.settings import settings
-from data.time_utils import now_ist_naive
+from data.time_utils import IST, now_ist_naive
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +69,7 @@ class InstrumentResolver:
         # Check disk cache
         if cache_file.exists():
             try:
-                cache_age_seconds = (
-                    now_ist_naive().timestamp()
-                    - cache_file.stat().st_mtime
-                )
+                cache_age_seconds = time.time() - cache_file.stat().st_mtime
                 if cache_age_seconds < UNIVERSE_TOKEN_CACHE_TTL.total_seconds():
                     with open(cache_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
@@ -102,7 +100,12 @@ class InstrumentResolver:
 
                         if len(valid_items) > 0:
                             self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in valid_items}
-                            self._memory_cache_loaded_at[exchange] = now_ist_naive()
+                            self._memory_cache_loaded_at[exchange] = (
+                                datetime.fromtimestamp(
+                                    cache_file.stat().st_mtime,
+                                    IST,
+                                ).replace(tzinfo=None)
+                            )
                             return valid_items
                         else:
                             logger.warning(

@@ -130,7 +130,7 @@ class SSFLiveRuntime:
                     "close": float(row["close"]),
                     "volume": max(int(row.get("volume", 0)), 0),
                 }
-                strategy.on_candle(candle, 0.0)
+                strategy.on_candle(candle, None)
                 count += 1
             except (TypeError, ValueError, KeyError):
                 continue
@@ -141,7 +141,7 @@ class SSFLiveRuntime:
         symbol: str,
         token: int,
         candle: dict,
-        vwap: float = 0.0,
+        vwap: Optional[float] = None,
     ) -> None:
         """
         Feed a completed real 1-minute candle into the persistent SSF regime.

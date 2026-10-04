@@ -961,12 +961,35 @@ class PredictionService:
                 ),
             )
 
-        # Critical fix:
-        # the actual market price is passed into the equity configuration.
+        # Session reference price ensures session-level risk/range limits remain static
+        session_reference_price = (
+            _positive_number(live_df["open"].iloc[0])
+            if not live_df.empty and "open" in live_df.columns
+            else ltp
+        ) or ltp
+
+        lot_size = 1
+        tick_size = 0.05
+        if kite_client is not None:
+            try:
+                from data.instrument_resolver import instrument_resolver
+                resolved_lot = instrument_resolver.resolve_lot_size(
+                    clean_symbol,
+                    exchange="NSE",
+                    instrument_type="EQ",
+                    kite_client=kite_client,
+                )
+                if resolved_lot and resolved_lot > 0:
+                    lot_size = resolved_lot
+            except Exception:
+                pass
+
         inst = create_instrument_config_for_equity(
             clean_symbol,
             token,
-            current_price=ltp,
+            current_price=float(session_reference_price),
+            tick_size=tick_size,
+            lot_size=lot_size,
         )
 
         predictions: Dict[
@@ -1983,7 +2006,7 @@ class PredictionService:
         signal = None
 
         if strategy is None:
-            if inst.token is None or inst.token <= 0:
+            if inst.instrument_token is None or inst.instrument_token <= 0:
                 return SingleStrategyPrediction(
                     status="UNAVAILABLE",
                     reason=(

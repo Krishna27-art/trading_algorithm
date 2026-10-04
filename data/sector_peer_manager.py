@@ -364,12 +364,10 @@ SSF_SECTOR_INDEX_SYMBOLS: Dict[str, str] = {
 }
 
 
-def get_sector_index_symbol(symbol: str) -> str:
+def get_sector_index_symbol(symbol: str) -> Optional[str]:
     """Return the NSE sector index symbol corresponding to the stock symbol."""
     sec_name = SectorPeerManager.get_sector_name(symbol)
-    if sec_name is None:
-        return "NIFTY 50"
-    return SSF_SECTOR_INDEX_SYMBOLS.get(sec_name, "NIFTY 50")
+    return SSF_SECTOR_INDEX_SYMBOLS.get(sec_name) if sec_name else None
 
 
 sector_peer_manager = SectorPeerManager()

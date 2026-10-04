@@ -42,12 +42,16 @@ def get_system_health() -> Dict[str, Any]:
         kite_conn = False
 
     try:
-        with sqlite3.connect(
-            settings.db_path,
+        conn = sqlite3.connect(
+            f"file:{settings.db_path}?mode=ro",
+            uri=True,
             timeout=2,
-        ) as conn:
+        )
+        try:
             conn.execute("SELECT 1")
-        db_ok = True
+            db_ok = True
+        finally:
+            conn.close()
     except Exception:
         logger.exception(
             "component=system.health check=database"

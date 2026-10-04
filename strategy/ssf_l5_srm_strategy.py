@@ -182,7 +182,7 @@ class SsfL5SrmStrategy(BaseStrategy):
         self.entry_time = None
 
     # ---------------------------------------------------------------- regime
-    def on_candle(self, candle: dict, vwap: float) -> Optional[StrategySignal]:
+    def on_candle(self, candle: dict, vwap: Optional[float] = None) -> Optional[StrategySignal]:
         """Regime detector only. Parkinson-vol percentile + fractal efficiency
         over the last 30 bars (assumes 1-min candles)."""
         self._bars.append(candle)

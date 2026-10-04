@@ -18,6 +18,7 @@ from broker.kite_adapter import get_active_kite
 from config.settings import settings
 from data.historical_loader import HistoricalDataLoader
 from data.market_calendar import MarketCalendar
+from data.time_utils import today_ist
 from monitoring.logger import logger
 
 
@@ -114,7 +115,7 @@ class DailyHistoryContextWarmer:
         if kite is None:
             return
 
-        today = datetime.now().date()
+        today = today_ist()
 
         if not MarketCalendar.is_trading_day(
             today

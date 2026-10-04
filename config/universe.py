@@ -50,13 +50,15 @@ def get_universe(
 def create_instrument_config_for_equity(
     symbol: str,
     token: Optional[int] = None,
-    current_price: float = 1000.0,
+    current_price: float = 0.0,
     atr_14: Optional[float] = None,
+    tick_size: float = 0.05,
+    lot_size: int = 1,
 ) -> InstrumentConfig:
     """
     Factory creating an InstrumentConfig for an equity constituent.
     """
-    price = max(current_price, 10.0)
+    price = current_price
 
     min_orb = round(max(price * 0.0017, 0.5), 2)
     max_orb = round(max(price * 0.0060, min_orb * 2.5), 2)
@@ -66,8 +68,8 @@ def create_instrument_config_for_equity(
         symbol=symbol,
         exchange="NSE",
         instrument_type=InstrumentType.EQUITY,
-        lot_size=1,
-        tick_size=0.05,
+        lot_size=lot_size,
+        tick_size=tick_size,
         min_orb_range=min_orb,
         max_orb_range=max_orb,
         max_risk_cap=max_risk,

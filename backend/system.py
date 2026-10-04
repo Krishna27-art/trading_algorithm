@@ -1,6 +1,7 @@
 """System health route — every field is derived from observed state."""
 
 import logging
+import sqlite3
 from typing import Any, Dict
 
 from fastapi import APIRouter
@@ -41,14 +42,32 @@ def get_system_health() -> Dict[str, Any]:
         kite_conn = False
 
     try:
-        db_ok = settings.db_path.exists()
+        with sqlite3.connect(
+            settings.db_path,
+            timeout=2,
+        ) as conn:
+            conn.execute("SELECT 1")
+        db_ok = True
     except Exception:
+        logger.exception(
+            "component=system.health check=database"
+        )
         db_ok = False
 
     try:
-        stream_status: Dict[str, Any] = market_stream_manager.get_status() or {}
-        stream_state = str(stream_status.get("state", "UNKNOWN"))
-        stream_error = None
+        stream_status: Dict[str, Any] = (
+            market_stream_manager.get_status() or {}
+        )
+        stream_state = str(
+            stream_status.get(
+                "state",
+                "UNKNOWN",
+            )
+        )
+        stream_error = stream_status.get(
+            "last_error",
+            stream_status.get("error"),
+        )
     except Exception as exc:
         logger.exception("component=system.health check=stream_status")
         stream_status, stream_state, stream_error = {}, "ERROR", type(exc).__name__
@@ -56,13 +75,44 @@ def get_system_health() -> Dict[str, Any]:
     stream_class = _classify(stream_state)
 
     try:
-        prediction_count = len(live_signal_engine.get_all_predictions())
-        engine_state = "PRODUCING_SIGNALS" if prediction_count > 0 else (
-            "IDLE" if stream_class == "LIVE" else "NOT_RUNNING"
+        predictions = (
+            live_signal_engine.get_all_predictions()
+            or {}
+        )
+
+        prediction_count = len(predictions)
+
+        producing_signal_count = 0
+
+        for prediction in predictions.values():
+            if not isinstance(prediction, dict):
+                continue
+
+            if prediction.get("direction") in {
+                "LONG",
+                "SHORT",
+            } and prediction.get("status") not in {
+                "UNAVAILABLE",
+                "ERROR",
+                "NO_TRADE",
+                "WAITING",
+            }:
+                producing_signal_count += 1
+
+        engine_state = (
+            "PRODUCING_SIGNALS"
+            if producing_signal_count > 0
+            else (
+                "IDLE"
+                if stream_class == "LIVE"
+                else "NOT_RUNNING"
+            )
         )
     except Exception:
-        logger.exception("component=system.health check=signal_engine")
-        prediction_count, engine_state = 0, "ERROR"
+        logger.exception(
+            "component=system.health check=signal_engine"
+        )
+        prediction_count, producing_signal_count, engine_state = 0, 0, "ERROR"
 
     if not kite_conn:
         overall = "DISCONNECTED"
@@ -84,6 +134,7 @@ def get_system_health() -> Dict[str, Any]:
         "database": "CONNECTED" if db_ok else "ERROR",
         "strategy_engine": engine_state,
         "signal_count": prediction_count,
+        "active_signal_count": producing_signal_count,
         # Signal-only system: there is no risk/execution engine to report on.
         "risk_engine": "NOT_APPLICABLE",
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",

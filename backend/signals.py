@@ -106,11 +106,26 @@ def get_strategy_state(strategy: Optional[str] = None):
         "lot_size": settings.instruments[0].lot_size,
         "session_phase": phase,
         "schedule": {
-            "market_open": "09:15 IST",
-            "entry_start": "09:45 IST",
-            "entry_end": "13:30 IST",
-            "square_off_time": "14:30 IST",
-            "hard_cutoff_time": "15:10 IST",
+            "market_open": (
+                settings.strategy.market_open.strftime("%H:%M")
+                + " IST"
+            ),
+            "entry_start": (
+                settings.strategy.entry_start.strftime("%H:%M")
+                + " IST"
+            ),
+            "entry_end": (
+                settings.strategy.entry_end.strftime("%H:%M")
+                + " IST"
+            ),
+            "square_off_time": (
+                settings.strategy.square_off_time.strftime("%H:%M")
+                + " IST"
+            ),
+            "hard_cutoff_time": (
+                settings.strategy.hard_cutoff_time.strftime("%H:%M")
+                + " IST"
+            ),
         },
         "risk_reward_ratio": settings.strategy.risk_reward_ratio,
         "breakeven_r_multiple": settings.strategy.breakeven_r_multiple,
@@ -156,13 +171,6 @@ def get_universe_scan(top_n: int = 5, refresh: bool = False):
                 "tradable_count": summary.get("tradable_count"),
                 "setup_count": summary.get("setup_count"),
                 "strong_signal_count": summary.get("strong_signal_count"),
-            },
-            "scoring_weights": {
-                "rvol_weight": 30,
-                "gap_weight": 25,
-                "volatility_weight": 25,
-                "vwap_dist_weight": 20,
-                "total_max": 100,
             },
             "candidates": [m.to_dict() for m in ranked],
         }

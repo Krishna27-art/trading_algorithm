@@ -41,6 +41,7 @@ class SSFOneMinuteRuntime:
         self._stock_symbols: Set[str] = set()
         self._index_symbols: Set[str] = set()
         self._symbol_to_index: Dict[str, str] = {}
+        self._symbol_to_token: Dict[str, int] = {}
         self._running = False
 
     def initialize(
@@ -55,6 +56,7 @@ class SSFOneMinuteRuntime:
         self._stock_symbols = {s.strip().upper() for s in symbols}
         self._index_symbols = set()
         self._symbol_to_index = {}
+        self._symbol_to_token = {}
 
         for sym in self._stock_symbols:
             idx = get_sector_index_symbol(sym)
@@ -142,6 +144,7 @@ class SSFOneMinuteRuntime:
             token_to_sym[
                 real_token
             ] = sym
+            self._symbol_to_token[sym] = real_token
 
         if not token_to_sym:
             raise RuntimeError(
@@ -208,7 +211,9 @@ class SSFOneMinuteRuntime:
                     interval="minute",
                 )
                 if df is not None and not df.empty:
-                    ssf_live_runtime.seed_regime_history(sym, df)
+                    token_val = self._symbol_to_token.get(sym) or token
+                    if token_val:
+                        ssf_live_runtime.seed_regime_history(sym, int(token_val), df)
                     ssf_return_tracker.seed(sym, df)
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for stock %s: %s", sym, exc)
@@ -263,7 +268,22 @@ class SSFOneMinuteRuntime:
 
         # 2. If it's a stock symbol:
         if symbol in self._stock_symbols:
-            ssf_live_runtime.on_one_minute_candle(symbol, candle, vwap)
+            token = self._symbol_to_token.get(symbol)
+
+            if token is None or token <= 0:
+                logger.warning(
+                    "[SSFOneMinuteRuntime] No valid token for stock %s; "
+                    "skipping SSF regime update.",
+                    symbol,
+                )
+                return
+
+            ssf_live_runtime.on_one_minute_candle(
+                symbol,
+                token,
+                candle,
+                vwap or 0.0,
+            )
 
             # Update sector and stock returns in SSFContextStore
             idx_sym = self._symbol_to_index.get(symbol)
@@ -284,6 +304,7 @@ class SSFOneMinuteRuntime:
         self._stock_symbols.clear()
         self._index_symbols.clear()
         self._symbol_to_index.clear()
+        self._symbol_to_token.clear()
         logger.info("[SSFOneMinuteRuntime] Stopped.")
 
 

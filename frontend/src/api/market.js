@@ -7,5 +7,3 @@ export const getStrategyState = (strategy) =>
 // GET /api/market/prices -> 700-stock universe live market quotes
 export const getMarketPrices = () => apiGet('/api/market/prices')
 
-// GET /api/risk/summary -> portfolio risk usage & capital metrics
-export const getRiskSummary = () => apiGet('/api/risk/summary')

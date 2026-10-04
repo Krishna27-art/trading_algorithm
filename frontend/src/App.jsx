@@ -8,7 +8,6 @@ import DashboardPage from './pages/DashboardPage'
 import LiveSignalsPage from './pages/LiveSignalsPage'
 import StocksPage from './pages/StocksPage'
 import BacktestPage from './pages/BacktestPage'
-import TradesPage from './pages/TradesPage'
 import SystemStatusPage from './pages/SystemStatusPage'
 import { getKiteStatus, kiteLogout } from './api/auth'
 
@@ -95,7 +94,6 @@ export default function App() {
           {activeTab === 'signals' && <LiveSignalsPage isAuthenticated={authState === 'authenticated'} />}
           {activeTab === 'stocks' && <StocksPage isAuthenticated={authState === 'authenticated'} />}
           {activeTab === 'backtest' && <BacktestPage />}
-          {activeTab === 'trades' && <TradesPage />}
           {activeTab === 'system' && <SystemStatusPage />}
         </AppShell>
       )}

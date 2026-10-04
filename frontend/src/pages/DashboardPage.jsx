@@ -6,16 +6,13 @@ import Timestamp from '../components/common/Timestamp'
 import { Loading, ErrorState, EmptyState } from '../components/common/DataStates'
 import { usePolling } from '../hooks/usePolling'
 import { getSystemHealth } from '../api/system'
-import { getStrategyState, getRiskSummary } from '../api/market'
-import { getTrades } from '../api/trades'
+import { getStrategyState } from '../api/market'
 import { apiGet } from '../api/client'
 import { formatCurrency } from '../utils/format'
 
 export default function DashboardPage({ onNavigate, isAuthenticated }) {
   const health = usePolling(getSystemHealth, { intervalMs: 10000 })
   const state = usePolling(() => getStrategyState(), { intervalMs: 30000 })
-  const riskSummary = usePolling(getRiskSummary, { intervalMs: 10000 })
-  const trades = usePolling(getTrades, { intervalMs: 15000 })
 
   const streamStatus = usePolling(() => apiGet('/api/stream/status'), { intervalMs: 5000 })
   const streamSignals = usePolling(() => apiGet('/api/stream/signals'), { intervalMs: 5000 })
@@ -24,19 +21,7 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
   const symbol = state.data?.symbol || 'NIFTY'
   const strategy = state.data?.strategy_key || 'cpr'
 
-  const tradesList = Array.isArray(trades.data?.trades)
-    ? trades.data.trades
-    : Array.isArray(trades.data)
-      ? trades.data
-      : []
-
-  const totalPnl = tradesList
-    .filter((t) => t.pnl_net !== null && t.pnl_net !== undefined)
-    .reduce((sum, t) => sum + (t.pnl_net || 0), 0)
-  const winCount = tradesList.filter((t) => (t.pnl_net || 0) > 0).length
-  const lossCount = tradesList.filter((t) => (t.pnl_net || 0) < 0).length
-
-  const overallReady = health.data?.overall_status === 'READY'
+  const brokerConnected = health.data?.kite_api === 'CONNECTED'
   const isStreamConnected = streamStatus.data?.connected === true
   const streamState = streamStatus.data?.state || 'DISCONNECTED'
 
@@ -51,38 +36,60 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
     for (const [sym, payload] of Object.entries(rawSignals)) {
       const preds = payload?.predictions || payload?.strategies || {}
       const consensus = payload?.consensus || {}
-      const liveLtp = rawMarket[sym]?.ltp || payload?.ltp
 
       // Check if selected strategy or any strategy has an active signal
       let activePred = preds[strategy]
-      if (!activePred || activePred.status !== 'SIGNAL') {
-        // Search across all strategies for an active signal
+
+      if (
+        !activePred ||
+        !['LONG', 'SHORT'].includes(activePred.direction)
+      ) {
         activePred = Object.values(preds).find(
-          (p) => p && (p.status === 'SIGNAL' || p.type === 'BUY' || p.type === 'SELL' || p.direction === 'LONG' || p.direction === 'SHORT')
+          (p) =>
+            p &&
+            ['LONG', 'SHORT'].includes(p.direction)
         )
       }
 
-      if (activePred && (activePred.status === 'SIGNAL' || activePred.type || activePred.direction)) {
+      if (
+        activePred &&
+        ['LONG', 'SHORT'].includes(activePred.direction)
+      ) {
         activeCandidates.push({
           symbol: sym,
-          type: activePred.type || (activePred.direction === 'LONG' ? 'BUY' : 'SELL'),
-          entry: activePred.entry || liveLtp || 0,
+          type:
+            activePred.type ||
+            (activePred.direction === 'LONG'
+              ? 'BUY'
+              : 'SELL'),
+          entry: activePred.entry ?? null,
           stop_loss: activePred.stop_loss,
           target: activePred.target,
           consensus_agreement_pct: activePred.consensus_agreement_pct ?? consensus.consensus_agreement_pct,
           trigger: activePred.trigger || activePred.reason || `${sym} ${strategyLabel(activePred.strategy_key || strategy)} Signal`,
           timestamp: payload?.timestamp || payload?.candle_timestamp,
         })
-      } else if (consensus && consensus.direction && consensus.direction !== 'NEUTRAL') {
+      } else if (
+        consensus &&
+        ['LONG', 'SHORT'].includes(consensus.direction)
+      ) {
         activeCandidates.push({
           symbol: sym,
-          type: consensus.direction === 'LONG' || consensus.direction === 'BUY' ? 'BUY' : 'SELL',
-          entry: liveLtp || 0,
+          type:
+            consensus.direction === 'LONG'
+              ? 'BUY'
+              : 'SELL',
+          entry: null,
           stop_loss: null,
           target: null,
-          consensus_agreement_pct: consensus.consensus_agreement_pct,
-          trigger: consensus.label || `${consensus.agreeing_strategies}/${consensus.total_strategies} strategies agree`,
-          timestamp: payload?.timestamp || payload?.candle_timestamp,
+          consensus_agreement_pct:
+            consensus.consensus_agreement_pct,
+          trigger:
+            consensus.label ||
+            `${consensus.agreeing_strategies}/${consensus.total_strategies} strategies agree`,
+          timestamp:
+            payload?.timestamp ||
+            payload?.candle_timestamp,
         })
       }
     }
@@ -96,19 +103,17 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
     return null
   }, [streamSignals.data, streamMarket.data, symbol, strategy])
 
-  const riskData = riskSummary.data?.risk_summary
-
   return (
     <div className="space-y-4 animate-fade-in">
       {/* Market & Streaming status */}
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
-            <StatusPill tone={health.status === 'success' ? (overallReady ? 'positive' : 'neutral') : 'negative'}>
+            <StatusPill tone={health.status === 'success' ? (brokerConnected ? 'positive' : 'neutral') : 'negative'}>
               {health.status === 'loading'
                 ? 'Checking backend…'
                 : health.status === 'success'
-                  ? overallReady
+                  ? brokerConnected
                     ? 'Broker connected'
                     : 'Backend online'
                   : 'Backend disconnected'}
@@ -162,54 +167,6 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
           />
         )}
       </Card>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Trade Journal summary */}
-        <Card
-          title="Trade Journal"
-          action={
-            <button onClick={() => onNavigate('trades')} className="text-xs text-[var(--accent)] hover:underline">
-              View journal
-            </button>
-          }
-        >
-          {trades.status === 'loading' && !trades.data ? (
-            <Loading />
-          ) : trades.status === 'error' && !trades.data ? (
-            <ErrorState error={trades.error} onRetry={trades.refresh} />
-          ) : !tradesList.length ? (
-            <EmptyState label="No journaled trades yet" hint="Strategy signals and executions are logged here" />
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              <Stat label="Total trades" value={tradesList.length} />
-              <Stat label="Total P&L" value={formatCurrency(totalPnl)} tone={pnlTone(totalPnl)} />
-              <Stat label="Profitable" value={winCount} tone="positive" />
-              <Stat label="Losses" value={lossCount} tone={lossCount > 0 ? 'negative' : undefined} />
-            </div>
-          )}
-        </Card>
-
-        {/* Risk summary */}
-        <Card
-          title="Risk today"
-          action={
-            <button onClick={() => onNavigate('signals')} className="text-xs text-[var(--accent)] hover:underline">
-              Signals
-            </button>
-          }
-        >
-          {!riskData ? (
-            <Loading />
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              <Stat label="Capital" value={formatCurrency(riskData.capital)} />
-              <Stat label="Daily risk used" value={formatCurrency(riskData.daily_risk_used)} />
-              <Stat label="Risk remaining" value={formatCurrency(riskData.daily_risk_remaining)} />
-              <Stat label="Trades today" value={`${riskData.trades_taken} / ${riskData.max_trades}`} />
-            </div>
-          )}
-        </Card>
-      </div>
     </div>
   )
 }
@@ -252,12 +209,6 @@ function Stat({ label, value, tone }) {
       <p className={`text-sm font-num font-semibold ${color}`}>{value}</p>
     </div>
   )
-}
-
-function pnlTone(v) {
-  if (v > 0) return 'positive'
-  if (v < 0) return 'negative'
-  return undefined
 }
 
 function strategyLabel(key) {

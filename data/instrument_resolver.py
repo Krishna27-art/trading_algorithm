@@ -57,7 +57,7 @@ class InstrumentResolver:
         if (
             exchange in self._memory_cache
             and loaded_at is not None
-            and datetime.now() - loaded_at < timedelta(hours=24)
+            and now_ist_naive() - loaded_at < timedelta(hours=24)
             and len(self._memory_cache[exchange]) > 0
         ):
             return list(self._memory_cache[exchange].values())
@@ -68,20 +68,41 @@ class InstrumentResolver:
         # Check disk cache
         if cache_file.exists():
             try:
-                mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-                if datetime.now() - mtime < timedelta(hours=24):
+                cache_age_seconds = (
+                    now_ist_naive().timestamp()
+                    - cache_file.stat().st_mtime
+                )
+                if cache_age_seconds < UNIVERSE_TOKEN_CACHE_TTL.total_seconds():
                     with open(cache_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     if isinstance(data, list) and len(data) > 0:
-                        valid_items = [
-                            i for i in data
-                            if isinstance(i, dict)
-                            and i.get("tradingsymbol")
-                            and i.get("instrument_token")
-                        ]
+                        valid_items = []
+                        for item in data:
+                            if not isinstance(item, dict):
+                                continue
+                            tradingsymbol = str(
+                                item.get("tradingsymbol") or ""
+                            ).strip().upper()
+                            raw_token = item.get("instrument_token")
+                            if not tradingsymbol:
+                                continue
+                            if isinstance(raw_token, bool):
+                                continue
+                            try:
+                                token = int(raw_token)
+                            except (TypeError, ValueError):
+                                continue
+                            if token <= 0:
+                                continue
+                            valid_items.append({
+                                **item,
+                                "tradingsymbol": tradingsymbol,
+                                "instrument_token": token,
+                            })
+
                         if len(valid_items) > 0:
                             self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in valid_items}
-                            self._memory_cache_loaded_at[exchange] = mtime
+                            self._memory_cache_loaded_at[exchange] = now_ist_naive()
                             return valid_items
                         else:
                             logger.warning(
@@ -132,7 +153,7 @@ class InstrumentResolver:
                     json.dump(sanitized, f)
 
                 self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in sanitized}
-                self._memory_cache_loaded_at[exchange] = datetime.now()
+                self._memory_cache_loaded_at[exchange] = now_ist_naive()
                 logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
                 return sanitized
             else:
@@ -167,13 +188,37 @@ class InstrumentResolver:
                 return int(inst["instrument_token"])
 
         if exchange == "NFO" and "NIFTY" in sym_clean:
-            fut_candidates = [
-                i for i in instruments
-                if i.get("name") == "NIFTY" and i.get("instrument_type") == "FUT"
-            ]
+            today = now_ist_naive().date()
+            fut_candidates = []
+            for inst in instruments:
+                if (
+                    str(inst.get("name") or "").strip().upper() != "NIFTY"
+                    or str(inst.get("instrument_type") or "").strip().upper() != "FUT"
+                ):
+                    continue
+
+                expiry_raw = str(inst.get("expiry") or "")[:10]
+                try:
+                    expiry = datetime.fromisoformat(expiry_raw).date()
+                except ValueError:
+                    continue
+
+                if expiry < today:
+                    continue
+
+                try:
+                    token = int(inst["instrument_token"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+
+                if token <= 0:
+                    continue
+
+                fut_candidates.append((expiry, token))
+
             if fut_candidates:
-                fut_candidates.sort(key=lambda x: x.get("expiry") or "9999-12-31")
-                return int(fut_candidates[0]["instrument_token"])
+                fut_candidates.sort(key=lambda item: item[0])
+                return fut_candidates[0][1]
 
         return None
 
@@ -233,7 +278,7 @@ class InstrumentResolver:
             logger.warning("Universe token cache has invalid generated_at timestamp.")
             return None
 
-        if datetime.now() - generated_at >= UNIVERSE_TOKEN_CACHE_TTL:
+        if now_ist_naive() - generated_at >= UNIVERSE_TOKEN_CACHE_TTL:
             logger.info("Universe token cache expired; refreshing from Kite.")
             return None
 
@@ -406,7 +451,7 @@ class InstrumentResolver:
             payload = {
                 "version": UNIVERSE_TOKEN_CACHE_VERSION,
                 "exchange": "NSE",
-                "generated_at": datetime.now().isoformat(),
+                "generated_at": now_ist_naive().isoformat(),
                 "symbols": sorted(target_symbols),
                 "tokens": {
                     symbol: resolved[symbol]
@@ -447,8 +492,8 @@ class InstrumentResolver:
         exchange: str = "NFO",
         instrument_type: str = "FUT",
         kite_client: Optional[Any] = None,
-        fallback: int = 25,
-    ) -> int:
+        fallback: Optional[int] = None,
+    ) -> Optional[int]:
         sym_clean = symbol.strip().upper()
         cache_key = f"lotsize_{exchange}_{sym_clean}_{instrument_type}"
         if hasattr(self, "_lot_size_cache") and cache_key in self._lot_size_cache:
@@ -468,7 +513,21 @@ class InstrumentResolver:
                         self._lot_size_cache[cache_key] = lot_val
                         return lot_val
 
-        return fallback
+        if fallback is not None:
+            logger.warning(
+                "Using explicitly supplied lot-size fallback for %s:%s",
+                exchange,
+                sym_clean,
+            )
+            return fallback
+
+        logger.error(
+            "Could not resolve lot size for %s:%s:%s from Kite instrument master.",
+            exchange,
+            sym_clean,
+            instrument_type,
+        )
+        return None
 
     def find_nearest_single_stock_future(
         self,

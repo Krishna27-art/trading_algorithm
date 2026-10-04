@@ -148,24 +148,45 @@ SECTOR_DEFINITIONS: Dict[str, SectorDefinition] = {
 }
 
 # General fallback for symbols not explicitly classified
-DEFAULT_SECTOR = SectorDefinition(
-    name="GENERAL_EQUITY",
-    primary_leader="RELIANCE",
-    secondary_leader="HDFCBANK",
-    market_index="NIFTY",
-)
+DEFAULT_SECTOR: Optional[SectorDefinition] = None
 
 
 class SectorPeerManager:
     """Manages sector classification and peer context loading for SIT."""
 
     @classmethod
-    def get_sector_for_symbol(cls, symbol: str) -> SectorDefinition:
+    def get_sector_for_symbol(
+        cls,
+        symbol: str,
+    ) -> Optional[SectorDefinition]:
         sym = symbol.strip().upper()
+
+        matches = []
+
         for sec in SECTOR_DEFINITIONS.values():
-            if sym in sec.constituents or sym == sec.primary_leader or sym == sec.secondary_leader:
-                return sec
-        return DEFAULT_SECTOR
+            if (
+                sym in sec.constituents
+                or sym == sec.primary_leader
+                or sym == sec.secondary_leader
+            ):
+                matches.append(sec)
+
+        if len(matches) > 1:
+            logger.error(
+                "Ambiguous sector classification for %s: %s",
+                sym,
+                [sec.name for sec in matches],
+            )
+            return None
+
+        if not matches:
+            logger.warning(
+                "No authoritative sector classification for symbol %s",
+                sym,
+            )
+            return None
+
+        return matches[0]
 
     @classmethod
     def get_peer_symbols(cls, symbol: str) -> Tuple[str, str, str]:
@@ -174,6 +195,10 @@ class SectorPeerManager:
         If symbol IS the primary leader, the secondary leader acts as the peer leader.
         """
         sec = cls.get_sector_for_symbol(symbol)
+        if sec is None:
+            raise ValueError(
+                f"No authoritative sector classification for {symbol}"
+            )
         sym = symbol.strip().upper()
 
         if sym == sec.primary_leader:
@@ -200,40 +225,60 @@ class SectorPeerManager:
         from data.historical_loader import HistoricalDataLoader
 
         c_dir = cache_dir or (settings.base_dir / "data" / "cache")
-        leader_sym, market_sym, sector_sym = cls.get_peer_symbols(symbol)
+        try:
+            leader_sym, market_sym, sector_sym = cls.get_peer_symbols(symbol)
+        except ValueError as e:
+            logger.debug("Cannot build PeerContext for %s: %s", symbol, e)
+            return None
 
         def load_df(sym: str) -> Optional[pd.DataFrame]:
+            latest_completed = (
+                HistoricalDataLoader.get_latest_completed_candle_start(
+                    now_ist_naive()
+                )
+            )
+
             # Try specific cached file first
             c_file = c_dir / f"{sym}_15m.csv"
             if c_file.exists():
                 try:
                     df, _ = HistoricalDataLoader.load_cached_data_with_validation(c_file)
                     if not df.empty and "datetime" in df.columns and "close" in df.columns:
-                        return df
+                        df["datetime"] = pd.to_datetime(df["datetime"])
+                        if latest_completed is None or df["datetime"].max() >= latest_completed:
+                            return df
+                        logger.warning(
+                            "Ignoring stale peer cache for %s: latest=%s expected>=%s",
+                            sym,
+                            df["datetime"].max(),
+                            latest_completed,
+                        )
                 except Exception as e:
-                    logger.debug(f"Failed to load cached 15m data for {sym}: {e}")
+                    logger.debug("Failed to load cached 15m data for %s: %s", sym, e)
 
             # Fall back to NIFTY cache if market is NIFTY
             if sym == "NIFTY":
-                for alt_name in ("NIFTY_15m.csv", "NIFTY50_15m.csv", "NIFTY_15m_180d.csv"):
+                for alt_name in (
+                    "NIFTY_15m.csv",
+                    "NIFTY50_15m.csv",
+                    "NIFTY_15m_180d.csv",
+                ):
                     alt_file = c_dir / alt_name
                     if alt_file.exists():
                         try:
                             df, _ = HistoricalDataLoader.load_cached_data_with_validation(alt_file)
                             if not df.empty and "datetime" in df.columns and "close" in df.columns:
-                                return df
-                        except Exception:
-                            pass
-                # Fall back to RELIANCE or HDFCBANK as market proxy
-                for proxy in ("RELIANCE", "HDFCBANK", "TCS"):
-                    proxy_file = c_dir / f"{proxy}_15m.csv"
-                    if proxy_file.exists():
-                        try:
-                            df, _ = HistoricalDataLoader.load_cached_data_with_validation(proxy_file)
-                            if not df.empty:
-                                return df
-                        except Exception:
-                            pass
+                                df["datetime"] = pd.to_datetime(df["datetime"])
+                                if latest_completed is None or df["datetime"].max() >= latest_completed:
+                                    return df
+                                logger.warning(
+                                    "Ignoring stale NIFTY cache %s: latest=%s expected>=%s",
+                                    alt_file,
+                                    df["datetime"].max(),
+                                    latest_completed,
+                                )
+                        except Exception as exc:
+                            logger.debug("Failed to load NIFTY cache %s: %s", alt_file, exc)
 
             # If Kite client is available, fetch real historical data
             if kite_client is not None:
@@ -254,7 +299,7 @@ class SectorPeerManager:
                         if not df.empty:
                             return df
                 except Exception as e:
-                    logger.debug(f"Failed to fetch live Kite data for peer {sym}: {e}")
+                    logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, e)
 
             return None
 
@@ -276,23 +321,31 @@ class SectorPeerManager:
         # If any essential frame is missing, return None
         if df_leader is None or df_market is None or df_sector is None:
             logger.debug(
-                f"SIT PeerContext incomplete for {symbol}: "
-                f"leader({leader_sym})={'OK' if df_leader is not None else 'MISSING'}, "
-                f"market({market_sym})={'OK' if df_market is not None else 'MISSING'}, "
-                f"sector({sector_sym})={'OK' if df_sector is not None else 'MISSING'}"
+                "SIT PeerContext incomplete for %s: "
+                "leader(%s)=%s, "
+                "market(%s)=%s, "
+                "sector(%s)=%s",
+                symbol,
+                leader_sym,
+                "OK" if df_leader is not None else "MISSING",
+                market_sym,
+                "OK" if df_market is not None else "MISSING",
+                sector_sym,
+                "OK" if df_sector is not None else "MISSING",
             )
             return None
 
         try:
             return PeerContext(leader=df_leader, market=df_market, sector=df_sector)
         except Exception as e:
-            logger.warning(f"Failed to initialize PeerContext for {symbol}: {e}")
+            logger.warning("Failed to initialize PeerContext for %s: %s", symbol, e)
             return None
 
     @classmethod
-    def get_sector_name(cls, symbol: str) -> str:
+    def get_sector_name(cls, symbol: str) -> Optional[str]:
         """Return the sector name string for a given symbol."""
-        return cls.get_sector_for_symbol(symbol).name
+        sec = cls.get_sector_for_symbol(symbol)
+        return sec.name if sec is not None else None
 
 
 # Authoritative sector-to-index mapping for SSF Sector Residual Momentum
@@ -314,6 +367,8 @@ SSF_SECTOR_INDEX_SYMBOLS: Dict[str, str] = {
 def get_sector_index_symbol(symbol: str) -> str:
     """Return the NSE sector index symbol corresponding to the stock symbol."""
     sec_name = SectorPeerManager.get_sector_name(symbol)
+    if sec_name is None:
+        return "NIFTY 50"
     return SSF_SECTOR_INDEX_SYMBOLS.get(sec_name, "NIFTY 50")
 
 

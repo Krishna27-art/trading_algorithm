@@ -54,14 +54,9 @@ STRATEGY_KEYS = (
     "aou_oss",
 )
 
-# These are the only strategies allowed to contribute to live consensus
-# in the current architecture. The other two remain visible but do not vote.
-LIVE_CONSENSUS_STRATEGIES = (
-    "orb",
-    "cpr",
-    "dual_ema",
-    "apex",
-)
+# Every live strategy is independently evaluated and can contribute
+# to consensus when it returns a valid evaluable result.
+LIVE_CONSENSUS_STRATEGIES = STRATEGY_KEYS
 
 REQUIRED_CANDLE_COLUMNS = {
     "datetime",
@@ -970,7 +965,7 @@ class PredictionService:
         # the actual market price is passed into the equity configuration.
         inst = create_instrument_config_for_equity(
             clean_symbol,
-            token or 0,
+            token,
             current_price=ltp,
         )
 
@@ -1974,7 +1969,7 @@ class PredictionService:
         book_snapshot: Optional[Any] = None,
         ssf_strategy: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
-        if book_snapshot is None or len(getattr(book_snapshot, "bids", [])) < 5 or len(getattr(book_snapshot, "asks", [])) < 5:
+        if ssf_strategy is None and (book_snapshot is None or len(getattr(book_snapshot, "bids", [])) < 5 or len(getattr(book_snapshot, "asks", [])) < 5):
             return SingleStrategyPrediction(
                 status="UNAVAILABLE",
                 reason=(
@@ -1985,12 +1980,36 @@ class PredictionService:
             )
 
         strategy = ssf_strategy
+        signal = None
+
         if strategy is None:
+            if inst.token is None or inst.token <= 0:
+                return SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        "SSF-L5-SRM requires a valid instrument token."
+                    ),
+                    levels={},
+                    metrics={},
+                )
             strategy = SsfL5SrmStrategy(
                 inst,
                 self.settings.strategy,
                 signal_only=True,
             )
+            try:
+                signal = strategy.on_book_update(
+                    book_snapshot
+                )
+            except Exception as exc:
+                return SingleStrategyPrediction(
+                    status="ERROR",
+                    reason=(
+                        "SSF-L5-SRM book evaluation "
+                        f"failed: {type(exc).__name__}: {exc}"
+                    ),
+                    levels={},
+                )
 
         regime_ok = bool(
             getattr(
@@ -2010,25 +2029,6 @@ class PredictionService:
             "regime_ok": regime_ok,
             "bars_tracked": len(bars),
         }
-
-        # on_book_update() calls _features() internally exactly once.
-        # Never call _features() separately first — it is NOT pure:
-        # it mutates _mids, _z_mlofi, _z_micro, _z_oi, _z_sector,
-        # _basis_hist, and _prev_oi, so calling it twice distorts the
-        # rolling statistics.
-        try:
-            signal = strategy.on_book_update(
-                book_snapshot
-            )
-        except Exception as exc:
-            return SingleStrategyPrediction(
-                status="ERROR",
-                reason=(
-                    "SSF-L5-SRM book evaluation "
-                    f"failed: {type(exc).__name__}: {exc}"
-                ),
-                levels=levels,
-            )
 
         # Read features written by on_book_update() to avoid the
         # double-evaluation bug while still exposing feature values.
@@ -2071,6 +2071,22 @@ class PredictionService:
                         "SSF Level-5 microstructure "
                         "generated a validated SHORT signal."
                     ),
+                    levels=levels,
+                )
+        elif strategy is not None and getattr(strategy, "_last_signal_direction", 0) != 0:
+            last_dir = getattr(strategy, "_last_signal_direction", 0)
+            if last_dir == 1:
+                return SingleStrategyPrediction(
+                    status="SSF_LONG",
+                    direction="LONG",
+                    reason="SSF Level-5 microstructure generated a validated LONG signal.",
+                    levels=levels,
+                )
+            elif last_dir == -1:
+                return SingleStrategyPrediction(
+                    status="SSF_SHORT",
+                    direction="SHORT",
+                    reason="SSF Level-5 microstructure generated a validated SHORT signal.",
                     levels=levels,
                 )
 
@@ -2370,6 +2386,8 @@ class PredictionService:
                     > runtime.last_candle_open
                 ]
 
+            latest_signal = None
+
             for _, row in new_candles.iterrows():
                 candle = self._candle_dict(
                     row
@@ -2384,15 +2402,17 @@ class PredictionService:
 
                 signal = strategy.on_candle(
                     candle,
-                    vwap=float(close_p),
+                    vwap=float(row["vwap"]),
                 )
 
                 runtime.last_candle_open = (
                     row["datetime"]
                 )
 
-                if signal is not None:
-                    runtime.last_signal = signal
+                latest_signal = signal
+
+            if not new_candles.empty:
+                runtime.last_signal = latest_signal
 
             current_signal = (
                 runtime.last_signal

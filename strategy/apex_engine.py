@@ -685,9 +685,8 @@ class ApexAivemStrategy(BaseStrategy):
             oir = _clip_signed(float(supplied_oir))
             oir_source = "BOOK"
         else:
-            candle_range = max(high - low, float(self.instrument.tick_size))
-            oir = _clip_signed((close - open_price) / candle_range)
-            oir_source = "CANDLE_PROXY"
+            oir = None
+            oir_source = "UNAVAILABLE"
 
         # Feature scores are normalized to roughly [-1, +1].
         if gap_atr is not None:
@@ -722,8 +721,10 @@ class ApexAivemStrategy(BaseStrategy):
         if volume_component is not None:
             active_components.append((self.cfg.w_vol, volume_component))
 
-        if self.context.get("order_imbalance") is not None or oir_source == "CANDLE_PROXY":
-            active_components.append((self.cfg.w_oir, oir))
+        if oir is not None:
+            active_components.append(
+                (self.cfg.w_oir, oir)
+            )
 
         if sector_rs is not None:
             active_components.append((self.cfg.w_sector, float(sector_rs)))
@@ -756,7 +757,7 @@ class ApexAivemStrategy(BaseStrategy):
             "gap_atr": gap_atr,
             "rvol": rvol,
             "avg_slot_volume": avg_volume,
-            "oir": float(oir),
+            "oir": oir,
             "oir_source": oir_source,
             "sector_rs": sector_rs,
             "market_rs": market_rs,

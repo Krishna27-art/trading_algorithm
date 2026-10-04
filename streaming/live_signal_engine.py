@@ -572,11 +572,18 @@ class LiveSignalEngine:
                     circuit_upper=ctx.circuit_upper or book_snap.circuit_upper,
                 )
 
-            ssf_strat = self._ssf_runtime.get_strategy(
-                symbol=symbol,
-                token=int(token or 0),
-                current_price=float(live_ltp),
-            )
+            ssf_strat = None
+
+            if (
+                token is not None
+                and isinstance(token, int)
+                and token > 0
+            ):
+                ssf_strat = self._ssf_runtime.get_strategy(
+                    symbol=symbol,
+                    token=token,
+                    current_price=float(live_ltp),
+                )
 
             # current_ltp is explicitly the freshest verified market price,
             # not the completed candle's close unless no fresher price exists.
@@ -717,10 +724,17 @@ class LiveSignalEngine:
             return
 
         state = live_market_state.get_symbol_state(clean)
-        token = state.token if state else 0
+        token = state.token if state else None
         ltp = snapshot.ltp
 
         if not self._valid_price(ltp):
+            return
+
+        if token is None or not isinstance(token, int) or token <= 0:
+            logger.warning(
+                "[LiveSignalEngine] No valid Kite token for SSF update: %s",
+                clean,
+            )
             return
 
         # Merge futures / sector context into the snapshot.
@@ -742,7 +756,7 @@ class LiveSignalEngine:
         try:
             strategy = self._ssf_runtime.get_strategy(
                 symbol=clean,
-                token=int(token or 0),
+                token=token,
                 current_price=float(ltp),
             )
             strategy.on_book_update(enriched)

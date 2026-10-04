@@ -9,7 +9,13 @@ import { getMarketPrices } from '../api/market'
 import { formatCurrency, formatNumber } from '../utils/format'
 
 function formatCompactVolume(vol) {
-  if (vol === null || vol === undefined || Number.isNaN(vol) || vol === 0) return '0'
+  if (vol === null || vol === undefined || Number.isNaN(vol)) {
+    return 'N/A'
+  }
+
+  if (vol === 0) {
+    return '0'
+  }
   const num = Number(vol)
   if (num >= 10000000) return `${(num / 10000000).toFixed(2)}Cr`
   if (num >= 100000) return `${(num / 100000).toFixed(2)}L`
@@ -96,7 +102,7 @@ export default function StocksPage({ isAuthenticated }) {
               <div className="h-6 w-6 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
                 <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
               </div>
-              <h1 className="text-base font-bold tracking-tight text-[var(--text)]">300 Stocks</h1>
+              <h1 className="text-base font-bold tracking-tight text-[var(--text)]">700 Stocks</h1>
             </div>
 
             {isAuthRequired ? (
@@ -108,7 +114,7 @@ export default function StocksPage({ isAuthenticated }) {
             )}
 
             <span className="text-xs text-[var(--text-faint)] font-mono">
-              Universe: {stocks.length ? `${stocks.length} Constituents` : '300 Constituents'}
+              Universe: {stocks.length ? `${stocks.length} Constituents` : '700 Constituents'}
             </span>
           </div>
 
@@ -132,8 +138,8 @@ export default function StocksPage({ isAuthenticated }) {
         <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--card-bg,rgba(255,255,255,0.02))]">
           <p className="text-xs text-[var(--text-faint)]">Total Scanned</p>
           <div className="flex items-baseline gap-2 mt-1">
-            <span className="text-lg font-num font-bold text-[var(--text)]">{stats.total || 300}</span>
-            <span className="text-xs text-[var(--text-dim)]">100L / 100M / 100S</span>
+            <span className="text-lg font-num font-bold text-[var(--text)]">{stats.total}</span>
+            <span className="text-xs text-[var(--text-dim)]">100L / 100M / 500S</span>
           </div>
         </div>
 
@@ -189,10 +195,10 @@ export default function StocksPage({ isAuthenticated }) {
           {/* Category Tabs */}
           <div className="flex items-center gap-1 bg-white/[0.03] p-1 rounded-md border border-[var(--border)]">
             {[
-              { id: 'all', label: 'All (300)' },
+              { id: 'all', label: 'All (700)' },
               { id: 'large', label: 'Large (100)' },
               { id: 'mid', label: 'Mid (100)' },
-              { id: 'small', label: 'Small (100)' },
+              { id: 'small', label: 'Small (500)' },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -217,7 +223,7 @@ export default function StocksPage({ isAuthenticated }) {
         ) : isAuthRequired ? (
           <EmptyState
             label="Kite Authentication Required"
-            hint="Please log in with Zerodha Kite in System settings to stream real live market quotes for the 300 stocks."
+            hint="Please log in with Zerodha Kite in System settings to stream real live market quotes for the 700-stock universe."
           />
         ) : filteredStocks.length === 0 ? (
           <EmptyState label="No matching stocks found" hint="Try adjusting your search or category filter." />
@@ -314,7 +320,7 @@ export default function StocksPage({ isAuthenticated }) {
 
                       {/* Volume */}
                       <td className="py-2.5 pr-3 text-right text-[var(--text-dim)]">
-                        {isAvailable ? formatCompactVolume(stock.volume) : '0'}
+                        {isAvailable ? formatCompactVolume(stock.volume) : 'N/A'}
                       </td>
 
                       {/* VWAP */}

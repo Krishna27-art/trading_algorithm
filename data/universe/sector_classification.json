@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "source": "NSE",
+  "effective_date": "2026-01-01",
+  "sectors": {
+    "IT": {
+      "primary_leader": "TCS",
+      "secondary_leader": "INFY",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY IT",
+      "constituents": [
+        "TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "LTIM", "PERSISTENT", "COFORGE",
+        "MPHASIS", "LTTS", "TATAELXSI", "ZENSARTECH", "CYIENT", "KPITTECH", "SONACOMS",
+        "CAMS", "ECLERX", "BSOFT", "OFSS", "MASTEK", "HAPPSTMNDS", "TANLA"
+      ]
+    },
+    "BANKING": {
+      "primary_leader": "HDFCBANK",
+      "secondary_leader": "ICICIBANK",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY BANK",
+      "constituents": [
+        "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK", "INDUSINDBK",
+        "BANKBARODA", "PNB", "FEDERALBNK", "IDFCFIRSTB", "AUBANK", "BANDHANBNK",
+        "CANBK", "UNIONBANK", "INDIANB", "UCOBANK", "UJJIVANSFB", "MAHABANK",
+        "CENTRALBK", "IOB", "PSB", "KARURVYSYA", "CUB", "RBLBANK"
+      ]
+    },
+    "AUTO": {
+      "primary_leader": "MARUTI",
+      "secondary_leader": "TMPV",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY AUTO",
+      "constituents": [
+        "MARUTI", "TMPV", "TATAMOTORS", "M&M", "BAJAJ-AUTO", "EICHERMOT", "HEROMOTOCO",
+        "TVSMOTOR", "ASHOKLEY", "BHARATFORG", "MOTHERSON", "BOSCHLTD", "BALKRISIND",
+        "MRF", "APOLLOTYRE", "SONACOMS", "EXIDEIND", "ARE&M", "AMARAJA", "ENDURANCE",
+        "TIINDIA", "CRAFTSMAN", "CEATLTD"
+      ]
+    },
+    "ENERGY_POWER": {
+      "primary_leader": "RELIANCE",
+      "secondary_leader": "NTPC",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY ENERGY",
+      "constituents": [
+        "RELIANCE", "NTPC", "POWERGRID", "ONGC", "BPCL", "IOC", "COALINDIA", "GAIL",
+        "TATAPOWER", "ADANIGREEN", "ADANIPOWER", "NHPC", "SJVN", "OIL", "PETRONET",
+        "IGL", "MGL", "GUJGASLTD", "TORNTPOWER", "CESC", "SUZLON"
+      ]
+    },
+    "METALS": {
+      "primary_leader": "TATASTEEL",
+      "secondary_leader": "JSWSTEEL",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY METAL",
+      "constituents": [
+        "TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "JINDALSTEL", "NMDC", "SAIL",
+        "NATIONALUM", "HINDZINC", "APLAPOLLO", "WELCORP", "RATNAMANI", "JSL"
+      ]
+    },
+    "PHARMA_HEALTH": {
+      "primary_leader": "SUNPHARMA",
+      "secondary_leader": "DRREDDY",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY PHARMA",
+      "constituents": [
+        "SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP", "MANKIND",
+        "ZYDUSLIFE", "TORNTPHARM", "LUPIN", "AUROPHARMA", "BIOCON", "GLENMARK",
+        "IPCALAB", "LAURUSLABS", "SYNGENE", "FORTIS", "MAXHEALTH", "NATCOPHARM",
+        "JBCHEMPHARM", "GRANULES", "MARKSANS", "NEULANDLAB", "AJANTPHARM", "ALKEM"
+      ]
+    },
+    "FMCG_CONSUMER": {
+      "primary_leader": "HINDUNILVR",
+      "secondary_leader": "ITC",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY FMCG",
+      "constituents": [
+        "HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "TATACONSUM", "VBL",
+        "GODREJCP", "DABUR", "MARICO", "COLPAL", "PGHH", "EMAMILTD", "RADICO",
+        "UBL", "MCDOWELL-N", "DEVYANI", "JUBLFOOD", "BIKAJI", "GODREJAGRO"
+      ]
+    },
+    "FIN_SERVICES": {
+      "primary_leader": "BAJFINANCE",
+      "secondary_leader": "BAJAJFINSV",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY FIN SERVICE",
+      "constituents": [
+        "BAJFINANCE", "BAJAJFINSV", "SHRIRAMFIN", "CHOLAFIN", "MUTHOOTFIN", "SBILIFE",
+        "HDFCLIFE", "ICICIPRULI", "ICICIGI", "HDFCAMC", "PFC", "RECLTD", "IREDA",
+        "HUDCO", "LICHSGFIN", "CANFINHOME", "PNBHOUSING", "POONAWALLA", "MANAPPURAM",
+        "CREDITACC", "MASFIN", "SUNDARMFIN", "SHAREINDIA", "ANGELONE", "CDSL"
+      ]
+    },
+    "INFRA_CAPGOODS_REALTY": {
+      "primary_leader": "LT",
+      "secondary_leader": "SIEMENS",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY INFRA",
+      "constituents": [
+        "LT", "SIEMENS", "ABB", "BHEL", "BEL", "HAL", "HAVELLS", "POLYCAB", "KEI",
+        "CUMMINSIND", "VOLTAS", "BLUESTARCO", "THERMAX", "ASTRAL", "SUPREMEIND",
+        "DLF", "GODREJPROP", "OBERORLTY", "PHOENIXLTD", "BRIGADE", "PRESTIGE",
+        "SOBHA", "NBCC", "GMRINFRA", "IRB", "NCC", "PNCINFRA", "KNRCON", "RITES",
+        "IRCON", "RVNL", "ENGINERSIN", "KPIL", "MTARTECH", "MTARTECH-BE", "ADOR"
+      ]
+    },
+    "CHEMICALS": {
+      "primary_leader": "PIDILITIND",
+      "secondary_leader": "SRF",
+      "market_index": "NIFTY",
+      "sector_index": "NIFTY COMMODITIES",
+      "constituents": [
+        "PIDILITIND", "SRF", "AARTIIND", "DEEPAKNTR", "TATACHEM", "ATUL",
+        "NAVINFLUOR", "VINATIORGA", "FINEORG", "ALKYLAMINE", "BALAMINES", "CLEAN",
+        "SUMICHEM", "FLUOROCHEM", "STYRENIX", "ANDHRSUGAR", "HEG", "HEGAM"
+      ]
+    }
+  }
+}

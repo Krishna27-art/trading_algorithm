@@ -39,7 +39,7 @@ from __future__ import annotations
 import time as _time
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, List, Optional, Protocol
+from typing import Any, List, Optional, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,37 @@ import pandas as pd
 from data.market_calendar import MarketCalendar
 from data.time_utils import now_ist_iso, now_ist_naive
 from monitoring.logger import logger
+
+IST = "Asia/Kolkata"
+
+
+def _normalize_timestamp_to_ist_naive(value: Any) -> Optional[datetime]:
+    """
+    Convert any timezone-aware timestamp to Asia/Kolkata and then
+    return a naive IST datetime.
+
+    Naive timestamps are treated as already-IST.
+    """
+    if value is None:
+        return None
+
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+
+    if pd.isna(ts):
+        return None
+
+    if ts.tzinfo is not None:
+        try:
+            ts = ts.tz_convert(IST)
+        except (TypeError, ValueError):
+            return None
+
+        ts = ts.tz_localize(None)
+
+    return ts.to_pydatetime()
 
 # Kite's documented max days per request, by interval. Pulling a wider range
 # than this in one call gets rejected by the API, not silently truncated.
@@ -137,15 +168,77 @@ class HistoricalDataLoader:
         as-is if force_refresh=False and it already covers the requested range.
         """
         if cache_path is not None and cache_path.exists() and not force_refresh:
-            cached = pd.read_csv(cache_path, parse_dates=["datetime"])
-            cached_start = cached["datetime"].dt.date.min()
-            cached_end = cached["datetime"].dt.date.max()
-            if cached_start <= start_date and cached_end >= end_date:
-                logger.info(f"Using cached historical data from {cache_path} "
-                            f"({cached_start} to {cached_end}).")
-                mask = (cached["datetime"].dt.date >= start_date) & (cached["datetime"].dt.date <= end_date)
-                return cached.loc[mask].reset_index(drop=True)
-            logger.info("Cache exists but doesn't cover the requested range — refetching.")
+            try:
+                cached, metadata = (
+                    HistoricalDataLoader
+                    .load_cached_data_with_validation(cache_path)
+                )
+
+                if cached.empty:
+                    raise ValueError(
+                        f"Cached historical data is empty: {cache_path}"
+                    )
+
+                if metadata is not None:
+                    cached_interval = metadata.get("interval")
+                    if cached_interval != interval:
+                        raise ValueError(
+                            f"Cached interval mismatch: "
+                            f"cached={cached_interval!r}, expected={interval!r}"
+                        )
+
+                    cached_token = metadata.get("instrument_token")
+                    if cached_token is not None:
+                        try:
+                            if int(cached_token) != int(instrument_token):
+                                raise ValueError(
+                                    f"Cached instrument token mismatch: "
+                                    f"cached={cached_token!r}, "
+                                    f"expected={instrument_token!r}"
+                                )
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"Invalid cached instrument token metadata: "
+                                f"{cached_token!r}"
+                            ) from exc
+
+                cached_start = cached["datetime"].dt.date.min()
+                cached_end = cached["datetime"].dt.date.max()
+
+                if cached_start <= start_date and cached_end >= end_date:
+                    logger.info(
+                        f"Using validated cached historical data from "
+                        f"{cache_path} ({cached_start} to {cached_end})."
+                    )
+
+                    mask = (
+                        (cached["datetime"].dt.date >= start_date)
+                        & (cached["datetime"].dt.date <= end_date)
+                    )
+
+                    result = cached.loc[mask].copy()
+                    result = (
+                        result
+                        .sort_values("datetime")
+                        .drop_duplicates(
+                            subset="datetime",
+                            keep="last",
+                        )
+                        .reset_index(drop=True)
+                    )
+
+                    return result
+
+                logger.info(
+                    "Validated cache exists but does not cover the "
+                    "requested range — refetching."
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    f"Cached historical data rejected: "
+                    f"{cache_path}: {exc}. Refetching from Kite."
+                )
 
         max_days = _MAX_DAYS_PER_REQUEST.get(interval, 60)
         all_rows: List[dict] = []
@@ -204,7 +297,15 @@ class HistoricalDataLoader:
 
         df = pd.DataFrame(all_rows)
         df.rename(columns={"date": "datetime"}, inplace=True)
-        df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(None)
+        df["datetime"] = (
+            df["datetime"]
+            .map(_normalize_timestamp_to_ist_naive)
+        )
+
+        if df["datetime"].isna().any():
+            raise ValueError(
+                "Historical data contains invalid/unconvertible timestamps."
+            )
         df = df[["datetime", "open", "high", "low", "close", "volume"]]
         df.drop_duplicates(subset="datetime", inplace=True)
         df.sort_values("datetime", inplace=True)
@@ -427,19 +528,51 @@ class HistoricalDataLoader:
             )
         )
 
-        # Before the first completed 15m candle, do not expose a previous
-        # day's dataset as today's live intraday state.
+        # Before the first completed 15m candle of today, use completed
+        # candles up to the previous session close so warm-up succeeds.
         if latest_completed is None:
-            return pd.DataFrame(
-                columns=[
-                    "datetime",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                ]
-            )
+            prev_close_dt = datetime.combine(today - timedelta(days=1), time(15, 30))
+            if cache_path.exists():
+                try:
+                    cached, _ = (
+                        HistoricalDataLoader
+                        .load_cached_data_with_validation(cache_path)
+                    )
+                    if not cached.empty:
+                        cached["datetime"] = (
+                            cached["datetime"]
+                            .map(_normalize_timestamp_to_ist_naive)
+                        )
+                        cached = cached[cached["datetime"] <= prev_close_dt]
+                        if not cached.empty:
+                            return cached.sort_values("datetime").reset_index(drop=True)
+                except Exception:
+                    pass
+            # If no valid cache on disk, fetch prior completed days up to yesterday
+            try:
+                start_date = today - timedelta(days=int(lookback_days))
+                fresh = HistoricalDataLoader.fetch_real_data(
+                    kite_client=kite_client,
+                    instrument_token=instrument_token,
+                    start_date=start_date,
+                    end_date=today - timedelta(days=1),
+                    interval=interval,
+                    cache_path=cache_path,
+                    force_refresh=True,
+                    request_pause_seconds=request_pause_seconds,
+                )
+                return fresh
+            except Exception:
+                return pd.DataFrame(
+                    columns=[
+                        "datetime",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ]
+                )
 
         cached = pd.DataFrame()
 
@@ -451,9 +584,15 @@ class HistoricalDataLoader:
                 )
 
                 if not cached.empty:
-                    cached["datetime"] = pd.to_datetime(
+                    cached["datetime"] = (
                         cached["datetime"]
-                    ).dt.tz_localize(None)
+                        .map(_normalize_timestamp_to_ist_naive)
+                    )
+
+                    if cached["datetime"].isna().any():
+                        raise ValueError(
+                            f"Cached data contains invalid timestamps: {cache_path}"
+                        )
 
                     cached = cached.sort_values(
                         "datetime"
@@ -487,14 +626,14 @@ class HistoricalDataLoader:
             return cached
 
         # First download: get enough prior history for CPR / EMA warm-up.
-        #
-        # Later refreshes: ONLY request today's intraday candles.
+        # Later refreshes: request from the last cached date to today.
         if cached.empty:
             start_date = today - timedelta(
                 days=int(lookback_days)
             )
         else:
-            start_date = today
+            cached_max_date = cached["datetime"].max().date()
+            start_date = max(cached_max_date, today - timedelta(days=7))
 
         logger.info(
             f"Refreshing intraday cache for token "
@@ -502,26 +641,44 @@ class HistoricalDataLoader:
             f"latest completed candle={latest_completed}"
         )
 
-        fresh = HistoricalDataLoader.fetch_real_data(
-            kite_client=kite_client,
-            instrument_token=instrument_token,
-            start_date=start_date,
-            end_date=today,
-            interval=interval,
-            cache_path=None,
-            force_refresh=True,
-            request_pause_seconds=request_pause_seconds,
-        )
+        try:
+            fresh = HistoricalDataLoader.fetch_real_data(
+                kite_client=kite_client,
+                instrument_token=instrument_token,
+                start_date=start_date,
+                end_date=today,
+                interval=interval,
+                cache_path=None,
+                force_refresh=True,
+                request_pause_seconds=request_pause_seconds,
+            )
+        except Exception as exc:
+            if not cached.empty:
+                logger.info(
+                    f"Incremental Kite fetch failed for token {instrument_token}: {exc}. "
+                    "Using existing cached history."
+                )
+                return cached
+            raise
 
         if fresh.empty:
+            if not cached.empty:
+                return cached
             raise RuntimeError(
                 f"Kite returned no intraday candles for "
                 f"token {instrument_token} on {today}."
             )
 
-        fresh["datetime"] = pd.to_datetime(
+        fresh["datetime"] = (
             fresh["datetime"]
-        ).dt.tz_localize(None)
+            .map(_normalize_timestamp_to_ist_naive)
+        )
+
+        if fresh["datetime"].isna().any():
+            raise ValueError(
+                f"Fresh Kite data contains invalid timestamps "
+                f"for token {instrument_token}."
+            )
 
         # Remove the currently-forming candle.
         fresh = fresh[

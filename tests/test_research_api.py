@@ -22,6 +22,7 @@ from strategy.prediction_service import (
 def test_prediction_service_consensus_rules():
     """Verifies deterministic consensus calculations across dynamic strategy counts (4 live strategies)."""
     # 1. Unanimous Long (4/4 live)
+    # 1. Unanimous Long (7 live)
     preds_long = {
         "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG"),
         "cpr": SingleStrategyPrediction(status="BULLISH_EXPANSION", direction="LONG"),
@@ -29,16 +30,18 @@ def test_prediction_service_consensus_rules():
         "apex": SingleStrategyPrediction(status="APEX_LONG", direction="LONG"),
         "sector_impulse": SingleStrategyPrediction(status="IMPULSE_LONG", direction="LONG"),
         "ssf_l5_srm": SingleStrategyPrediction(status="SSF_LONG", direction="LONG"),
+        "aou_oss": SingleStrategyPrediction(status="AOU_LONG", direction="LONG"),
+        "crsd": SingleStrategyPrediction(status="NO_TRADE"),
     }
     c_long = PredictionService.calculate_consensus(preds_long)
     assert c_long["direction"] == "LONG"
-    assert c_long["agreeing_strategies"] == 4
-    assert c_long["total_strategies"] == 4
-    assert c_long["evaluable_strategies"] == 4
-    assert c_long["label"] == "STRONG LONG (4/4)"
-    assert c_long["excluded_strategies"] == ["sector_impulse", "ssf_l5_srm"]
+    assert c_long["agreeing_strategies"] == 7
+    assert c_long["total_strategies"] == 7
+    assert c_long["evaluable_strategies"] == 7
+    assert c_long["label"] == "STRONG LONG (7/7)"
+    assert c_long["excluded_strategies"] == ["crsd"]
 
-    # 2. Strong Short 3/4
+    # 2. Strong Short 4/7
     preds_short = {
         "orb": SingleStrategyPrediction(status="SHORT_BREAKDOWN", direction="SHORT"),
         "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT"),
@@ -46,15 +49,16 @@ def test_prediction_service_consensus_rules():
         "apex": SingleStrategyPrediction(status="APEX_SHORT", direction="SHORT"),
         "sector_impulse": SingleStrategyPrediction(status="IMPULSE_SHORT", direction="SHORT"),
         "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE"),
+        "aou_oss": SingleStrategyPrediction(status="NO_TRADE"),
     }
     c_short = PredictionService.calculate_consensus(preds_short)
     assert c_short["direction"] == "SHORT"
-    assert c_short["agreeing_strategies"] == 3
-    assert c_short["total_strategies"] == 4
-    assert c_short["evaluable_strategies"] == 4
-    assert c_short["label"] == "STRONG SHORT (3/4)"
+    assert c_short["agreeing_strategies"] == 4
+    assert c_short["total_strategies"] == 7
+    assert c_short["evaluable_strategies"] == 7
+    assert c_short["label"] == "STRONG SHORT (4/7)"
 
-    # 3. Divergent with new strategies
+    # 3. Divergent with opposing strategies
     preds_divergent = {
         "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG"),
         "cpr": SingleStrategyPrediction(status="BEARISH_EXPANSION", direction="SHORT"),
@@ -65,7 +69,7 @@ def test_prediction_service_consensus_rules():
     }
     c_div = PredictionService.calculate_consensus(preds_divergent)
     assert c_div["direction"] == "DIVERGENT"
-    assert "DIVERGENT (1L / 1S)" in c_div["label"]
+    assert "DIVERGENT (2L / 2S)" in c_div["label"]
 
     # 4. Neutral
     preds_neutral = {
@@ -75,11 +79,12 @@ def test_prediction_service_consensus_rules():
         "apex": SingleStrategyPrediction(status="NO_TRADE"),
         "sector_impulse": SingleStrategyPrediction(status="NO_TRADE"),
         "ssf_l5_srm": SingleStrategyPrediction(status="NO_TRADE"),
+        "aou_oss": SingleStrategyPrediction(status="NO_TRADE"),
     }
     c_neut = PredictionService.calculate_consensus(preds_neutral)
     assert c_neut["direction"] == "NEUTRAL"
     assert c_neut["agreeing_strategies"] == 0
-    assert c_neut["total_strategies"] == 4
+    assert c_neut["total_strategies"] == 7
     assert c_neut["label"] == "NEUTRAL"
 
 
@@ -202,15 +207,11 @@ def test_prediction_service_all_strategies():
     df = HistoricalDataLoader.generate_synthetic_nifty_data(days=15, seed=42)
     preds, consensus = prediction_service.evaluate_symbol(symbol="NIFTY", df_15m=df, current_ltp=24000.0)
 
-    expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss"]
+    expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss", "crsd"]
     assert sorted(list(preds.keys())) == sorted(expected_keys)
-    assert consensus["total_strategies"] == 4
+    assert consensus["total_strategies"] == 7
     assert consensus["evaluable_strategies"] == 4
-    assert consensus["excluded_strategies"] == [
-        "aou_oss",
-        "sector_impulse",
-        "ssf_l5_srm",
-    ]
+    assert consensus["excluded_strategies"] == ["crsd"]
 
     for k in expected_keys:
         p = preds[k]
@@ -223,7 +224,7 @@ def test_prediction_service_all_strategies():
 
 
 def test_consensus_with_unavailable_and_no_trade_strategies():
-    """Verifies live consensus uses only the four live-enabled strategies."""
+    """Verifies live consensus uses only the live-enabled strategies."""
     preds_2_long_4_notrade = {
         "orb": SingleStrategyPrediction(status="LONG_BREAKOUT", direction="LONG"),
         "cpr": SingleStrategyPrediction(status="BULLISH_EXPANSION", direction="LONG"),
@@ -235,8 +236,8 @@ def test_consensus_with_unavailable_and_no_trade_strategies():
     c1 = PredictionService.calculate_consensus(preds_2_long_4_notrade)
     assert c1["direction"] == "LONG"
     assert c1["agreeing_strategies"] == 2
-    assert c1["total_strategies"] == 4
-    assert c1["label"] == "MODERATE LONG (2/4)"
+    assert c1["total_strategies"] == 6
+    assert c1["label"] == "MODERATE LONG (2/6)"
 
     # All unavailable
     preds_all_unavail = {
@@ -282,8 +283,7 @@ def test_prediction_service_with_real_book_snapshot_and_peer_context():
 
 def test_consensus_ignores_non_live_strategies():
     """
-    SIT and SSF-L5-SRM must never affect live consensus until their live
-    signal paths are explicitly enabled.
+    CRSD is a pair/hedged strategy and must never affect single-name directional consensus.
     """
     predictions = {
         "orb": SingleStrategyPrediction(
@@ -300,13 +300,9 @@ def test_consensus_ignores_non_live_strategies():
         "apex": SingleStrategyPrediction(
             status="NO_TRADE",
         ),
-        # These must be ignored even though they contain directions.
-        "sector_impulse": SingleStrategyPrediction(
-            status="IMPULSE_SHORT",
-            direction="SHORT",
-        ),
-        "ssf_l5_srm": SingleStrategyPrediction(
-            status="SSF_SHORT",
+        # CRSD must be ignored in directional consensus even if it contains a direction.
+        "crsd": SingleStrategyPrediction(
+            status="CRSD_SHORT",
             direction="SHORT",
         ),
     }
@@ -319,8 +315,7 @@ def test_consensus_ignores_non_live_strategies():
     assert consensus["evaluable_strategies"] == 4
     assert consensus["label"] == "MODERATE LONG (2/4)"
     assert consensus["excluded_strategies"] == [
-        "sector_impulse",
-        "ssf_l5_srm",
+        "crsd",
     ]
 
 

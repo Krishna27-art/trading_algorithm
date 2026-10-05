@@ -33,7 +33,7 @@ from config.universe import (
 from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver
 from data.market_calendar import MarketCalendar
-from data.time_utils import today_ist
+from data.time_utils import today_ist, now_ist_naive
 from monitoring.logger import logger
 from scanner.liquidity_filter import LiquidityFilter, LiquidityStatus
 
@@ -67,6 +67,32 @@ class StockRankingMetrics:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ScannerSnapshot:
+    generated_at: datetime
+    candidates: List[StockRankingMetrics]
+
+    @property
+    def symbols(self) -> List[str]:
+        return [
+            item.symbol
+            for item in self.candidates
+            if (
+                item.liquidity_status == LiquidityStatus.PASS.value
+                and item.token is not None
+                and item.token > 0
+                and item.ltp > 0
+            )
+        ]
+
+    @property
+    def rankings(self) -> Dict[str, StockRankingMetrics]:
+        return {item.symbol: item for item in self.candidates}
+
+    def get_candidate(self, symbol: str) -> Optional[StockRankingMetrics]:
+        return self.rankings.get(symbol)
 
 
 class StockUniverseScanner:
@@ -405,6 +431,27 @@ class StockUniverseScanner:
                 top_n,
             ),
             "SYNTHETIC",
+        )
+
+    def scan_universe_snapshot(
+        self,
+        kite_client: Optional[Any] = None,
+        top_n: int = 0,
+        force_refresh_history: bool = False,
+        allow_synthetic: bool = False,
+    ) -> ScannerSnapshot:
+        """
+        Scan the universe and return a validated ScannerSnapshot for live streaming.
+        """
+        candidates, _ = self.scan_universe(
+            kite_client=kite_client,
+            top_n=top_n,
+            force_refresh_history=force_refresh_history,
+            allow_synthetic=allow_synthetic,
+        )
+        return ScannerSnapshot(
+            generated_at=now_ist_naive(),
+            candidates=candidates,
         )
 
     def _load_cached_historical_context(

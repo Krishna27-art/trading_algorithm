@@ -41,7 +41,10 @@ import pandas as pd
 
 from broker.kite_adapter import get_saved_session, get_active_kite
 from config.settings import settings
-from config.universe import resolve_universe_tokens
+from config.universe import (
+    StockUniverse,
+    resolve_universe_tokens,
+)
 from data.candle_aggregator import MultiSymbolCandleAggregator
 from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver
@@ -65,6 +68,7 @@ MAX_EVALUATION_WORKERS = 16
 
 EVALUATION_QUEUE_SIZE = 1000
 HISTORY_REFRESH_QUEUE_SIZE = 500
+L5_QUEUE_SIZE = 5000
 
 
 class StreamState(str, Enum):
@@ -112,6 +116,7 @@ class MarketStreamManager:
 
         self.futures_token_to_symbol: Dict[int, str] = {}
         self.index_token_to_symbol: Dict[int, str] = {}
+        self.scanner_snapshot: Optional[Any] = None
 
         # --------------------------------------------------------------
         # HISTORY STATE
@@ -197,6 +202,31 @@ class MarketStreamManager:
             threading.Thread
         ] = None
 
+        # --------------------------------------------------------------
+        # SSF L5 BOOK QUEUE AND WORKER
+        # --------------------------------------------------------------
+        self._book_queue = queue.Queue(
+            maxsize=L5_QUEUE_SIZE
+        )
+
+        self._book_worker_started = False
+        self._book_worker_thread: Optional[
+            threading.Thread
+        ] = None
+
+        self._ssf_seed_thread: Optional[
+            threading.Thread
+        ] = None
+
+    def set_scanner_snapshot(self, snapshot: Optional[Any]) -> None:
+        with self._lock:
+            self.scanner_snapshot = snapshot
+        live_signal_engine.set_scanner_snapshot(snapshot)
+
+    def get_scanner_snapshot(self) -> Optional[Any]:
+        with self._lock:
+            return self.scanner_snapshot
+
     # ==================================================================
     # CONFIGURATION
     # ==================================================================
@@ -256,6 +286,17 @@ class MarketStreamManager:
             )
 
             self._history_refresh_thread.start()
+
+        if not self._book_worker_started:
+            self._book_worker_started = True
+
+            self._book_worker_thread = threading.Thread(
+                target=self._book_worker_loop,
+                name="ssf-l5-worker",
+                daemon=True,
+            )
+
+            self._book_worker_thread.start()
 
     # ==================================================================
     # TIMESTAMP HELPERS
@@ -552,6 +593,33 @@ class MarketStreamManager:
                 clean_symbol,
             )
 
+            # Immediately enqueue initial strategy evaluation using the latest completed candle
+            # so signals appear immediately on startup rather than forcing a 15-30 minute wait.
+            try:
+                latest_row = df.iloc[-1].to_dict()
+                latest_candle = {
+                    "symbol": clean_symbol,
+                    "datetime": latest_row.get("datetime"),
+                    "open": float(latest_row.get("open", 0.0)),
+                    "high": float(latest_row.get("high", 0.0)),
+                    "low": float(latest_row.get("low", 0.0)),
+                    "close": float(latest_row.get("close", 0.0)),
+                    "volume": int(latest_row.get("volume", 0)),
+                }
+                latest_vwap = float(latest_row.get("vwap", latest_candle["close"]))
+                self._enqueue_evaluation(
+                    candle_dict=latest_candle,
+                    vwap=latest_vwap,
+                    kite_client=kite_client,
+                    generation=generation or self._stream_generation,
+                )
+            except Exception as eval_exc:
+                logger.debug(
+                    "[MarketStreamManager] Initial history evaluation enqueue skipped for %s: %s",
+                    clean_symbol,
+                    eval_exc,
+                )
+
             return True
 
         except Exception as exc:
@@ -590,6 +658,46 @@ class MarketStreamManager:
                 symbol=symbol,
                 kite_client=kite_client,
                 generation=generation,
+            )
+
+    def _book_worker_loop(self) -> None:
+        while True:
+            item = self._book_queue.get()
+
+            try:
+                symbol, snapshot = item
+
+                live_signal_engine.on_book_update(
+                    symbol=symbol,
+                    snapshot=snapshot,
+                )
+
+            except Exception:
+                logger.exception(
+                    "[MarketStreamManager] SSF L5 worker failed."
+                )
+
+            finally:
+                self._book_queue.task_done()
+
+    def _seed_ssf_history_background(
+        self,
+        kite_client: Any,
+        generation: int,
+    ) -> None:
+        try:
+            with self._lock:
+                if generation != self._stream_generation:
+                    return
+
+            ssf_one_minute_runtime.seed_historical_data(
+                kite_client
+            )
+
+        except Exception:
+            logger.exception(
+                "[MarketStreamManager] Background SSF "
+                "historical seeding failed."
             )
 
     # ==================================================================
@@ -1042,6 +1150,52 @@ class MarketStreamManager:
                     if token
                 }
 
+                expected_symbols = {
+                    str(record.symbol).strip().upper()
+                    for record in StockUniverse().all_stocks
+                }
+
+                resolved_symbols = {
+                    str(symbol).strip().upper()
+                    for symbol in token_to_symbol.values()
+                }
+
+                missing_symbols = (
+                    expected_symbols
+                    - resolved_symbols
+                )
+
+                unexpected_symbols = (
+                    resolved_symbols
+                    - expected_symbols
+                )
+
+                if (
+                    missing_symbols
+                    or unexpected_symbols
+                    or len(resolved_symbols) != len(expected_symbols)
+                ):
+                    self.state = StreamState.ERROR
+
+                    self.last_error = (
+                        "Refusing to start market stream because "
+                        "the resolved universe is not exactly the required "
+                        f"{len(expected_symbols)}-stock universe. "
+                        f"resolved={len(resolved_symbols)}, "
+                        f"expected={len(expected_symbols)}, "
+                        f"missing={len(missing_symbols)}, "
+                        f"unexpected={len(unexpected_symbols)}"
+                    )
+
+                    logger.error(
+                        "[MarketStreamManager] %s",
+                        self.last_error,
+                    )
+
+                    raise RuntimeError(
+                        self.last_error
+                    )
+
             else:
                 token_to_symbol = {
                     int(token): (
@@ -1114,7 +1268,7 @@ class MarketStreamManager:
                 self.token_to_symbol.values()
             ):
                 try:
-                    fut_tok = (
+                    fut_info = (
                         instrument_resolver
                         .find_nearest_single_stock_future(
                             sym,
@@ -1122,10 +1276,38 @@ class MarketStreamManager:
                         )
                     )
 
-                    if fut_tok:
-                        self.futures_token_to_symbol[
-                            int(fut_tok)
-                        ] = sym
+                    if fut_info is None:
+                        continue
+
+                    raw_fut_token = fut_info.get(
+                        "instrument_token"
+                    )
+
+                    try:
+                        fut_token = int(
+                            raw_fut_token
+                        )
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "[MarketStreamManager] Invalid futures "
+                            "instrument token for %s: %r",
+                            sym,
+                            raw_fut_token,
+                        )
+                        continue
+
+                    if fut_token <= 0:
+                        logger.warning(
+                            "[MarketStreamManager] Non-positive futures "
+                            "instrument token for %s: %s",
+                            sym,
+                            fut_token,
+                        )
+                        continue
+
+                    self.futures_token_to_symbol[
+                        fut_token
+                    ] = sym
 
                 except Exception as exc:
                     logger.debug(
@@ -1247,8 +1429,20 @@ class MarketStreamManager:
                     self.token_to_symbol.values()
                 ),
                 kite_client=kite_client,
-                seed_history=True,
+                seed_history=False,
             )
+
+            self._ssf_seed_thread = threading.Thread(
+                target=self._seed_ssf_history_background,
+                args=(
+                    kite_client,
+                    self._stream_generation,
+                ),
+                name="ssf-history-seed",
+                daemon=True,
+            )
+
+            self._ssf_seed_thread.start()
 
             # ==========================================================
             # CANDLE CLOSE CALLBACK
@@ -1314,9 +1508,8 @@ class MarketStreamManager:
                     )
 
                     token = (
-                        state.token
-                        if state is not None
-                        else None
+                        (state.token if state is not None else None)
+                        or self.symbol_to_token.get(symbol)
                     )
 
                     self._schedule_symbol_history_refresh(
@@ -1394,12 +1587,19 @@ class MarketStreamManager:
                     snapshot,
                 )
 
-                # L5 updates remain separate from candle-close strategy
-                # evaluation. The persistent SSF runtime receives them here.
-                live_signal_engine.on_book_update(
-                    symbol=symbol,
-                    snapshot=snapshot,
-                )
+                try:
+                    self._book_queue.put_nowait(
+                        (
+                            symbol,
+                            snapshot,
+                        )
+                    )
+                except queue.Full:
+                    logger.error(
+                        "[MarketStreamManager] SSF L5 queue full; "
+                        "dropping newest snapshot for %s.",
+                        symbol,
+                    )
 
             # ==========================================================
             # CANDLE AGGREGATOR
@@ -1585,6 +1785,12 @@ class MarketStreamManager:
                             ssf_one_minute_runtime.on_tick(
                                 tick
                             )
+
+                        # NIFTY is also intentionally part of
+                        # token_to_symbol so it must enter the
+                        # normal 15-minute aggregation pipeline.
+                        if tok in self.token_to_symbol:
+                            cash_ticks.append(tick)
 
                         continue
 
@@ -2070,6 +2276,9 @@ class MarketStreamManager:
                 "last_evaluation_error": (
                     self._last_evaluation_error
                 ),
+
+                "history_ready_count": len(self._history_ready_symbols),
+                "history_refresh_queue_size": self._history_refresh_queue.qsize(),
             }
 
 

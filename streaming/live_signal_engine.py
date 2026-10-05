@@ -43,6 +43,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import pandas as pd
 
 from data.time_utils import now_ist, now_ist_iso
+from strategy.base_strategy import SignalAction
 from strategy.prediction_service import prediction_service
 from strategy.ssf_l5_srm_strategy import BookSnapshot
 from streaming.crsd_live_runtime import crsd_live_runtime
@@ -91,6 +92,15 @@ class LiveSignalEngine:
         # z-score buffers, basis history, and regime state accumulate correctly.
         self._ssf_runtime = ssf_live_runtime
         self._crsd_runtime = crsd_live_runtime
+        self._scanner_snapshot: Optional[Any] = None
+
+    def set_scanner_snapshot(self, snapshot: Optional[Any]) -> None:
+        with self._lock:
+            self._scanner_snapshot = snapshot
+
+    def get_scanner_snapshot(self) -> Optional[Any]:
+        with self._lock:
+            return self._scanner_snapshot
 
     # ------------------------------------------------------------------
     # NORMALIZATION / VALIDATION
@@ -577,6 +587,9 @@ class LiveSignalEngine:
                     stock_ret_30m=ctx.stock_ret_30m,
                     circuit_lower=ctx.circuit_lower or book_snap.circuit_lower,
                     circuit_upper=ctx.circuit_upper or book_snap.circuit_upper,
+                    futures_updated_at=ctx.futures_updated_at,
+                    sector_return_updated_at=ctx.sector_return_updated_at,
+                    stock_return_updated_at=ctx.stock_return_updated_at,
                 )
 
             ssf_strat = None
@@ -606,16 +619,24 @@ class LiveSignalEngine:
 
             # current_ltp is explicitly the freshest verified market price,
             # not the completed candle's close unless no fresher price exists.
+            stock_metric = (
+                self._scanner_snapshot.rankings.get(symbol)
+                if self._scanner_snapshot is not None
+                else None
+            )
+
             preds, consensus = prediction_service.evaluate_symbol(
                 symbol=symbol,
                 df_15m=data,
                 current_ltp=live_ltp,
                 token=token,
+                stock_metric=stock_metric,
                 book_snapshot=book_snap,
-                peer_context=crsd_ctx,
+                peer_context=None,
                 kite_client=kite_client,
                 ssf_strategy=ssf_strat,
                 live_ltp_by_symbol=live_ltp_by_symbol,
+                crsd_context=crsd_ctx,
             )
 
             prediction_payload = {
@@ -647,6 +668,11 @@ class LiveSignalEngine:
                 "timestamp": now_ist_iso(),
                 "data_source": "KITE_STREAM",
             }
+
+            if stock_metric is not None:
+                result["scanner_rank"] = stock_metric.rank
+                result["scanner_score"] = stock_metric.total_score
+                result["scanner_bias"] = stock_metric.direction_bias
 
             self._store_result(
                 symbol,
@@ -772,6 +798,13 @@ class LiveSignalEngine:
             stock_ret_30m=ctx.stock_ret_30m,
             circuit_lower=ctx.circuit_lower or snapshot.circuit_lower,
             circuit_upper=ctx.circuit_upper or snapshot.circuit_upper,
+            futures_updated_at=ctx.futures_updated_at,
+            sector_return_updated_at=ctx.sector_return_updated_at,
+            stock_return_updated_at=ctx.stock_return_updated_at,
+        )
+
+        ltp_timestamp = self._normalize_timestamp(
+            getattr(snapshot, "timestamp", None)
         )
 
         try:
@@ -780,7 +813,101 @@ class LiveSignalEngine:
                 token=token,
                 current_price=float(ltp),
             )
-            strategy.on_book_update(enriched)
+            signal = strategy.on_book_update(enriched)
+            if signal is None:
+                return
+
+            ssf_prediction = (
+                prediction_service
+                ._prediction_from_signal(
+                    status=(
+                        "SSF_LONG"
+                        if signal.action == SignalAction.BUY
+                        else "SSF_SHORT"
+                    ),
+                    signal=signal,
+                    ltp=float(ltp),
+                    default_reason=(
+                        signal.reason
+                        or "SSF Level-5 generated a validated live signal."
+                    ),
+                    levels=(
+                        getattr(
+                            strategy,
+                            "last_features",
+                            {}
+                        )
+                        or {}
+                    ),
+                )
+            )
+
+            with self._lock:
+                # _predictions stores flat result dicts (see _store_result /
+                # on_candle_close). Read the prior per-strategy predictions
+                # from the "predictions" key of the existing payload — never
+                # treat the whole payload as a (preds, consensus) tuple.
+                prior_payload = self._predictions.get(clean)
+                if isinstance(prior_payload, dict):
+                    prior_per_strategy = dict(
+                        prior_payload.get("predictions", {})
+                    )
+                else:
+                    prior_per_strategy = {}
+
+                # Merge the fresh SSF prediction into the prior per-strategy
+                # dict so that candle-close results for other strategies are
+                # preserved alongside this book-update SSF result.
+                prior_per_strategy.pop("SSF-L5-SRM", None)
+                prior_per_strategy["ssf_l5_srm"] = ssf_prediction
+
+                consensus = prediction_service.calculate_consensus(
+                    prior_per_strategy
+                )
+
+            # Build a full flat result dict — identical shape to what
+            # on_candle_close / _store_result produces so that
+            # get_all_predictions() / get_live_signals() work uniformly.
+            result = {
+                "symbol": clean,
+                "token": token,
+                "ltp": round(float(ltp), 2),
+                "ltp_source": "L5_STREAM",
+                "ltp_timestamp": (
+                    ltp_timestamp.isoformat()
+                    if ltp_timestamp is not None
+                    else None
+                ),
+                "candle_close": (
+                    prior_payload.get("candle_close")
+                    if isinstance(prior_payload, dict)
+                    else None
+                ),
+                "candle_timestamp": (
+                    prior_payload.get("candle_timestamp")
+                    if isinstance(prior_payload, dict)
+                    else None
+                ),
+                "vwap": (
+                    prior_payload.get("vwap")
+                    if isinstance(prior_payload, dict)
+                    else None
+                ),
+                "predictions": {
+                    key: (
+                        value.to_dict()
+                        if hasattr(value, "to_dict")
+                        else value
+                    )
+                    for key, value in prior_per_strategy.items()
+                },
+                "consensus": consensus,
+                "timestamp": now_ist_iso(),
+                "data_source": "KITE_STREAM",
+            }
+
+            self._store_result(clean, result)
+
         except Exception as exc:
             logger.warning(
                 "[LiveSignalEngine] SSF book-update failed for %s: %s: %s",

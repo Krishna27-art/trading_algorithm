@@ -1129,7 +1129,7 @@ class AouOssStrategy(BaseStrategy):
 
         if spread_bps is None:
             self.state.l2_spread_bps = None
-            self.state.l2_passed = True
+            self.state.l2_passed = False
         else:
             self.state.l2_spread_bps = spread_bps
             self.state.l2_passed = (
@@ -1579,8 +1579,8 @@ class AouOssStrategy(BaseStrategy):
 
         if spread_bps is None:
             self.state.l2_spread_bps = None
-            self.state.l2_passed = True
-            return True
+            self.state.l2_passed = False
+            return False
 
         passed = (
             spread_bps

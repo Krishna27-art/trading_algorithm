@@ -1,5 +1,6 @@
 """System health route — every field is derived from observed state."""
 
+from datetime import datetime
 import logging
 import sqlite3
 from typing import Any, Dict
@@ -17,6 +18,51 @@ router = APIRouter()
 
 # Stream states (as reported by MarketStreamManager.get_status()["state"]).
 _LIVE_STATES = {"LIVE", "CONNECTED", "RUNNING"}
+MARKET_DATA_STALE_AFTER_SECONDS = 120
+
+
+def _has_fresh_market_feed(
+    kite_connected: bool,
+    stream_status: Dict[str, Any],
+) -> bool:
+    if not kite_connected:
+        return False
+
+    if stream_status.get("connected") is not True:
+        return False
+
+    age = stream_status.get("last_tick_age_seconds")
+
+    if not isinstance(age, (int, float)):
+        return False
+
+    if age < 0:
+        return False
+
+    return age <= MARKET_DATA_STALE_AFTER_SECONDS
+
+
+def _fresh_prediction_timestamp(
+    value: Any,
+    max_age_seconds: float = MARKET_DATA_STALE_AFTER_SECONDS,
+) -> bool:
+    if not value:
+        return False
+
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+
+    if ts.tzinfo is not None:
+        now = datetime.now(ts.tzinfo)
+    else:
+        from data.time_utils import now_ist_naive
+        now = now_ist_naive()
+
+    age = (now - ts).total_seconds()
+
+    return 0 <= age <= max_age_seconds
 
 
 def _classify(stream_state: str) -> str:
@@ -78,6 +124,11 @@ def get_system_health() -> Dict[str, Any]:
 
     stream_class = _classify(stream_state)
 
+    market_feed_fresh = _has_fresh_market_feed(
+        kite_connected=kite_conn,
+        stream_status=stream_status,
+    )
+
     try:
         predictions = (
             live_signal_engine.get_all_predictions()
@@ -92,23 +143,38 @@ def get_system_health() -> Dict[str, Any]:
             if not isinstance(prediction, dict):
                 continue
 
-            if prediction.get("direction") in {
-                "LONG",
-                "SHORT",
-            } and prediction.get("status") not in {
+            direction = prediction.get("direction")
+            status = prediction.get("status")
+
+            if direction not in {"LONG", "SHORT"}:
+                continue
+
+            if status in {
                 "UNAVAILABLE",
                 "ERROR",
                 "NO_TRADE",
                 "WAITING",
             }:
-                producing_signal_count += 1
+                continue
+
+            if not market_feed_fresh:
+                continue
+
+            if not _fresh_prediction_timestamp(
+                prediction.get("ltp_timestamp")
+            ):
+                continue
+
+            producing_signal_count += 1
 
         engine_state = (
             "PRODUCING_SIGNALS"
             if producing_signal_count > 0
             else (
                 "IDLE"
-                if stream_class == "LIVE"
+                if market_feed_fresh
+                else "STALE"
+                if stream_status.get("connected") is True
                 else "NOT_RUNNING"
             )
         )
@@ -120,19 +186,29 @@ def get_system_health() -> Dict[str, Any]:
 
     if not kite_conn:
         overall = "DISCONNECTED"
-    elif stream_class == "LIVE" and engine_state != "ERROR":
-        overall = "LIVE"
-    elif stream_class in ("STALE", "ERROR"):
-        overall = stream_class
     elif engine_state == "ERROR":
         overall = "ERROR"
+    elif stream_class == "ERROR":
+        overall = "ERROR"
+    elif market_feed_fresh:
+        overall = "LIVE"
+    elif stream_status.get("connected") is True:
+        overall = "STALE"
     else:
         overall = "STANDBY"  # authenticated, stream not started
 
     return {
         "backend": "ONLINE",
         "kite_api": "CONNECTED" if kite_conn else "DISCONNECTED",
-        "market_data": "CONNECTED" if kite_conn else "DISCONNECTED",
+        "market_data": (
+            "CONNECTED"
+            if market_feed_fresh
+            else (
+                "STALE"
+                if kite_conn and stream_status.get("connected") is True
+                else "DISCONNECTED"
+            )
+        ),
         "market_stream": stream_state,
         "market_stream_error": stream_error,
         "database": "CONNECTED" if db_ok else "ERROR",

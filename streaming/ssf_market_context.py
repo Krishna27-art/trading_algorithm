@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Any, Deque, Dict, Optional, Tuple
 
 from data.time_utils import now_ist_naive
+from monitoring.logger import logger
 
 
 @dataclass
@@ -88,13 +89,47 @@ class SSFContextStore:
     ) -> None:
         """Record the latest near-month futures LTP and OI for *symbol*."""
         clean = str(symbol).strip().upper()
+        try:
+            valid_ltp = (
+                fut_ltp is not None
+                and float(fut_ltp) > 0
+            )
+
+            valid_oi = (
+                fut_oi is not None
+                and float(fut_oi) >= 0
+            )
+        except (TypeError, ValueError):
+            valid_ltp = False
+            valid_oi = False
+
+        if not (
+            valid_ltp
+            and valid_oi
+        ):
+            logger.warning(
+                "[SSFContextStore] Rejecting incomplete "
+                "futures context for %s: "
+                "fut_ltp=%r fut_oi=%r",
+                clean,
+                fut_ltp,
+                fut_oi,
+            )
+            return
+
         now = timestamp or now_ist_naive()
+
         with self._lock:
             ctx = self._get_or_create(clean)
-            if fut_ltp is not None:
-                ctx.fut_ltp = float(fut_ltp)
-            if fut_oi is not None:
-                ctx.fut_oi = float(fut_oi)
+
+            ctx.fut_ltp = float(
+                fut_ltp
+            )
+
+            ctx.fut_oi = float(
+                fut_oi
+            )
+
             ctx.futures_updated_at = now
             ctx.last_updated = now
 

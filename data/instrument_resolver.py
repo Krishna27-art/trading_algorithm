@@ -16,7 +16,17 @@ from data.time_utils import IST, now_ist_naive
 
 logger = logging.getLogger(__name__)
 
-# Known canonical tokens for major indices on NSE
+INDEX_SYMBOL_ALIASES = {
+    "NIFTY": "NIFTY 50",
+    "NIFTY 50": "NIFTY 50",
+    "BANKNIFTY": "NIFTY BANK",
+    "NIFTY BANK": "NIFTY BANK",
+    "FINNIFTY": "NIFTY FIN SERVICE",
+    "MIDCPNIFTY": "NIFTY MID SELECT",
+    "INDIA VIX": "INDIA VIX",
+    "INDIAVIX": "INDIA VIX",
+}
+
 CANONICAL_INDEX_TOKENS = {
     "NIFTY": 256265,          # NSE:NIFTY 50
     "NIFTY 50": 256265,
@@ -66,6 +76,8 @@ class InstrumentResolver:
         self._memory_cache.pop(exchange, None)
         self._memory_cache_loaded_at.pop(exchange, None)
 
+        min_expected = 500 if exchange == "NSE" else 1
+
         # Check disk cache
         if cache_file.exists():
             try:
@@ -73,7 +85,7 @@ class InstrumentResolver:
                 if cache_age_seconds < UNIVERSE_TOKEN_CACHE_TTL.total_seconds():
                     with open(cache_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    if isinstance(data, list) and len(data) > 0:
+                    if isinstance(data, list) and len(data) >= min_expected:
                         valid_items = []
                         for item in data:
                             if not isinstance(item, dict):
@@ -98,7 +110,7 @@ class InstrumentResolver:
                                 "instrument_token": token,
                             })
 
-                        if len(valid_items) > 0:
+                        if len(valid_items) >= min_expected:
                             self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in valid_items}
                             self._memory_cache_loaded_at[exchange] = (
                                 datetime.fromtimestamp(
@@ -109,11 +121,11 @@ class InstrumentResolver:
                             return valid_items
                         else:
                             logger.warning(
-                                f"Disk cache for {exchange} contains no valid instrument records. Bypassing cache."
+                                f"Disk cache for {exchange} contains only {len(valid_items)} valid records (< {min_expected}). Bypassing cache."
                             )
                     else:
                         logger.warning(
-                            f"Disk cache for {exchange} is empty or invalid format. Bypassing cache."
+                            f"Disk cache for {exchange} is incomplete or invalid format (contains {len(data) if isinstance(data, list) else 'invalid'} items). Bypassing cache."
                         )
             except Exception as e:
                 logger.warning(f"Failed to read disk cache for {exchange}: {e}")
@@ -152,12 +164,17 @@ class InstrumentResolver:
                         continue
 
             if sanitized:
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump(sanitized, f)
+                if len(sanitized) >= min_expected:
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        json.dump(sanitized, f)
+                    logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
+                else:
+                    logger.info(
+                        f"Fetched {len(sanitized)} instruments for {exchange} (in-memory only; below minimum threshold of {min_expected})."
+                    )
 
                 self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in sanitized}
                 self._memory_cache_loaded_at[exchange] = now_ist_naive()
-                logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
                 return sanitized
             else:
                 logger.warning(f"Kite returned 0 instruments for {exchange}.")
@@ -181,14 +198,44 @@ class InstrumentResolver:
         """
         sym_clean = symbol.strip().upper()
 
-        if sym_clean in CANONICAL_INDEX_TOKENS:
+        if exchange == "NSE" and sym_clean in CANONICAL_INDEX_TOKENS:
             return CANONICAL_INDEX_TOKENS[sym_clean]
 
-        instruments = self.get_instruments(kite_client, exchange=exchange)
+        lookup_symbol = INDEX_SYMBOL_ALIASES.get(
+            sym_clean,
+            sym_clean,
+        )
+
+        instruments = self.get_instruments(
+            kite_client,
+            exchange=exchange,
+        )
+
+        lookup_candidates = {
+            lookup_symbol,
+            f"{lookup_symbol}-BE",
+            lookup_symbol.replace("-BE", ""),
+        }
 
         for inst in instruments:
-            if inst.get("tradingsymbol") == sym_clean:
-                return int(inst["instrument_token"])
+            tradingsymbol = str(
+                inst.get("tradingsymbol") or ""
+            ).strip().upper()
+
+            if tradingsymbol not in lookup_candidates:
+                continue
+
+            raw_token = inst.get("instrument_token")
+
+            try:
+                token = int(raw_token)
+            except (TypeError, ValueError):
+                continue
+
+            if token <= 0:
+                continue
+
+            return token
 
         if exchange == "NFO" and "NIFTY" in sym_clean:
             today = now_ist_naive().date()
@@ -393,6 +440,25 @@ class InstrumentResolver:
 
         # 2. No trustworthy cache -> authoritative Kite master.
         if kite_client is None:
+            # If target_cache exists and has all target symbols, return it as offline fallback
+            if target_cache.exists():
+                try:
+                    with open(target_cache, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    raw_tokens = payload.get("tokens", {})
+                    if isinstance(raw_tokens, dict) and target_symbols.issubset(raw_tokens.keys()):
+                        fallback_tokens = {
+                            s: int(raw_tokens[s])
+                            for s in target_symbols
+                            if int(raw_tokens[s]) > 0
+                        }
+                        if len(fallback_tokens) == len(target_symbols):
+                            logger.info(
+                                f"Using existing universe token cache as offline fallback: {len(fallback_tokens)} symbols."
+                            )
+                            return fallback_tokens, []
+                except Exception:
+                    pass
             logger.error(
                 "Cannot resolve universe tokens: no valid cache and no Kite client."
             )
@@ -406,29 +472,30 @@ class InstrumentResolver:
         resolved: Dict[str, int] = {}
         token_to_symbols: Dict[int, List[str]] = {}
 
+        # Build lookup table of valid NSE instrument tokens
+        inst_by_sym: Dict[str, int] = {}
         for inst in instruments:
             symbol = str(inst.get("tradingsymbol") or "").strip().upper()
             raw_token = inst.get("instrument_token")
-
-            if symbol not in target_symbols:
-                continue
-
             try:
                 token = int(raw_token)
+                if token > 0:
+                    inst_by_sym[symbol] = token
             except (TypeError, ValueError):
-                logger.warning(
-                    f"Ignoring invalid Kite token for {symbol}: {raw_token!r}"
-                )
                 continue
 
-            if token <= 0:
-                logger.warning(
-                    f"Ignoring non-positive Kite token for {symbol}: {token}"
-                )
-                continue
-
-            resolved[symbol] = token
-            token_to_symbols.setdefault(token, []).append(symbol)
+        for target in target_symbols:
+            # 1. Exact match
+            # 2. -BE series fallback (e.g. TNTELE -> TNTELE-BE)
+            # 3. Strip -BE fallback (e.g. HFCL-BE -> HFCL)
+            token = (
+                inst_by_sym.get(target)
+                or inst_by_sym.get(f"{target}-BE")
+                or inst_by_sym.get(target.replace("-BE", ""))
+            )
+            if token is not None:
+                resolved[target] = token
+                token_to_symbols.setdefault(token, []).append(target)
 
         # 3. Reject duplicate token assignments.
         duplicate_tokens = {

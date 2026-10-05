@@ -294,19 +294,38 @@ class LiveMarketState:
                 self._symbols[symbol] = state
 
             state.vwap = vwap
-            state.ltp = float(candle_dict.get("close", state.ltp))
-            state.close = state.ltp
-            state.volume += int(candle_dict.get("volume", 0))
-            state.latest_completed_candle = dict(candle_dict)
 
-            # Store in rolling buffer, avoiding duplicates by datetime
-            dt = candle_dict.get("datetime")
-            if not any(c.get("datetime") == dt for c in state.completed_candles):
-                state.completed_candles.append(dict(candle_dict))
-                if len(state.completed_candles) > self._max_candle_history:
+            # NEVER overwrite live LTP/close with a completed candle close.
+            # update_tick() is the only live-price writer.
+
+            state.latest_completed_candle = dict(
+                candle_dict
+            )
+
+            # Store in rolling buffer, avoiding duplicates by datetime.
+            dt = candle_dict.get(
+                "datetime"
+            )
+
+            if not any(
+                c.get("datetime") == dt
+                for c in state.completed_candles
+            ):
+                state.completed_candles.append(
+                    dict(candle_dict)
+                )
+
+                if (
+                    len(state.completed_candles)
+                    > self._max_candle_history
+                ):
                     state.completed_candles.pop(0)
 
-            state.updated_at = now_ist_naive()
+            # IMPORTANT:
+            # Do NOT update state.last_tick_time.
+            # Do NOT update state.updated_at here.
+            #
+            # Those fields describe live tick freshness, not candle completion.
 
     def update_book_snapshot(self, symbol: str, snapshot: Any) -> None:
         with self._lock:

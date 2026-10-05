@@ -105,10 +105,14 @@ class IntradayORBStrategy(BaseStrategy):
         if self.instrument.instrument_type == InstrumentType.EQUITY:
             pct = self.instrument.equity_orb_max_risk_pct
 
-            if pct is None or pct <= 0:
-                return 0.0
+            if pct is not None and pct > 0:
+                return max(entry_price * float(pct), tick)
 
-            return max(entry_price * float(pct), tick)
+            cap = float(self.instrument.max_risk_cap)
+            if cap > 0:
+                return max(cap, tick)
+
+            return max(entry_price * 0.015, tick)
 
         cap = float(self.instrument.max_risk_cap)
 

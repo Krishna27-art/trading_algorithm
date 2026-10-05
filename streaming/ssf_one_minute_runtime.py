@@ -25,7 +25,7 @@ from data.candle_aggregator import MultiSymbolCandleAggregator
 from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver
 from data.sector_peer_manager import get_sector_index_symbol
-from data.time_utils import now_ist_naive
+from data.time_utils import IST, now_ist_naive
 from monitoring.logger import logger
 from streaming.ssf_live_runtime import ssf_live_runtime
 from streaming.ssf_market_context import ssf_context_store, ssf_return_tracker
@@ -206,7 +206,12 @@ class SSFOneMinuteRuntime:
         today = now_ist_naive().date()
         start_date = today - timedelta(days=2)
 
-        for sym in self._stock_symbols:
+        stock_symbols = list(self._stock_symbols)
+        index_symbols = list(self._index_symbols)
+
+        for sym in stock_symbols:
+            if not self._running:
+                return
             try:
                 token = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
                 if not token:
@@ -226,7 +231,9 @@ class SSFOneMinuteRuntime:
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for stock %s: %s", sym, exc)
 
-        for idx in self._index_symbols:
+        for idx in index_symbols:
+            if not self._running:
+                return
             try:
                 token = instrument_resolver.resolve_token(idx, exchange="NSE", kite_client=kite_client)
                 if not token:
@@ -242,6 +249,15 @@ class SSFOneMinuteRuntime:
                     ssf_return_tracker.seed(idx, df)
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for index %s: %s", idx, exc)
+
+    def seed_historical_data(
+        self,
+        kite_client: Any,
+    ) -> None:
+        """Seed 1-minute historical data in the background."""
+        self._seed_historical_data(
+            kite_client
+        )
 
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Feed tick to the 1-minute aggregator."""
@@ -260,14 +276,55 @@ class SSFOneMinuteRuntime:
         if not symbol:
             return
 
-        candle_ts = candle.get("datetime")
-        if isinstance(candle_ts, str):
+        candle_ts = candle.get(
+            "datetime"
+        )
+
+        if isinstance(
+            candle_ts,
+            str,
+        ):
             try:
-                candle_ts = datetime.fromisoformat(candle_ts)
-            except ValueError:
-                candle_ts = now_ist_naive()
-        elif not isinstance(candle_ts, datetime):
-            candle_ts = now_ist_naive()
+                candle_ts = datetime.fromisoformat(
+                    candle_ts
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                logger.warning(
+                    "[SSFOneMinuteRuntime] Rejecting "
+                    "1-minute candle with invalid "
+                    "timestamp for %s: %r",
+                    symbol,
+                    candle_ts,
+                )
+                return
+
+        elif not isinstance(
+            candle_ts,
+            datetime,
+        ):
+            logger.warning(
+                "[SSFOneMinuteRuntime] Rejecting "
+                "1-minute candle with missing/invalid "
+                "timestamp for %s: %r",
+                symbol,
+                candle_ts,
+            )
+            return
+
+        if candle_ts.tzinfo is not None:
+            try:
+                candle_ts = candle_ts.astimezone(IST).replace(tzinfo=None)
+            except Exception:
+                logger.warning(
+                    "[SSFOneMinuteRuntime] Failed to convert "
+                    "timestamp to IST for %s: %r",
+                    symbol,
+                    candle_ts,
+                )
+                return
 
         close_px = float(candle.get("close", 0.0))
 

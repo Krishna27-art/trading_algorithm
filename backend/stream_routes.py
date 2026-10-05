@@ -21,9 +21,35 @@ logger = logging.getLogger("backend_api.stream")
 router = APIRouter()
 
 
+STREAM_DATA_STALE_AFTER_SECONDS = 120
+
+
+def _stream_status() -> Dict[str, Any]:
+    try:
+        return market_stream_manager.get_status() or {}
+    except Exception:
+        logger.exception("component=stream_routes check=stream_status")
+        return {}
+
+
+def _stream_feed_is_fresh(stream_status: Dict[str, Any]) -> bool:
+    if stream_status.get("connected") is not True:
+        return False
+
+    age = stream_status.get("last_tick_age_seconds")
+
+    if not isinstance(age, (int, float)):
+        return False
+
+    return 0 <= age <= STREAM_DATA_STALE_AFTER_SECONDS
+
+
 def _stream_state() -> str:
     try:
-        return str((market_stream_manager.get_status() or {}).get("state", "UNKNOWN"))
+        return str(
+            (market_stream_manager.get_status() or {})
+            .get("state", "UNKNOWN")
+        )
     except Exception:
         logger.exception("component=stream_routes check=stream_status")
         return "ERROR"
@@ -65,11 +91,21 @@ def stream_status():
 
 @router.get("/api/stream/signals")
 def stream_signals():
-    """Latest signals from the streaming pipeline, tagged with stream freshness."""
-    signals = live_signal_engine.get_all_predictions()  # single snapshot (was called twice)
+    """Return only signals backed by a fresh Kite stream."""
+    stream_status = _stream_status()
+    fresh = _stream_feed_is_fresh(stream_status)
+
+    signals = live_signal_engine.get_all_predictions()
+
     return {
         "status": "success",
-        "stream_state": _stream_state(),
+        "stream_state": stream_status.get("state", "UNKNOWN"),
+        "stream_connected": stream_status.get("connected", False),
+        "last_tick_time": stream_status.get("last_tick_time"),
+        "last_tick_age_seconds": stream_status.get(
+            "last_tick_age_seconds"
+        ),
+        "data_fresh": fresh,
         "signals": signals,
         "count": len(signals),
     }
@@ -77,11 +113,24 @@ def stream_signals():
 
 @router.get("/api/stream/market")
 def stream_market():
-    """In-memory market state (LTP, VWAP, candle count) for all streaming symbols."""
+    """Return in-memory market state tagged with Kite stream freshness."""
+    stream_status = _stream_status()
+    fresh = _stream_feed_is_fresh(stream_status)
+
     symbols_state = live_market_state.get_all_symbols_state()
+
     return {
         "status": "success",
-        "stream_state": _stream_state(),
-        "instruments": {sym: state.to_dict() for sym, state in symbols_state.items()},
+        "stream_state": stream_status.get("state", "UNKNOWN"),
+        "stream_connected": stream_status.get("connected", False),
+        "last_tick_time": stream_status.get("last_tick_time"),
+        "last_tick_age_seconds": stream_status.get(
+            "last_tick_age_seconds"
+        ),
+        "data_fresh": fresh,
+        "instruments": {
+            sym: state.to_dict()
+            for sym, state in symbols_state.items()
+        },
         "count": len(symbols_state),
     }

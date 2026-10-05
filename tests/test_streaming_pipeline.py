@@ -212,8 +212,8 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
     import time
     time.sleep(0.2)
 
-    assert len(passed_client) == 1
-    assert passed_client[0] is fake_kite
+    assert len(passed_client) >= 1
+    assert all(c is fake_kite for c in passed_client)
 
 
 def test_market_stream_manager_raises_when_no_kite_client(monkeypatch):

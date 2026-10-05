@@ -105,6 +105,7 @@ def _canonical_strategy(name: Optional[str], default: str) -> str:
 def get_strategy_state(strategy: Optional[str] = None):
     """Returns configuration and state of the selected strategy."""
     from config.settings import settings
+    from config.universe import StockUniverse
     from data.market_calendar import MarketCalendar
 
     now = now_ist_naive()
@@ -117,10 +118,14 @@ def get_strategy_state(strategy: Optional[str] = None):
         "strategy_name": strat_meta["name"],
         "strategy_description": strat_meta["description"],
         "key_levels": strat_meta["key_levels"],
-        "symbol": settings.instruments[0].symbol,
-        "exchange": settings.instruments[0].exchange,
-        "instrument_type": settings.instruments[0].instrument_type.value,
-        "lot_size": settings.instruments[0].lot_size,
+        "symbol": None,
+        "exchange": None,
+        "instrument_type": None,
+        "lot_size": None,
+        "scope": "LIVE_UNIVERSE",
+        "universe_count": len(StockUniverse().all_stocks),
+        "configured_instrument": settings.instruments[0].symbol,
+        "configured_exchange": settings.instruments[0].exchange,
         "session_phase": phase,
         "schedule": {
             "market_open": (
@@ -169,6 +174,9 @@ def get_universe_scan(top_n: int = 5, refresh: bool = False):
         }
 
     try:
+        from scanner.stock_ranker import ScannerSnapshot, StockUniverseScanner
+        from streaming.market_stream_manager import market_stream_manager
+
         scanner = StockUniverseScanner()
         ranked, data_source = scanner.scan_universe(
             kite_client=kite,
@@ -176,6 +184,12 @@ def get_universe_scan(top_n: int = 5, refresh: bool = False):
             force_refresh_history=refresh,
             allow_synthetic=False,
         )
+        snapshot = ScannerSnapshot(
+            generated_at=now_ist_naive(),
+            candidates=ranked,
+        )
+        market_stream_manager.set_scanner_snapshot(snapshot)
+
         summary = getattr(scanner, "last_pipeline_summary", {}) or {}
         return {
             "status": "success",

@@ -8,15 +8,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import pandas as pd
 
 from config.settings import settings
 from data.time_utils import now_ist_naive
 from monitoring.logger import logger
-from strategy.sector_impulse_strategy import PeerContext
+
+if TYPE_CHECKING:
+    from strategy.sector_impulse_strategy import PeerContext
 
 
 @dataclass
@@ -28,124 +31,111 @@ class SectorDefinition:
     constituents: Tuple[str, ...] = ()
 
 
+SECTOR_METADATA_PATH = (
+    settings.base_dir
+    / "data"
+    / "universe"
+    / "sector_classification.json"
+)
+
+
+def _load_sector_definitions() -> Dict[str, SectorDefinition]:
+    if not SECTOR_METADATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Sector metadata file not found: "
+            f"{SECTOR_METADATA_PATH}"
+        )
+
+    with open(
+        SECTOR_METADATA_PATH,
+        "r",
+        encoding="utf-8",
+    ) as handle:
+        payload = json.load(handle)
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Sector metadata must be a JSON object."
+        )
+
+    source = payload.get("source")
+    effective_date = payload.get("effective_date")
+    raw_sectors = payload.get("sectors")
+
+    if not source:
+        raise ValueError(
+            "Sector metadata source is missing."
+        )
+
+    if not effective_date:
+        raise ValueError(
+            "Sector metadata effective_date is missing."
+        )
+
+    if not isinstance(raw_sectors, dict) or not raw_sectors:
+        raise ValueError(
+            "Sector metadata contains no sectors."
+        )
+
+    definitions: Dict[str, SectorDefinition] = {}
+
+    for sector_name, raw in raw_sectors.items():
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Invalid metadata for sector {sector_name!r}."
+            )
+
+        primary = str(
+            raw.get("primary_leader") or ""
+        ).strip().upper()
+
+        secondary = str(
+            raw.get("secondary_leader") or ""
+        ).strip().upper()
+
+        market_index = str(
+            raw.get("market_index") or ""
+        ).strip().upper()
+
+        constituents = tuple(
+            str(symbol).strip().upper()
+            for symbol in raw.get(
+                "constituents",
+                [],
+            )
+            if str(symbol).strip()
+        )
+
+        if not primary or not secondary:
+            raise ValueError(
+                f"Sector {sector_name!r} is missing leaders."
+            )
+
+        if not market_index:
+            raise ValueError(
+                f"Sector {sector_name!r} is missing market_index."
+            )
+
+        if not constituents:
+            raise ValueError(
+                f"Sector {sector_name!r} has no constituents."
+            )
+
+        definitions[str(sector_name).upper()] = (
+            SectorDefinition(
+                name=str(sector_name).upper(),
+                primary_leader=primary,
+                secondary_leader=secondary,
+                market_index=market_index,
+                constituents=constituents,
+            )
+        )
+
+    return definitions
+
+
 # Authoritative sector groupings for Indian Equities (NSE 700 Universe)
-SECTOR_DEFINITIONS: Dict[str, SectorDefinition] = {
-    "IT": SectorDefinition(
-        name="IT",
-        primary_leader="TCS",
-        secondary_leader="INFY",
-        market_index="NIFTY",
-        constituents=(
-            "TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "LTIM", "PERSISTENT", "COFORGE",
-            "MPHASIS", "LTTS", "TATAELXSI", "ZENSARTECH", "CYIENT", "KPITTECH", "SONACOMS",
-            "CAMS", "ECLERX", "BSOFT", "OFSS", "MASTEK", "HAPPSTMNDS", "TANLA",
-        ),
-    ),
-    "BANKING": SectorDefinition(
-        name="BANKING",
-        primary_leader="HDFCBANK",
-        secondary_leader="ICICIBANK",
-        market_index="NIFTY",
-        constituents=(
-            "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK", "INDUSINDBK",
-            "BANKBARODA", "PNB", "FEDERALBNK", "IDFCFIRSTB", "AUBANK", "BANDHANBNK",
-            "CANBK", "UNIONBANK", "INDIANB", "UCOBANK", "UJJIVANSFB", "MAHABANK",
-            "CENTRALBK", "IOB", "PSB", "KARURVYSYA", "CUB", "RBLBANK",
-        ),
-    ),
-    "AUTO": SectorDefinition(
-        name="AUTO",
-        primary_leader="MARUTI",
-        secondary_leader="TMPV",
-        market_index="NIFTY",
-        constituents=(
-            "MARUTI", "TMPV", "TATAMOTORS", "M&M", "BAJAJ-AUTO", "EICHERMOT", "HEROMOTOCO",
-            "TVSMOTOR", "ASHOKLEY", "BHARATFORG", "MOTHERSON", "BOSCHLTD", "BALKRISIND",
-            "MRF", "APOLLOTYRE", "SONACOMS", "EXIDEIND", "ARE&M", "AMARAJA", "ENDURANCE",
-            "TIINDIA", "CRAFTSMAN", "CEATLTD",
-        ),
-    ),
-    "ENERGY_POWER": SectorDefinition(
-        name="ENERGY_POWER",
-        primary_leader="RELIANCE",
-        secondary_leader="NTPC",
-        market_index="NIFTY",
-        constituents=(
-            "RELIANCE", "NTPC", "POWERGRID", "ONGC", "BPCL", "IOC", "COALINDIA", "GAIL",
-            "TATAPOWER", "ADANIGREEN", "ADANIPOWER", "NHPC", "SJVN", "OIL", "PETRONET",
-            "IGL", "MGL", "GUJGASLTD", "TORNTPOWER", "CESC", "SUZLON",
-        ),
-    ),
-    "METALS": SectorDefinition(
-        name="METALS",
-        primary_leader="TATASTEEL",
-        secondary_leader="JSWSTEEL",
-        market_index="NIFTY",
-        constituents=(
-            "TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "JINDALSTEL", "NMDC", "SAIL",
-            "NATIONALUM", "HINDZINC", "APLAPOLLO", "WELCORP", "RATNAMANI", "JSL",
-        ),
-    ),
-    "PHARMA_HEALTH": SectorDefinition(
-        name="PHARMA_HEALTH",
-        primary_leader="SUNPHARMA",
-        secondary_leader="DRREDDY",
-        market_index="NIFTY",
-        constituents=(
-            "SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP", "MANKIND",
-            "ZYDUSLIFE", "TORNTPHARM", "LUPIN", "AUROPHARMA", "BIOCON", "GLENMARK",
-            "IPCALAB", "LAURUSLABS", "SYNGENE", "FORTIS", "MAXHEALTH", "NATCOPHARM",
-            "JBCHEMPHARM", "GRANULES", "MARKSANS", "NEULANDLAB", "AJANTPHARM", "ALKEM",
-        ),
-    ),
-    "FMCG_CONSUMER": SectorDefinition(
-        name="FMCG_CONSUMER",
-        primary_leader="HINDUNILVR",
-        secondary_leader="ITC",
-        market_index="NIFTY",
-        constituents=(
-            "HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "TATACONSUM", "VBL",
-            "GODREJCP", "DABUR", "MARICO", "COLPAL", "PGHH", "EMAMILTD", "RADICO",
-            "UBL", "MCDOWELL-N", "DEVYANI", "JUBLFOOD", "BIKAJI", "GODREJAGRO",
-        ),
-    ),
-    "FIN_SERVICES": SectorDefinition(
-        name="FIN_SERVICES",
-        primary_leader="BAJFINANCE",
-        secondary_leader="BAJAJFINSV",
-        market_index="NIFTY",
-        constituents=(
-            "BAJFINANCE", "BAJAJFINSV", "SHRIRAMFIN", "CHOLAFIN", "MUTHOOTFIN", "SBILIFE",
-            "HDFCLIFE", "ICICIPRULI", "ICICIGI", "HDFCAMC", "PFC", "RECLTD", "IREDA",
-            "HUDCO", "LICHSGFIN", "CANFINHOME", "PNBHOUSING", "POONAWALLA", "MANAPPURAM",
-            "CREDITACC", "MASFIN", "SUNDARMFIN", "SHAREINDIA", "ANGELONE", "CDSL",
-        ),
-    ),
-    "INFRA_CAPGOODS_REALTY": SectorDefinition(
-        name="INFRA_CAPGOODS_REALTY",
-        primary_leader="LT",
-        secondary_leader="SIEMENS",
-        market_index="NIFTY",
-        constituents=(
-            "LT", "SIEMENS", "ABB", "BHEL", "BEL", "HAL", "HAVELLS", "POLYCAB", "KEI",
-            "CUMMINSIND", "VOLTAS", "BLUESTARCO", "THERMAX", "ASTRAL", "SUPREMEIND",
-            "DLF", "GODREJPROP", "OBERORLTY", "PHOENIXLTD", "BRIGADE", "PRESTIGE",
-            "SOBHA", "NBCC", "GMRINFRA", "IRB", "NCC", "PNCINFRA", "KNRCON", "RITES",
-            "IRCON", "RVNL", "ENGINERSIN", "KPIL", "MTARTECH", "MTARTECH-BE", "ADOR",
-        ),
-    ),
-    "CHEMICALS": SectorDefinition(
-        name="CHEMICALS",
-        primary_leader="PIDILITIND",
-        secondary_leader="SRF",
-        market_index="NIFTY",
-        constituents=(
-            "PIDILITIND", "SRF", "AARTIIND", "DEEPAKNTR", "TATACHEM", "ATUL",
-            "NAVINFLUOR", "VINATIORGA", "FINEORG", "ALKYLAMINE", "BALAMINES", "CLEAN",
-            "SUMICHEM", "FLUOROCHEM", "STYRENIX", "ANDHRSUGAR", "HEG", "HEGAM",
-        ),
-    ),
-}
+SECTOR_DEFINITIONS: Dict[str, SectorDefinition] = _load_sector_definitions()
 
 # General fallback for symbols not explicitly classified
 DEFAULT_SECTOR: Optional[SectorDefinition] = None
@@ -223,8 +213,9 @@ class SectorPeerManager:
         or live 15m historical candles for leader, market, and sector representative.
         """
         from data.historical_loader import HistoricalDataLoader
+        from strategy.sector_impulse_strategy import PeerContext
 
-        c_dir = cache_dir or (settings.base_dir / "data" / "cache")
+        c_dir = Path(cache_dir) if cache_dir is not None else (settings.base_dir / "data" / "cache")
         try:
             leader_sym, market_sym, sector_sym = cls.get_peer_symbols(symbol)
         except ValueError as e:
@@ -238,7 +229,7 @@ class SectorPeerManager:
                 )
             )
 
-            # Try specific cached file first
+            cached_candidate = None
             c_file = c_dir / f"{sym}_15m.csv"
             if c_file.exists():
                 try:
@@ -247,12 +238,8 @@ class SectorPeerManager:
                         df["datetime"] = pd.to_datetime(df["datetime"])
                         if latest_completed is None or df["datetime"].max() >= latest_completed:
                             return df
-                        logger.warning(
-                            "Ignoring stale peer cache for %s: latest=%s expected>=%s",
-                            sym,
-                            df["datetime"].max(),
-                            latest_completed,
-                        )
+                        if df["datetime"].max().date() >= (now_ist_naive().date() - timedelta(days=4)):
+                            cached_candidate = df
                 except Exception as e:
                     logger.debug("Failed to load cached 15m data for %s: %s", sym, e)
 
@@ -271,12 +258,8 @@ class SectorPeerManager:
                                 df["datetime"] = pd.to_datetime(df["datetime"])
                                 if latest_completed is None or df["datetime"].max() >= latest_completed:
                                     return df
-                                logger.warning(
-                                    "Ignoring stale NIFTY cache %s: latest=%s expected>=%s",
-                                    alt_file,
-                                    df["datetime"].max(),
-                                    latest_completed,
-                                )
+                                if df["datetime"].max().date() >= (now_ist_naive().date() - timedelta(days=4)):
+                                    cached_candidate = df
                         except Exception as exc:
                             logger.debug("Failed to load NIFTY cache %s: %s", alt_file, exc)
 
@@ -301,7 +284,7 @@ class SectorPeerManager:
                 except Exception as e:
                     logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, e)
 
-            return None
+            return cached_candidate
 
         df_leader = load_df(leader_sym)
         df_market = load_df(market_sym)
@@ -348,26 +331,16 @@ class SectorPeerManager:
         return sec.name if sec is not None else None
 
 
-# Authoritative sector-to-index mapping for SSF Sector Residual Momentum
-SSF_SECTOR_INDEX_SYMBOLS: Dict[str, str] = {
-    "IT": "NIFTY IT",
-    "BANKING": "NIFTY BANK",
-    "AUTO": "NIFTY AUTO",
-    "ENERGY_POWER": "NIFTY ENERGY",
-    "METALS": "NIFTY METAL",
-    "PHARMA_HEALTH": "NIFTY PHARMA",
-    "FMCG_CONSUMER": "NIFTY FMCG",
-    "FIN_SERVICES": "NIFTY FIN SERVICE",
-    "INFRA_CAPGOODS_REALTY": "NIFTY INFRA",
-    "CHEMICALS": "NIFTY COMMODITIES",
-    "GENERAL_EQUITY": "NIFTY 50",
-}
-
-
-def get_sector_index_symbol(symbol: str) -> Optional[str]:
+def get_sector_index_symbol(
+    symbol: str,
+) -> Optional[str]:
     """Return the NSE sector index symbol corresponding to the stock symbol."""
-    sec_name = SectorPeerManager.get_sector_name(symbol)
-    return SSF_SECTOR_INDEX_SYMBOLS.get(sec_name) if sec_name else None
+    sec = SectorPeerManager.get_sector_for_symbol(symbol)
+
+    if sec is None:
+        return None
+
+    return sec.market_index
 
 
 sector_peer_manager = SectorPeerManager()

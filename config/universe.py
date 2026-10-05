@@ -60,7 +60,11 @@ def create_instrument_config_for_equity(
     """
     price = current_price
 
-    min_orb = round(max(price * 0.0017, 0.5), 2)
+    min_orb_pct = 0.0017
+    max_orb_pct = 0.0250
+    max_risk_pct = 0.0150
+
+    min_orb = round(max(price * min_orb_pct, 0.5), 2)
     max_orb = round(max(price * 0.0060, min_orb * 2.5), 2)
     max_risk = round(max(price * 0.0040, min_orb * 1.5), 2)
 
@@ -73,6 +77,9 @@ def create_instrument_config_for_equity(
         min_orb_range=min_orb,
         max_orb_range=max_orb,
         max_risk_cap=max_risk,
+        equity_orb_min_range_pct=min_orb_pct,
+        equity_orb_max_range_pct=max_orb_pct,
+        equity_orb_max_risk_pct=max_risk_pct,
         instrument_token=token,
     )
 

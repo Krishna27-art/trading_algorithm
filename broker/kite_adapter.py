@@ -847,20 +847,14 @@ def make_book_snapshot_from_quote(
                 return None
 
             try:
-                price = float(
-                    level["price"]
-                )
+                price = float(level["price"])
+                quantity = int(level["quantity"])
 
-                quantity = int(
-                    level["quantity"]
-                )
+                raw_orders = level.get("orders")
+                if raw_orders is None:
+                    return None
 
-                orders = int(
-                    level.get(
-                        "orders",
-                        1,
-                    )
-                )
+                orders = int(raw_orders)
 
             except (
                 TypeError,

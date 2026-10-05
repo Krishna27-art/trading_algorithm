@@ -105,8 +105,16 @@ def test_historical_loader_propagates_exact_kite_error():
 
 
 def test_backtest_endpoint_reports_diagnostics_without_kite(monkeypatch):
-    # Simulate production mode where synthetic test data is disabled
+    # Simulate production mode where synthetic test data is disabled and no active Kite session
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(
+        "backend.backtest_routes.get_active_kite_with_diagnostics",
+        lambda force_validate=False: (None, "No active Zerodha Kite session found."),
+    )
+    monkeypatch.setattr(
+        "data.historical_loader.HistoricalDataLoader.load_cached_data_with_validation",
+        lambda *args, **kwargs: (None, False),
+    )
     with pytest.raises(HTTPException) as exc:
         trigger_backtest(days=5, symbol="NIFTY", strategy="cpr")
     assert exc.value.status_code == 400

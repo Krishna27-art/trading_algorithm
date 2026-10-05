@@ -50,12 +50,19 @@ class BookSnapshot:
     bids: List[Level]                    # 5 levels, best first
     asks: List[Level]
     ltp: float
+
     fut_ltp: Optional[float] = None
     fut_oi: Optional[float] = None
+
     sector_ret_30m: Optional[float] = None   # sector index 30-min return
     stock_ret_30m: Optional[float] = None
+
     circuit_lower: Optional[float] = None
     circuit_upper: Optional[float] = None
+
+    futures_updated_at: Optional[datetime] = None
+    sector_return_updated_at: Optional[datetime] = None
+    stock_return_updated_at: Optional[datetime] = None
 
 
 @dataclass
@@ -254,17 +261,55 @@ class SsfL5SrmStrategy(BaseStrategy):
                     z_oi=z_oi, z_sector=z_sec, score=score, micro_dev=micro - mid,
                     spread_ticks=(ba[0] - bb[0]) / self.tick)
 
-    def _has_required_context(self, s: BookSnapshot) -> bool:
-        """Return True only when all external SSF data fields are present."""
-        return all(
-            value is not None
-            for value in (
-                s.fut_ltp,
-                s.fut_oi,
-                s.sector_ret_30m,
-                s.stock_ret_30m,
-            )
+    def _has_required_context(
+        self,
+        s: BookSnapshot,
+        max_age_seconds: int = 120,
+    ) -> bool:
+        """
+        Return True only when all required SSF external data exists
+        and each source timestamp is fresh relative to the cash-book
+        snapshot timestamp.
+        """
+        required_values = (
+            s.fut_ltp,
+            s.fut_oi,
+            s.sector_ret_30m,
+            s.stock_ret_30m,
         )
+
+        if any(
+            value is None
+            for value in required_values
+        ):
+            return False
+
+        required_timestamps = (
+            s.futures_updated_at,
+            s.sector_return_updated_at,
+            s.stock_return_updated_at,
+        )
+
+        if any(
+            ts is None
+            for ts in required_timestamps
+        ):
+            return False
+
+        reference_time = s.timestamp
+
+        for updated_at in required_timestamps:
+            age_seconds = (
+                reference_time - updated_at
+            ).total_seconds()
+
+            if (
+                age_seconds < 0
+                or age_seconds > max_age_seconds
+            ):
+                return False
+
+        return True
 
     def _blocked(self, s: BookSnapshot, f: Dict[str, float]) -> Optional[str]:
         t = s.timestamp.time()

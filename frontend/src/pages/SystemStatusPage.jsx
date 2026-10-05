@@ -13,7 +13,6 @@ const HEALTH_ROWS = [
   { key: 'database', label: 'Database' },
   { key: 'strategy_engine', label: 'Strategy engine' },
   { key: 'risk_engine', label: 'Risk engine' },
-  { key: 'order_manager', label: 'Order manager' },
 ]
 
 export default function SystemStatusPage() {
@@ -36,11 +35,11 @@ export default function SystemStatusPage() {
             {HEALTH_ROWS.map((row) => (
               <Row key={row.key} label={row.label} value={health.data[row.key]} />
             ))}
-            <Row label="Active broker" value={health.data.active_broker} tone={health.data.active_broker === 'LIVE' ? 'negative' : 'accent'} />
+            <Row label="Active broker" value={health.data.active_broker} tone="accent" />
             <Row
               label="Overall status"
               value={health.data.overall_status}
-              tone={health.data.overall_status === 'READY' ? 'positive' : 'negative'}
+              tone={statusTone(health.data.overall_status)}
             />
           </div>
         )}
@@ -84,19 +83,82 @@ export default function SystemStatusPage() {
           <ErrorState error={state.error} onRetry={state.refresh} />
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <Row label="Strategy" value={state.data.strategy_name} plain span />
-            <Row label="Symbol" value={`${state.data.symbol} · ${state.data.exchange}`} plain />
-            <Row label="Session phase" value={state.data.session_phase} plain />
-            <Row label="Risk : reward" value={`1 : ${state.data.risk_reward_ratio}`} plain />
-            <Row label="Risk / trade" value={`${state.data.risk_per_trade_pct}%`} plain />
-            <Row label="Max daily loss" value={`${state.data.max_daily_loss_pct}%`} plain />
-            <Row label="Mode" value={state.data.is_paper_trading ? 'PAPER' : 'LIVE'} tone={state.data.is_paper_trading ? 'accent' : 'negative'} />
-            <Row label="Square-off" value={state.data.schedule?.square_off_time} plain />
+            <Row
+              label="Strategy"
+              value={state.data.strategy_name}
+              plain
+              span
+            />
+
+            <Row
+              label="Scope"
+              value={state.data.scope || 'LIVE_UNIVERSE'}
+              plain
+            />
+
+            <Row
+              label="Universe"
+              value={
+                state.data.universe_count != null
+                  ? `${state.data.universe_count} stocks`
+                  : 'N/A'
+              }
+              plain
+            />
+
+            <Row
+              label="Session phase"
+              value={state.data.session_phase}
+              plain
+            />
+
+            <Row
+              label="Risk : reward"
+              value={
+                state.data.risk_reward_ratio != null
+                  ? `1 : ${state.data.risk_reward_ratio}`
+                  : 'N/A'
+              }
+              plain
+            />
+
+            <Row
+              label="Read only"
+              value={state.data.read_only === true ? 'YES' : 'UNKNOWN'}
+              plain
+            />
+
+            <Row
+              label="Square-off"
+              value={state.data.schedule?.square_off_time}
+              plain
+            />
           </div>
         )}
       </Card>
     </div>
   )
+}
+
+function statusTone(value) {
+  const normalized = String(value || '').toUpperCase()
+
+  if (
+    normalized === 'LIVE' ||
+    normalized === 'CONNECTED' ||
+    normalized === 'PRODUCING_SIGNALS'
+  ) {
+    return 'positive'
+  }
+
+  if (
+    normalized === 'STALE' ||
+    normalized === 'STANDBY'
+  ) {
+    return 'warning'
+  }
+
+  return 'negative'
 }
 
 function Row({ label, value, tone, plain, span }) {

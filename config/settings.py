@@ -6,7 +6,7 @@ Centralized configuration management with validation via Pydantic.
 from datetime import time
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

@@ -72,15 +72,15 @@ def _make_day_df(
 def _make_multi_day_df(
     n_days: int = 30,
     bars_per_day: int = 25,
+    reference_date: date | None = None,
 ) -> pd.DataFrame:
     """
-    Build *n_days* of 15-minute candle history ending yesterday plus
-    one day of today's completed bars.  Total = n_days * bars_per_day rows.
+    Build *n_days* of 15-minute candle history ending before reference_date.
     """
-    today = date.today()
+    ref = reference_date or date.today()
     frames = []
     for d in range(n_days, 0, -1):
-        session = today - timedelta(days=d)
+        session = ref - timedelta(days=d)
         # Skip weekends
         if session.weekday() >= 5:
             continue
@@ -131,7 +131,7 @@ def test_orb_ignores_prior_sessions():
     )
 
     # Evaluate with 20 prior sessions prepended — ORB must use only today's candles.
-    multi_day = _make_multi_day_df(n_days=20)
+    multi_day = _make_multi_day_df(n_days=20, reference_date=today)
     hist_many = pd.concat([multi_day, today_df], ignore_index=True)
     preds_many, _ = svc.evaluate_symbol(
         symbol="TESTCO",

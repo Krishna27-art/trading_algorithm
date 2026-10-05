@@ -22,7 +22,7 @@ from fastapi import APIRouter
 
 from broker.kite_adapter import get_active_kite_with_diagnostics
 from config.universe import StockUniverse, resolve_universe_tokens
-from data.time_utils import now_ist_iso, now_ist_naive
+from data.time_utils import IST, now_ist_iso, now_ist_naive
 
 logger = logging.getLogger("backend_api.market")
 
@@ -45,11 +45,16 @@ def _opt_float(value: Any) -> Optional[float]:
 
 
 def _quote_timestamp(q_data: Dict[str, Any]) -> Optional[datetime]:
-    """Exchange timestamp of the quote as naive IST, or None if absent."""
+    """Return the exchange timestamp converted to naive IST."""
     ts = q_data.get("timestamp") or q_data.get("last_trade_time")
-    if isinstance(ts, datetime):
-        return ts.replace(tzinfo=None)
-    return None
+
+    if not isinstance(ts, datetime):
+        return None
+
+    if ts.tzinfo is not None:
+        return ts.astimezone(IST).replace(tzinfo=None)
+
+    return ts
 
 
 def _unavailable_row(record, token, reason: str) -> Dict[str, Any]:
@@ -171,19 +176,41 @@ def get_market_prices() -> Dict[str, Any]:
             }
         )
 
-    available = sum(1 for s in stocks_list if s["status"] != "DATA_UNAVAILABLE")
-    if available == 0:
-        overall = "DATA_UNAVAILABLE"
-    elif available < len(stocks_list):
-        overall = "PARTIAL"
-    else:
+    live_count = sum(
+        1 for s in stocks_list
+        if s.get("status") == "LIVE"
+    )
+
+    stale_count = sum(
+        1 for s in stocks_list
+        if s.get("status") == "STALE"
+    )
+
+    unavailable_count = sum(
+        1 for s in stocks_list
+        if s.get("status") == "DATA_UNAVAILABLE"
+    )
+
+    if live_count == len(stocks_list):
         overall = "success"
+    elif live_count > 0:
+        overall = "PARTIAL"
+    elif stale_count > 0:
+        overall = "STALE"
+    else:
+        overall = "DATA_UNAVAILABLE"
 
     return {
         "status": overall,
-        "data_source": "REAL_KITE" if available else "NONE",
+        "data_source": (
+            "REAL_KITE"
+            if (live_count + stale_count) > 0
+            else "NONE"
+        ),
         "count": len(stocks_list),
-        "available_count": available,
+        "available_count": live_count,
+        "stale_count": stale_count,
+        "unavailable_count": unavailable_count,
         "failed_batches": failed_batches,
         "timestamp": now_iso,
         "stocks": stocks_list,

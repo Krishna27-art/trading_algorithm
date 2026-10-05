@@ -146,16 +146,130 @@ class CRSDPeerContext:
             self.frames[symbol] = pd.concat([base[base.index != ts], new]).sort_index()
 
 
-def _read_cached_15m(sym: str, cache_dir: Path) -> Optional[pd.DataFrame]:
-    for name in (f"{sym}_15m.csv", f"{sym}50_15m.csv"):
-        f = cache_dir / name
-        if f.exists():
-            try:
-                df = pd.read_csv(f, parse_dates=["datetime"])
-                if not df.empty and "close" in df.columns:
-                    return df
-            except Exception as exc:  # pragma: no cover - IO guard
-                logger.debug(f"CRSD cache read failed for {sym}: {exc}")
+def _read_cached_15m(
+    sym: str,
+    cache_dir: Path,
+    latest_required_timestamp: Optional[datetime] = None,
+) -> Optional[pd.DataFrame]:
+    """
+    Read a cached 15-minute frame only when it is structurally valid
+    and fresh enough for the current CRSD evaluation.
+
+    A stale cache is rejected so build_crsd_context() can fetch fresh
+    data from Kite. No stale frame is returned to the strategy.
+    """
+    from data.historical_loader import (
+        HistoricalDataLoader,
+    )
+
+    for name in (
+        f"{sym}_15m.csv",
+        f"{sym}50_15m.csv",
+    ):
+        cache_file = cache_dir / name
+
+        if not cache_file.exists():
+            continue
+
+        try:
+            df, _ = (
+                HistoricalDataLoader
+                .load_cached_data_with_validation(
+                    cache_file
+                )
+            )
+
+            if df is None or df.empty:
+                continue
+
+            required = {
+                "datetime",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            }
+
+            if not required.issubset(df.columns):
+                logger.warning(
+                    "CRSD cache rejected for %s: "
+                    "missing required columns.",
+                    sym,
+                )
+                continue
+
+            df = df.copy()
+
+            df["datetime"] = pd.to_datetime(
+                df["datetime"],
+                errors="coerce",
+            )
+
+            if df["datetime"].isna().any():
+                logger.warning(
+                    "CRSD cache rejected for %s: "
+                    "invalid timestamps.",
+                    sym,
+                )
+                continue
+
+            df = (
+                df
+                .sort_values("datetime")
+                .drop_duplicates(
+                    subset="datetime",
+                    keep="last",
+                )
+                .reset_index(drop=True)
+            )
+
+            latest_cached = df["datetime"].max()
+
+            if latest_required_timestamp is not None:
+                required_ts = pd.Timestamp(
+                    latest_required_timestamp
+                )
+
+                if (
+                    required_ts.tzinfo is not None
+                    and latest_cached.tzinfo is None
+                ):
+                    required_ts = (
+                        required_ts
+                        .tz_convert("Asia/Kolkata")
+                        .tz_localize(None)
+                    )
+
+                elif (
+                    required_ts.tzinfo is None
+                    and latest_cached.tzinfo is not None
+                ):
+                    latest_cached = (
+                        latest_cached
+                        .tz_convert("Asia/Kolkata")
+                        .tz_localize(None)
+                    )
+
+                if latest_cached < required_ts:
+                    logger.warning(
+                        "CRSD cache rejected as stale for %s: "
+                        "latest=%s required>=%s",
+                        sym,
+                        latest_cached,
+                        required_ts,
+                    )
+                    continue
+
+            return df
+
+        except Exception as exc:
+            logger.debug(
+                "CRSD cache validation failed for %s: %s",
+                sym,
+                exc,
+            )
+
     return None
 
 
@@ -182,10 +296,41 @@ def build_crsd_context(
             return None
         peer_syms = [m for m in sec.constituents if m != sym][:8]
 
-    def load(sym: str) -> Optional[pd.DataFrame]:
-        df = _read_cached_15m(sym, c_dir)
-        if df is not None or kite_client is None:
+    def load(
+        sym: str,
+    ) -> Optional[pd.DataFrame]:
+        latest_required_timestamp = None
+
+        try:
+            from data.historical_loader import (
+                HistoricalDataLoader,
+            )
+
+            latest_required_timestamp = (
+                HistoricalDataLoader
+                .get_latest_completed_candle_start(
+                    now_ist_naive()
+                )
+            )
+        except Exception as exc:
+            logger.debug(
+                "CRSD latest completed candle lookup failed: %s",
+                exc,
+            )
+
+        df = _read_cached_15m(
+            sym,
+            c_dir,
+            latest_required_timestamp=(
+                latest_required_timestamp
+            ),
+        )
+
+        if df is not None:
             return df
+
+        if kite_client is None:
+            return None
         try:
             from data.historical_loader import HistoricalDataLoader
             from data.instrument_resolver import instrument_resolver
@@ -365,17 +510,122 @@ class CRSDStrategy(BaseStrategy):
         self._liq_shock_n: int = 0
         self._init_stream_state()
 
-    # ------------------------------------------------------------------ hooks
     def seed_context(self, historical_bars: pd.DataFrame) -> None:
-        cols = ["datetime", "open", "high", "low", "close", "volume"]
+        required_cols = [
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
         if historical_bars is None or historical_bars.empty:
-            self.warm_history = pd.DataFrame(columns=cols)
+            self.warm_history = pd.DataFrame(columns=required_cols)
             return
+
         h = historical_bars.copy()
-        for c in cols:
-            if c not in h.columns:
-                h[c] = h["close"] if c in ("open", "high", "low") else np.nan
-        self.warm_history = h[cols].copy()
+
+        missing_cols = [
+            c
+            for c in required_cols
+            if c not in h.columns
+        ]
+
+        if missing_cols:
+            logger.warning(
+                "CRSD historical context rejected for %s: "
+                "missing required columns: %s",
+                self.symbol,
+                missing_cols,
+            )
+            self.warm_history = pd.DataFrame(
+                columns=required_cols
+            )
+            self.disabled_reason = (
+                "missing_required_historical_columns"
+            )
+            return
+
+        h = h[required_cols].copy()
+
+        numeric_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        for c in numeric_cols:
+            h[c] = pd.to_numeric(
+                h[c],
+                errors="coerce",
+            )
+
+        if h[required_cols].isna().any().any():
+            logger.warning(
+                "CRSD historical context rejected for %s: "
+                "required OHLCV data contains null/invalid values.",
+                self.symbol,
+            )
+            self.warm_history = pd.DataFrame(
+                columns=required_cols
+            )
+            self.disabled_reason = (
+                "invalid_required_historical_data"
+            )
+            return
+
+        if (
+            (h["open"] <= 0).any()
+            or (h["high"] <= 0).any()
+            or (h["low"] <= 0).any()
+            or (h["close"] <= 0).any()
+            or (h["volume"] < 0).any()
+        ):
+            logger.warning(
+                "CRSD historical context rejected for %s: "
+                "non-positive OHLC or negative volume detected.",
+                self.symbol,
+            )
+            self.warm_history = pd.DataFrame(
+                columns=required_cols
+            )
+            self.disabled_reason = (
+                "invalid_ohlcv_values"
+            )
+            return
+
+        if (
+            (h["high"] < h["low"]).any()
+            or (h["high"] < h["open"]).any()
+            or (h["high"] < h["close"]).any()
+            or (h["low"] > h["open"]).any()
+            or (h["low"] > h["close"]).any()
+        ):
+            logger.warning(
+                "CRSD historical context rejected for %s: "
+                "invalid OHLC geometry detected.",
+                self.symbol,
+            )
+            self.warm_history = pd.DataFrame(
+                columns=required_cols
+            )
+            self.disabled_reason = (
+                "invalid_ohlc_geometry"
+            )
+            return
+
+        self.warm_history = (
+            h[required_cols]
+            .sort_values("datetime")
+            .drop_duplicates(
+                subset="datetime",
+                keep="last",
+            )
+            .reset_index(drop=True)
+        )
 
     def reset_session(self, session_date: date):
         self.current_date = session_date

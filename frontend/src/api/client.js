@@ -12,8 +12,9 @@ export class ApiError extends Error {
 }
 
 // Shared secret required by the backend for sensitive actions
-// (logout, placing orders, exiting orders). Held in memory / localStorage.
-let sharedSecret = typeof window !== 'undefined' ? localStorage.getItem('app_shared_secret') || null : null
+// (logout, stream start/stop). Held in localStorage or loaded from Vite environment.
+const envSecret = typeof import.meta !== 'undefined' && import.meta.env ? (import.meta.env.VITE_APP_SHARED_SECRET || null) : null
+let sharedSecret = typeof window !== 'undefined' ? (localStorage.getItem('app_shared_secret') || envSecret) : envSecret
 
 export function setSharedSecret(value) {
   sharedSecret = value || null

@@ -78,6 +78,14 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     intervalMs: 3000,
   })
 
+  const signalFeedFresh =
+    signals.data?.data_fresh === true &&
+    signals.data?.stream_connected === true
+
+  const marketFeedFresh =
+    market.data?.data_fresh === true &&
+    market.data?.stream_connected === true
+
   /**
    * Start the read-only market-data stream automatically after the user has
    * authenticated. No order/trade action occurs here.
@@ -167,7 +175,9 @@ export default function LiveSignalsPage({ isAuthenticated }) {
 
         // Only a finite, positive price is real market data. Never fabricate
         // a fallback (e.g. 0): missing/invalid LTP stays null and renders as "—".
-        const liveLtp = firstValidPrice(marketState?.ltp, signal?.ltp)
+        const liveLtp = marketFeedFresh
+          ? firstValidPrice(marketState?.ltp)
+          : null
 
         return {
           symbol,
@@ -190,7 +200,7 @@ export default function LiveSignalsPage({ isAuthenticated }) {
         const bTs = b.timestamp ? Date.parse(b.timestamp) : 0
         return bTs - aTs
       })
-  }, [signals.data, market.data])
+  }, [signals.data, market.data, marketFeedFresh])
 
   const visible = useMemo(() => {
     if (filter === 'all') return candidates
@@ -285,11 +295,15 @@ export default function LiveSignalsPage({ isAuthenticated }) {
                     : 'Stream stopped'}
             </StatusPill>
 
-            {signals.data && (
+            {signalFeedFresh ? (
               <StatusPill tone="positive">
                 Real Kite signals
               </StatusPill>
-            )}
+            ) : signals.data ? (
+              <StatusPill tone="warning">
+                Signal feed stale
+              </StatusPill>
+            ) : null}
 
             {status.data?.subscribed_token_count != null && (
               <StatusPill tone="neutral">
@@ -368,6 +382,13 @@ export default function LiveSignalsPage({ isAuthenticated }) {
               status.data?.last_error ||
               'Start the stream to receive real ticks, completed 15-minute candles, and strategy signals.'
             }
+          />
+        </Card>
+      ) : !signalFeedFresh ? (
+        <Card>
+          <EmptyState
+            label="Live signal feed is stale."
+            hint="The Kite stream is connected but fresh market data has not been confirmed. No cached signals are displayed."
           />
         </Card>
       ) : signals.status === 'loading' && !signals.data ? (

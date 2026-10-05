@@ -18,8 +18,8 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
   const streamSignals = usePolling(() => apiGet('/api/stream/signals'), { intervalMs: 5000 })
   const streamMarket = usePolling(() => apiGet('/api/stream/market'), { intervalMs: 5000 })
 
-  const symbol = state.data?.symbol || 'NIFTY'
-  const strategy = state.data?.strategy_key || 'cpr'
+  const symbol = state.data?.symbol || null
+  const strategy = state.data?.strategy_key || null
 
   const brokerConnected = health.data?.kite_api === 'CONNECTED'
   const isStreamConnected = streamStatus.data?.connected === true
@@ -28,93 +28,81 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
   // Canonical active streaming signal extraction
   const activeSignal = useMemo(() => {
     const rawSignals = streamSignals.data?.signals || {}
-    const rawMarket = streamMarket.data?.instruments || {}
 
-    // Find any candidate with active strategy signals or non-neutral consensus
     const activeCandidates = []
 
     for (const [sym, payload] of Object.entries(rawSignals)) {
       const preds = payload?.predictions || payload?.strategies || {}
       const consensus = payload?.consensus || {}
 
-      // Check if selected strategy or any strategy has an active signal
-      let activePred = preds[strategy]
+      // Only the explicitly selected strategy may produce the
+      // strategy-specific dashboard signal.
+      const pred = strategy ? preds[strategy] : null
 
       if (
-        !activePred ||
-        !['LONG', 'SHORT'].includes(activePred.direction)
-      ) {
-        // Only scan non-CRSD directional strategies as fallback; CRSD is an independent pair strategy
-        activePred = Object.entries(preds).find(
-          ([stratKey, p]) =>
-            stratKey !== 'crsd' &&
-            p &&
-            ['LONG', 'SHORT'].includes(p.direction)
-        )?.[1]
-      }
-
-      if (
-        activePred &&
-        ['LONG', 'SHORT'].includes(activePred.direction)
-      ) {
-        const stratKey = activePred.strategy || activePred.strategy_key || (preds[strategy] === activePred ? strategy : 'strategy')
-        activeCandidates.push({
-          symbol: sym,
-          strategy: stratKey,
-          type:
-            activePred.type ||
-            (activePred.direction === 'LONG'
-              ? 'BUY'
-              : 'SELL'),
-          direction: activePred.direction,
-          entry: activePred.entry ?? null,
-          stop_loss: activePred.stop_loss,
-          target: activePred.target,
-          hedge_legs: activePred.hedge_legs || null,
-          hedge_symbol: activePred.hedge_symbol || null,
-          hedge_action: activePred.hedge_action || null,
-          hedge_entry: activePred.hedge_entry || null,
-          levels: activePred.levels || null,
-          metrics: activePred.metrics || null,
-          consensus_agreement_pct: activePred.consensus_agreement_pct ?? consensus.consensus_agreement_pct,
-          trigger: activePred.trigger || activePred.reason || `${sym} ${strategyLabel(stratKey)} Signal`,
-          timestamp: payload?.timestamp || payload?.candle_timestamp,
-        })
-      } else if (
-        consensus &&
-        ['LONG', 'SHORT'].includes(consensus.direction)
+        pred &&
+        ['LONG', 'SHORT'].includes(pred.direction) &&
+        !['UNAVAILABLE', 'ERROR', 'NO_TRADE', 'WAITING'].includes(pred.status)
       ) {
         activeCandidates.push({
           symbol: sym,
-          strategy: 'consensus',
+          strategy,
           type:
-            consensus.direction === 'LONG'
-              ? 'BUY'
-              : 'SELL',
-          direction: consensus.direction,
-          entry: null,
-          stop_loss: null,
-          target: null,
+            pred.type ||
+            (pred.direction === 'LONG' ? 'BUY' : 'SELL'),
+          direction: pred.direction,
+          entry: pred.entry ?? null,
+          stop_loss: pred.stop_loss ?? null,
+          target: pred.target ?? null,
+          hedge_legs: pred.hedge_legs || null,
+          hedge_symbol: pred.hedge_symbol || null,
+          hedge_action: pred.hedge_action || null,
+          hedge_entry: pred.hedge_entry || null,
+          levels: pred.levels || null,
+          metrics: pred.metrics || null,
           consensus_agreement_pct:
-            consensus.consensus_agreement_pct,
+            pred.consensus_agreement_pct ??
+            consensus.consensus_agreement_pct ??
+            null,
           trigger:
-            consensus.label ||
-            `${consensus.agreeing_strategies}/${consensus.total_strategies} strategies agree`,
+            pred.trigger ||
+            pred.reason ||
+            `${sym} ${strategyLabel(strategy)} Signal`,
           timestamp:
+            pred.ltp_timestamp ||
             payload?.timestamp ||
-            payload?.candle_timestamp,
+            payload?.candle_timestamp ||
+            null,
         })
       }
     }
 
-    // Prefer active candidate matching selected symbol if present, else top candidate
-    if (activeCandidates.length > 0) {
-      const matchSymbol = activeCandidates.find((c) => c.symbol === symbol)
-      return matchSymbol || activeCandidates[0]
+    // If backend exposes a specific configured symbol, prefer it.
+    if (symbol) {
+      const symbolMatch = activeCandidates.find(
+        (candidate) => candidate.symbol === symbol
+      )
+
+      if (symbolMatch) {
+        return symbolMatch
+      }
     }
 
-    return null
-  }, [streamSignals.data, streamMarket.data, symbol, strategy])
+    // Otherwise return the newest valid signal from the selected strategy.
+    return (
+      activeCandidates
+        .slice()
+        .sort((a, b) => {
+          const aTs = a.timestamp ? Date.parse(a.timestamp) : 0
+          const bTs = b.timestamp ? Date.parse(b.timestamp) : 0
+          return bTs - aTs
+        })[0] || null
+    )
+  }, [
+    streamSignals.data,
+    symbol,
+    strategy,
+  ])
 
   return (
     <div className="space-y-4 animate-fade-in">

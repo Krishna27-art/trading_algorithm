@@ -47,6 +47,7 @@ from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver
 from data.sector_peer_manager import get_sector_index_symbol
 from data.time_utils import now_ist, now_ist_iso, now_ist_naive
+from streaming.crsd_live_runtime import crsd_live_runtime
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
 from streaming.ssf_market_context import ssf_context_store
@@ -1174,6 +1175,29 @@ class MarketStreamManager:
                         exc,
                     )
 
+            # Explicitly resolve and subscribe real NIFTY benchmark token for CRSD market factor
+            try:
+                nifty_tok = (
+                    instrument_resolver.resolve_token(
+                        "NIFTY",
+                        exchange="NSE",
+                        kite_client=kite_client,
+                    )
+                    or instrument_resolver.resolve_token(
+                        "NIFTY 50",
+                        exchange="NSE",
+                        kite_client=kite_client,
+                    )
+                )
+                if nifty_tok:
+                    self.index_token_to_symbol[int(nifty_tok)] = "NIFTY"
+                    self.token_to_symbol[int(nifty_tok)] = "NIFTY"
+            except Exception as exc:
+                logger.debug(
+                    "[MarketStreamManager] Failed to resolve NIFTY token: %s",
+                    exc,
+                )
+
             # ----------------------------------------------------------
             # 6. Deduplicate actual subscription tokens.
             # ----------------------------------------------------------
@@ -1310,6 +1334,15 @@ class MarketStreamManager:
                     candle_dict,
                     vwap,
                 )
+
+                if symbol in ("NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__"):
+                    crsd_live_runtime.update_market_candle(
+                        candle_dict
+                    )
+                else:
+                    crsd_live_runtime.update_stock_candle(
+                        candle_dict
+                    )
 
                 # ------------------------------------------------------
                 # History must be ready before strategy evaluation.

@@ -15,6 +15,7 @@ const STRATEGIES = [
   { id: 'sector_impulse', label: 'Sector Impulse', usesSymbol: true },
   { id: 'ssf_l5_srm', label: 'SSF-L5-SRM', usesSymbol: true },
   { id: 'aou_oss', label: 'AOU-OSS', usesSymbol: true },
+  { id: 'crsd', label: 'CRSD', usesSymbol: true },
   { id: 'rm100', label: 'RM100 (portfolio)', usesSymbol: false },
 ]
 
@@ -57,7 +58,9 @@ export default function BacktestPage() {
   }
 
   const report = result?.report
-  const trades = strategy === 'rm100' ? result?.trades : null
+  const trades = (strategy === 'rm100' || strategy === 'crsd') ? result?.trades : null
+  const isCrsd = strategy === 'crsd'
+  const pairInfo = result?.pair_info
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -116,24 +119,78 @@ export default function BacktestPage() {
 
       {status === 'success' && report && (
         <>
-          <Card
-            title="Results"
-            action={<DataSourceBadge source={result.data_source} />}
-          >
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <Metric label="Net P&L" value={formatCurrency(report.net_pnl)} tone={pnlTone(report.net_pnl)} />
-              <Metric label="Win rate" value={`${formatNumber(report.win_rate_pct, 1)}%`} />
-              <Metric label="Total trades" value={report.total_trades} />
-              <Metric label="Max drawdown" value={`${formatNumber(report.max_drawdown_pct, 1)}%`} tone="negative" />
-              <Metric label="Profit factor" value={formatNumber(report.profit_factor, 2)} />
-              <Metric label="Sharpe ratio" value={formatNumber(report.sharpe_ratio, 2)} />
-              <Metric label="CAGR" value={report.cagr_pct !== undefined ? `${formatNumber(report.cagr_pct, 1)}%` : 'N/A'} />
-              <Metric label="Expectancy" value={report.expectancy_rupees !== undefined ? formatCurrency(report.expectancy_rupees) : 'N/A'} />
-            </div>
-            <p className="text-xs text-[var(--text-faint)] mt-4">
-              Final equity isn't returned by this endpoint, so it isn't shown here — see the report note below.
-            </p>
-          </Card>
+          {isCrsd ? (
+            <Card
+              title="CRSD Pair Backtest"
+              action={<DataSourceBadge source={result.data_source} />}
+            >
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+                <Metric label="Target" value={pairInfo?.target_symbol || symbol} />
+                <Metric
+                  label="Hedge basket"
+                  value={
+                    pairInfo?.hedge_basket && pairInfo.hedge_basket.length > 0
+                      ? pairInfo.hedge_basket.join(', ')
+                      : 'Sector Peers'
+                  }
+                />
+                <Metric label="Pair trades" value={report.total_trades} />
+                <Metric label="Pair win rate" value={`${formatNumber(report.win_rate_pct, 1)}%`} />
+                <Metric label="Gross pair P&L" value={formatCurrency(report.gross_pnl)} tone={pnlTone(report.gross_pnl)} />
+                <Metric
+                  label="Total leg costs"
+                  value={formatCurrency(pairInfo?.total_leg_costs ?? report.total_transaction_costs)}
+                  tone="negative"
+                />
+                <Metric label="Net pair P&L" value={formatCurrency(report.net_pnl)} tone={pnlTone(report.net_pnl)} />
+                <Metric label="Max drawdown" value={`${formatNumber(report.max_drawdown_pct, 1)}%`} tone="negative" />
+              </div>
+
+              {pairInfo && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-[var(--border)] text-xs text-[var(--text-dim)]">
+                  <div>
+                    <span className="text-[var(--text-faint)]">Target Gross: </span>
+                    <span className={pnlTone(pairInfo.target_gross_pnl) === 'positive' ? 'text-[var(--positive)]' : ''}>
+                      {formatCurrency(pairInfo.target_gross_pnl)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-faint)]">Hedge Gross: </span>
+                    <span className={pnlTone(pairInfo.hedge_gross_pnl) === 'positive' ? 'text-[var(--positive)]' : ''}>
+                      {formatCurrency(pairInfo.hedge_gross_pnl)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-faint)]">Target Costs: </span>
+                    <span>{formatCurrency(pairInfo.target_costs)}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-faint)]">Hedge Costs: </span>
+                    <span>{formatCurrency(pairInfo.hedge_costs)}</span>
+                  </div>
+                </div>
+              )}
+            </Card>
+          ) : (
+            <Card
+              title="Results"
+              action={<DataSourceBadge source={result.data_source} />}
+            >
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <Metric label="Net P&L" value={formatCurrency(report.net_pnl)} tone={pnlTone(report.net_pnl)} />
+                <Metric label="Win rate" value={`${formatNumber(report.win_rate_pct, 1)}%`} />
+                <Metric label="Total trades" value={report.total_trades} />
+                <Metric label="Max drawdown" value={`${formatNumber(report.max_drawdown_pct, 1)}%`} tone="negative" />
+                <Metric label="Profit factor" value={formatNumber(report.profit_factor, 2)} />
+                <Metric label="Sharpe ratio" value={formatNumber(report.sharpe_ratio, 2)} />
+                <Metric label="CAGR" value={report.cagr_pct !== undefined ? `${formatNumber(report.cagr_pct, 1)}%` : 'N/A'} />
+                <Metric label="Expectancy" value={report.expectancy_rupees !== undefined ? formatCurrency(report.expectancy_rupees) : 'N/A'} />
+              </div>
+              <p className="text-xs text-[var(--text-faint)] mt-4">
+                Final equity isn't returned by this endpoint, so it isn't shown here — see the report note below.
+              </p>
+            </Card>
+          )}
 
           {trades && trades.length > 0 && <TradesAndEquity trades={trades} />}
         </>
@@ -143,7 +200,7 @@ export default function BacktestPage() {
         <Card><EmptyState label="Backtest completed with no result payload." /></Card>
       )}
 
-      {selected.usesSymbol && (
+      {selected.usesSymbol && !isCrsd && (
         <Card title="Compare intraday strategies" action={<span className="text-xs text-[var(--text-faint)]">All 7 intraday strategies, same symbol &amp; lookback</span>}>
           {!compare ? (
             <button

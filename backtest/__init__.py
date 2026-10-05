@@ -1,3 +1,4 @@
+from .pair_backtester import PairBacktester
 from .performance import PerformanceAnalyzer, PerformanceReport
 from .rolling_walk_forward import RollingWalkForwardValidator
 from .strategy_backtester import StrategyBacktester
@@ -7,6 +8,7 @@ EventDrivenBacktester = StrategyBacktester
 
 __all__ = [
     "StrategyBacktester",
+    "PairBacktester",
     "EventDrivenBacktester",
     "PerformanceAnalyzer",
     "PerformanceReport",

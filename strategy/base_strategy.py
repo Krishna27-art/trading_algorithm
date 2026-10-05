@@ -29,11 +29,22 @@ class StrategySignal:
     order_type: str = "LIMIT"
     product: str = "MIS"
     signal_id: Optional[str] = None
+    hedge_symbol: Optional[str] = None
+    hedge_action: Optional[SignalAction] = None
+    hedge_price: Optional[float] = None
+    hedge_legs: Optional[Dict[str, float]] = None
 
     def __post_init__(self):
         if not self.signal_id:
             ts_str = self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else str(self.timestamp)
-            self.signal_id = f"SIG_{self.symbol}_{ts_str}_{self.action.value}"
+            hedge_part = (
+                f"_{self.hedge_symbol}_{self.hedge_action.value}"
+                if self.hedge_symbol and self.hedge_action
+                else ""
+            )
+            self.signal_id = (
+                f"SIG_{self.symbol}{hedge_part}_{ts_str}_{self.action.value}"
+            )
 
 
 class BaseStrategy(ABC):

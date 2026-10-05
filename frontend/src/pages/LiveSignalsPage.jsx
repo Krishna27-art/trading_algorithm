@@ -16,6 +16,7 @@ const STRATEGIES = [
   { id: 'sector_impulse', label: 'Sector Impulse' },
   { id: 'ssf_l5_srm', label: 'SSF-L5-SRM' },
   { id: 'aou_oss', label: 'AOU-OSS' },
+  { id: 'crsd', label: 'CRSD' },
 ]
 
 const ALL_STRATEGY_KEYS = [
@@ -26,6 +27,7 @@ const ALL_STRATEGY_KEYS = [
   'sector_impulse',
   'ssf_l5_srm',
   'aou_oss',
+  'crsd',
 ]
 
 const MAX_AUTO_START_ATTEMPTS = 5
@@ -602,36 +604,83 @@ function SignalRow({
         </div>
       ) : (
         focused && (
-          <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <MiniStat
-              label="Status"
-              value={formatStatus(focused.status)}
-              tone={dirTone(focused.direction, focused.status)}
-            />
+          filter === 'crsd' || focused.hedge_legs ? (
+            <div className="mt-3 space-y-2">
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+                <MiniStat
+                  label="Status"
+                  value={formatStatus(focused.status)}
+                  tone={dirTone(focused.direction, focused.status)}
+                />
+                <MiniStat
+                  label="Target Action"
+                  value={focused.direction || '—'}
+                  tone={dirTone(focused.direction, focused.status)}
+                />
+                <MiniStat
+                  label="Target Entry"
+                  value={formatCurrency(focused.entry)}
+                />
+                <MiniStat
+                  label="Z-Score"
+                  value={focused.metrics?.z != null ? String(focused.metrics.z) : '—'}
+                />
+                <MiniStat
+                  label="Entry / Exit Z"
+                  value={focused.levels?.entry_z != null && focused.levels?.exit_z != null ? `±${focused.levels.entry_z} / ±${focused.levels.exit_z}` : '—'}
+                />
+                <MiniStat
+                  label="Risk Scale"
+                  value={focused.levels?.risk_scale != null ? `${focused.levels.risk_scale}x` : '1.0x'}
+                />
+              </div>
 
-            <MiniStat
-              label="Direction"
-              value={focused.direction || '—'}
-              tone={dirTone(focused.direction, focused.status)}
-            />
+              {focused.hedge_legs && Object.keys(focused.hedge_legs).length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[var(--border)]/40 text-xs">
+                  <span className="text-[var(--text-faint)] font-medium">Hedge basket:</span>
+                  {Object.entries(focused.hedge_legs).map(([hSym, w]) => (
+                    <span key={hSym} className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--border-strong)] bg-black/40 font-num">
+                      <span className="font-semibold text-[var(--text)]">{hSym}</span>
+                      <span className={w >= 0 ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}>
+                        {w >= 0 ? `+${Math.round(Math.abs(w) * 100)}%` : `-${Math.round(Math.abs(w) * 100)}%`}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <MiniStat
+                label="Status"
+                value={formatStatus(focused.status)}
+                tone={dirTone(focused.direction, focused.status)}
+              />
 
-            <MiniStat
-              label="Entry"
-              value={formatCurrency(focused.entry)}
-            />
+              <MiniStat
+                label="Direction"
+                value={focused.direction || '—'}
+                tone={dirTone(focused.direction, focused.status)}
+              />
 
-            <MiniStat
-              label="Stop loss"
-              value={formatCurrency(focused.stop_loss)}
-              tone="negative"
-            />
+              <MiniStat
+                label="Entry"
+                value={formatCurrency(focused.entry)}
+              />
 
-            <MiniStat
-              label="Target"
-              value={formatCurrency(focused.target)}
-              tone="positive"
-            />
-          </div>
+              <MiniStat
+                label="Stop loss"
+                value={formatCurrency(focused.stop_loss)}
+                tone="negative"
+              />
+
+              <MiniStat
+                label="Target"
+                value={formatCurrency(focused.target)}
+                tone="positive"
+              />
+            </div>
+          )
         )
       )}
 
@@ -642,6 +691,7 @@ function SignalRow({
               key={key}
               name={key}
               pred={preds[key]}
+              symbol={candidate.symbol}
             />
           ))}
         </div>
@@ -675,8 +725,113 @@ function StrategyChip({ name, pred }) {
   )
 }
 
-function StrategyDetail({ name, pred }) {
+function StrategyDetail({ name, pred, symbol }) {
   if (!pred) return null
+
+  if (name === 'crsd' || pred.hedge_legs) {
+    const hedgeLegs = pred.hedge_legs || {}
+    const zVal = pred.metrics?.z ?? pred.metrics?.residual_z
+    const zCsVal = pred.metrics?.z_cs
+    const entryZ = pred.levels?.entry_z
+    const exitZ = pred.levels?.exit_z
+    const riskScale = pred.levels?.risk_scale ?? pred.metrics?.risk_scale ?? 1.0
+    const spread = pred.metrics?.spread
+
+    return (
+      <div className="rounded-lg border border-[var(--border)] p-3 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">
+              {labelFor(name)}
+            </span>
+            <span className="text-xs text-[var(--accent)] font-medium px-2 py-0.5 rounded bg-[var(--accent-dim)]">
+              Market-Neutral Pair
+            </span>
+          </div>
+
+          <StatusPill
+            tone={dirTone(pred.direction, pred.status)}
+            dot={false}
+          >
+            {formatStatus(pred.status)}
+          </StatusPill>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <MiniStat
+            label="Target"
+            value={pred.symbol || symbol || '—'}
+          />
+          <MiniStat
+            label="Action"
+            value={pred.direction || '—'}
+            tone={dirTone(pred.direction, pred.status)}
+          />
+          <MiniStat
+            label="Target Entry"
+            value={formatCurrency(pred.entry)}
+          />
+          <MiniStat
+            label="Risk Scale"
+            value={`${riskScale}x`}
+          />
+        </div>
+
+        {Object.keys(hedgeLegs).length > 0 && (
+          <div className="p-2.5 rounded-lg border border-[var(--border)] bg-white/[0.02]">
+            <p className="text-xs text-[var(--text-faint)] mb-1.5 font-medium">
+              Hedge basket (Notional Weights):
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(hedgeLegs).map(([hSym, w]) => (
+                <span
+                  key={hSym}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-[var(--border-strong)] bg-black/40 text-xs font-num"
+                >
+                  <span className="font-semibold text-[var(--text)]">{hSym}</span>
+                  <span className={w >= 0 ? 'text-[var(--positive)] font-medium' : 'text-[var(--negative)] font-medium'}>
+                    {w >= 0 ? `+${Math.round(Math.abs(w) * 100)}%` : `-${Math.round(Math.abs(w) * 100)}%`}
+                  </span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-[var(--border)]/40">
+          <MiniStat
+            label="Z-Score"
+            value={zVal != null ? String(zVal) : '—'}
+            tone={zVal != null && Math.abs(zVal) >= (entryZ || 2.0) ? 'accent' : 'neutral'}
+          />
+          <MiniStat
+            label="Cross-Sectional Z"
+            value={zCsVal != null ? String(zCsVal) : '—'}
+          />
+          <MiniStat
+            label="Entry Z"
+            value={entryZ != null ? `±${entryZ}` : '—'}
+          />
+          <MiniStat
+            label="Exit Z"
+            value={exitZ != null ? `±${exitZ}` : '—'}
+          />
+        </div>
+
+        {spread != null && (
+          <div className="text-xs text-[var(--text-faint)] font-num">
+            Residual Spread: <span className="text-[var(--text-dim)]">{formatValue(spread)}</span>
+          </div>
+        )}
+
+        {pred.reason && (
+          <p className="text-xs text-[var(--text-dim)]">
+            {pred.reason}
+          </p>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-lg border border-[var(--border)] p-3">
@@ -765,7 +920,9 @@ function MiniStat({ label, value, tone }) {
         ? 'text-[var(--negative)]'
         : tone === 'warning'
           ? 'text-[var(--warning)]'
-          : 'text-[var(--text)]'
+          : tone === 'accent'
+            ? 'text-[var(--accent)]'
+            : 'text-[var(--text)]'
 
   return (
     <div>
@@ -877,6 +1034,7 @@ function labelFor(key) {
       sector_impulse: 'Sector Impulse',
       ssf_l5_srm: 'SSF-L5-SRM',
       aou_oss: 'AOU-OSS',
+      crsd: 'CRSD',
     }[key] || key
   )
 }

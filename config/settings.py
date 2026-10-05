@@ -199,6 +199,85 @@ class VRPConfig(BaseModel):
     risk_free_rate: float = 0.065
 
 
+class CRSDConfig(BaseModel):
+    # ---- factor model / training window
+    horizon_bars: int = 3                      # h: residual accumulation window
+    train_days: int = 20
+    min_train_bars: int = 250
+    min_coverage: float = 0.90                 # peer must cover >= this share of own bars
+    group_cap: int = 8                         # max peers loaded into the factor model
+    halflife_grid_days: Tuple[float, ...] = (3.0, 5.0, 8.0, 12.0)
+    ridge_lambda: float = 1e-8
+    transient_halflife_bars: float = 3.0
+    use_local_beta: bool = True
+    local_beta_window: int = 4
+    local_beta_clip: Tuple[float, float] = (0.6, 1.5)
+
+    # ---- basket construction
+    max_peers: int = 4
+    min_peers: int = 2
+    min_peer_corr: float = 0.10
+    hedge_ratio_clip: Tuple[float, float] = (0.5, 1.5)
+
+    # ---- entry / exit thresholds (research grid: entry 2.0-3.5, exit 0.5-1.0)
+    entry_z: float = 2.5
+    exit_z: float = 0.75
+    confirm_bars: int = 1
+    cs_min_group: int = 4                      # cross-sectional z needs >= this many names
+    cs_confirm_z: float = 1.0
+    auto_calibrate: bool = False               # grid-search entry/exit inside training only
+    entry_z_grid: Tuple[float, ...] = (2.0, 2.5, 3.0, 3.5)
+    exit_z_grid: Tuple[float, ...] = (0.5, 0.75, 1.0)
+    calib_min_events: int = 12
+    require_convergence_evidence: bool = True
+    min_hit_rate: float = 0.52
+    min_net_bps: float = 0.0
+
+    # ---- regime gate (BOCPD)
+    bocpd_hazard: float = 1.0 / 60.0
+    bocpd_max_run: int = 120
+    bocpd_recent_window: int = 3
+    bocpd_warm_bars: int = 300
+    bocpd_kappa0: float = 0.1
+    bocpd_alpha0: float = 2.0
+    bocpd_beta0: float = 1.0
+    cp_entry_max: float = 0.35
+    cp_exit: float = 0.60
+
+    # ---- volatility memory
+    vm_exponent: float = 0.75
+    vm_len: int = 120
+    vm_stress_pctl: float = 0.90               # entries blocked at/above this
+    vm_scale_pctl: float = 0.75                # risk_scale halves at/above this
+
+    # ---- liquidity
+    liq_turnover_pctl: float = 0.30            # own/hedge turnover must exceed this pctl
+    liq_spread_pctl: float = 0.90              # spread proxy must be below this pctl
+    liq_shock_frac: float = 0.25               # turnover < frac*median for 2 bars -> shock
+
+    # ---- costs
+    round_trip_cost_bps_per_leg: float = 8.0   # PLACEHOLDER: brokerage+STT+charges+slippage
+    edge_cost_mult: float = 2.0
+    capture_frac: float = 0.60                 # share of the excess spread expected to convert
+
+    # ---- risk / exits
+    max_hold_bars: int = 8
+    stop_sigma: float = 2.0
+    tail_quantile: float = 0.99
+    leg_stop_mult: float = 2.0                 # price stop on the unhedged leg = mult x spread stop
+    min_target_bps: float = 3.0
+    strategy_loss_cap_bps: float = 60.0
+    daily_dd_limit_bps: float = 100.0
+    max_trades_per_day: int = 2
+
+    # ---- session
+    entry_start: time = time(9, 45)
+    entry_end: time = time(14, 15)
+    session_end: time = time(15, 10)
+    skip_expiry_day: bool = True
+    expiry_weekday: int = 1                    # monthly expiry weekday (Tue)
+
+
 class AppSettings(BaseSettings):
     # Target Instruments
     instruments: List[InstrumentConfig] = [
@@ -213,7 +292,7 @@ class AppSettings(BaseSettings):
         )
     ]
 
-    # Active Strategy (Options: "cpr", "dual_ema", "orb", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss", "rm100", "vrp")
+    # Active Strategy (Options: "cpr", "dual_ema", "orb", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss", "crsd", "rm100", "vrp")
     active_strategy: str = "cpr"
 
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
@@ -224,6 +303,7 @@ class AppSettings(BaseSettings):
     # Portfolio-level strategies and cost schedules
     rm100: ResidualMomentumConfig = Field(default_factory=ResidualMomentumConfig)
     vrp: VRPConfig = Field(default_factory=VRPConfig)
+    crsd: CRSDConfig = Field(default_factory=CRSDConfig)
     delivery_costs: DeliveryCostConfig = Field(default_factory=DeliveryCostConfig)
     options_costs: IndexOptionsCostConfig = Field(default_factory=IndexOptionsCostConfig)
 

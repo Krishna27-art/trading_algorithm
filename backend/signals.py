@@ -67,6 +67,23 @@ STRATEGY_REGISTRY = {
         "timeframe": "15m candles",
         "key_levels": ["RVWAP", "Spread", "Equilibrium", "Long Boundary", "Short Boundary", "Stop Barrier"],
     },
+    "crsd": {
+        "name": "Cross-Sectional Residual Shock Divergence",
+        "description": (
+            "Intraday market-neutral residual divergence "
+            "strategy using a target stock and peer hedge basket."
+        ),
+        "timeframe": "15m candles",
+        "key_levels": [
+            "Residual Z-Score",
+            "Cross-Sectional Z-Score",
+            "Entry Z",
+            "Exit Z",
+            "Residual Spread",
+            "Hedge Basket",
+            "Risk Scale",
+        ],
+    },
 }
 
 

@@ -44,29 +44,40 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
         !activePred ||
         !['LONG', 'SHORT'].includes(activePred.direction)
       ) {
-        activePred = Object.values(preds).find(
-          (p) =>
+        // Only scan non-CRSD directional strategies as fallback; CRSD is an independent pair strategy
+        activePred = Object.entries(preds).find(
+          ([stratKey, p]) =>
+            stratKey !== 'crsd' &&
             p &&
             ['LONG', 'SHORT'].includes(p.direction)
-        )
+        )?.[1]
       }
 
       if (
         activePred &&
         ['LONG', 'SHORT'].includes(activePred.direction)
       ) {
+        const stratKey = activePred.strategy || activePred.strategy_key || (preds[strategy] === activePred ? strategy : 'strategy')
         activeCandidates.push({
           symbol: sym,
+          strategy: stratKey,
           type:
             activePred.type ||
             (activePred.direction === 'LONG'
               ? 'BUY'
               : 'SELL'),
+          direction: activePred.direction,
           entry: activePred.entry ?? null,
           stop_loss: activePred.stop_loss,
           target: activePred.target,
+          hedge_legs: activePred.hedge_legs || null,
+          hedge_symbol: activePred.hedge_symbol || null,
+          hedge_action: activePred.hedge_action || null,
+          hedge_entry: activePred.hedge_entry || null,
+          levels: activePred.levels || null,
+          metrics: activePred.metrics || null,
           consensus_agreement_pct: activePred.consensus_agreement_pct ?? consensus.consensus_agreement_pct,
-          trigger: activePred.trigger || activePred.reason || `${sym} ${strategyLabel(activePred.strategy_key || strategy)} Signal`,
+          trigger: activePred.trigger || activePred.reason || `${sym} ${strategyLabel(stratKey)} Signal`,
           timestamp: payload?.timestamp || payload?.candle_timestamp,
         })
       } else if (
@@ -75,10 +86,12 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
       ) {
         activeCandidates.push({
           symbol: sym,
+          strategy: 'consensus',
           type:
             consensus.direction === 'LONG'
               ? 'BUY'
               : 'SELL',
+          direction: consensus.direction,
           entry: null,
           stop_loss: null,
           target: null,
@@ -173,6 +186,60 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
 
 function SignalSummary({ signal }) {
   const long = signal.type === 'BUY' || signal.direction === 'LONG'
+  const isCrsd = signal.strategy === 'crsd' || signal.hedge_legs != null
+
+  if (isCrsd) {
+    const hedgeLegs = signal.hedge_legs || {}
+    const zScore = signal.metrics?.z ?? signal.metrics?.residual_z
+    const entryZ = signal.levels?.entry_z
+    const exitZ = signal.levels?.exit_z
+    const riskScale = signal.levels?.risk_scale ?? signal.metrics?.risk_scale ?? 1.0
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <StatusPill tone={long ? 'positive' : 'negative'} dot={false}>
+              {long ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+              {long ? 'BUY' : 'SELL'}
+            </StatusPill>
+            <span className="font-semibold">{signal.symbol}</span>
+            <span className="text-xs text-[var(--accent)] font-medium px-2 py-0.5 rounded bg-[var(--accent-dim)]">
+              CRSD Pair Leg
+            </span>
+          </div>
+        </div>
+
+        {Object.keys(hedgeLegs).length > 0 && (
+          <div className="p-2.5 rounded-lg border border-[var(--border)] bg-white/[0.02]">
+            <p className="text-xs text-[var(--text-faint)] mb-1.5 font-medium">Hedge Basket (Notional Weights):</p>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(hedgeLegs).map(([hSym, w]) => (
+                <span
+                  key={hSym}
+                  className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border border-[var(--border-strong)] bg-black/40 font-num"
+                >
+                  <span className="font-medium text-[var(--text)]">{hSym}</span>
+                  <span className={w >= 0 ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}>
+                    {w >= 0 ? `+${Math.round(Math.abs(w) * 100)}%` : `-${Math.round(Math.abs(w) * 100)}%`}
+                  </span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Stat label="Target entry" value={signal.entry ? formatCurrency(signal.entry) : 'N/A'} />
+          <Stat label="Z-score" value={zScore != null ? String(zScore) : 'N/A'} />
+          <Stat label="Entry / Exit Z" value={entryZ != null && exitZ != null ? `±${entryZ} / ±${exitZ}` : 'N/A'} />
+          <Stat label="Risk scale" value={`${riskScale}x`} />
+        </div>
+        {signal.trigger && <p className="text-xs text-[var(--text-dim)]">{signal.trigger}</p>}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
@@ -221,6 +288,7 @@ function strategyLabel(key) {
       sector_impulse: 'Sector Impulse',
       ssf_l5_srm: 'SSF-L5-SRM',
       aou_oss: 'AOU-OSS',
+      crsd: 'CRSD',
       rm100: 'RM100',
       vrp: 'VRP',
     }[key] || (key ? key.toUpperCase() : 'STRATEGY')

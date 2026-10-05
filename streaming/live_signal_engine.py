@@ -45,6 +45,7 @@ import pandas as pd
 from data.time_utils import now_ist, now_ist_iso
 from strategy.prediction_service import prediction_service
 from strategy.ssf_l5_srm_strategy import BookSnapshot
+from streaming.crsd_live_runtime import crsd_live_runtime
 from streaming.live_market_state import live_market_state
 from streaming.ssf_live_runtime import ssf_live_runtime
 from streaming.ssf_market_context import ssf_context_store
@@ -89,6 +90,7 @@ class LiveSignalEngine:
         # survives across candle-close and book-update events so that rolling
         # z-score buffers, basis history, and regime state accumulate correctly.
         self._ssf_runtime = ssf_live_runtime
+        self._crsd_runtime = crsd_live_runtime
 
     # ------------------------------------------------------------------
     # NORMALIZATION / VALIDATION
@@ -430,6 +432,11 @@ class LiveSignalEngine:
             )
             return self.get_prediction(symbol)
 
+        self._crsd_runtime.on_candle(
+            symbol,
+            candle_dict,
+        )
+
         data = self._copy_dataframe(
             live_market_state.get_candles_df(symbol)
         )
@@ -585,6 +592,18 @@ class LiveSignalEngine:
                     current_price=float(live_ltp),
                 )
 
+            live_states = live_market_state.get_all_symbols_state()
+            live_ltp_by_symbol = {
+                sym: st.ltp
+                for sym, st in live_states.items()
+                if st is not None and st.ltp is not None and st.ltp > 0
+            }
+
+            crsd_ctx = self._crsd_runtime.get_context(
+                symbol,
+                kite_client=kite_client,
+            )
+
             # current_ltp is explicitly the freshest verified market price,
             # not the completed candle's close unless no fresher price exists.
             preds, consensus = prediction_service.evaluate_symbol(
@@ -593,8 +612,10 @@ class LiveSignalEngine:
                 current_ltp=live_ltp,
                 token=token,
                 book_snapshot=book_snap,
+                peer_context=crsd_ctx,
                 kite_client=kite_client,
                 ssf_strategy=ssf_strat,
+                live_ltp_by_symbol=live_ltp_by_symbol,
             )
 
             prediction_payload = {
@@ -836,8 +857,9 @@ class LiveSignalEngine:
             self._latest_ltp.clear()
             self._processed_candle_keys.clear()
             self._processed_candle_order.clear()
-        # Clear persistent SSF state so a new session starts clean.
+        # Clear persistent SSF and CRSD state so a new session starts clean.
         self._ssf_runtime.reset()
+        self._crsd_runtime.reset()
         ssf_context_store.reset()
 
 

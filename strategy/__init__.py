@@ -4,6 +4,7 @@ from .cpr_strategy import CPRRegimeBreakoutStrategy
 from .dual_ema_strategy import BufferedDualEMAStrategy
 from .sector_impulse_strategy import SectorImpulseStrategy, SITConfig, PeerContext
 from .ssf_l5_srm_strategy import SsfL5SrmStrategy, SSFConfig, BookSnapshot
+from .crsd_strategy import CRSDStrategy
 
 __all__ = [
     # intraday, single-instrument (ORB, CPR, Dual-EMA, Sector Impulse, SSF-L5-SRM)
@@ -17,6 +18,7 @@ __all__ = [
     "SsfL5SrmStrategy",
     "SSFConfig",
     "BookSnapshot",
+    "CRSDStrategy",
     "SignalAction",
     "StrategySignal",
 ]

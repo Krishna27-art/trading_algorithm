@@ -45,7 +45,19 @@ STRATEGIES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "sector_impulse": ("Sector Impulse Transmission (SIT)", ("sector_impulse", "sit")),
     "ssf_l5_srm": ("SSF-L5-SRM Microprice & Residual Momentum", ("ssf_l5_srm", "ssf")),
     "aou_oss": ("Analytic Ornstein-Uhlenbeck Optimal-Stopping (AOU-OSS)", ("aou_oss",)),
+    "crsd": ("Cross-Sectional Residual Shock Divergence (CRSD)", ("crsd",)),
 }
+
+# The 7 single-instrument directional strategies compared in research
+RESEARCH_STRATEGIES = [
+    "orb",
+    "cpr",
+    "dual_ema",
+    "apex",
+    "sector_impulse",
+    "ssf_l5_srm",
+    "aou_oss",
+]
 
 
 def _canonical_strategy(name: str) -> Optional[str]:
@@ -91,6 +103,11 @@ def _make_factory(key: str, inst, kite) -> Callable[[], Any]:
     if key == "aou_oss":
         from strategy.aou_oss_strategy import AouOssStrategy
         return lambda: AouOssStrategy(inst, settings.strategy)
+    if key == "crsd":
+        from data.sector_peer_manager import SectorPeerManager
+        from strategy.crsd_strategy import CRSDStrategy
+        peer_ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
+        return lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx)
     raise HTTPException(status_code=400, detail=f"Unknown strategy '{key}'.")
 
 
@@ -165,8 +182,23 @@ def _load_history(inst, token, days: int, kite, auth_err: Optional[str]):
 
 
 def _run_one(key: str, inst, kite, df):
-    from backtest.strategy_backtester import StrategyBacktester
     from config.settings import settings
+
+    if key == "crsd":
+        from backtest.pair_backtester import PairBacktester
+        from data.sector_peer_manager import SectorPeerManager
+        from strategy.crsd_strategy import CRSDStrategy
+
+        peer_ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
+        backtester = PairBacktester(
+            strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx),
+            instrument=inst,
+            peer_context=peer_ctx,
+            app_settings=settings,
+        )
+        return backtester.run(df, initial_capital=settings.risk.initial_capital)
+
+    from backtest.strategy_backtester import StrategyBacktester
 
     backtester = StrategyBacktester(
         strategy_factory=_make_factory(key, inst, kite),
@@ -203,7 +235,7 @@ def _serialize_rounded(rep) -> dict:
 
 
 def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
-    """Run all 7 strategies on validated real/cached data."""
+    """Run all 7 single-instrument intraday strategies on validated real/cached data."""
     from config.settings import settings
 
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
@@ -211,10 +243,11 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
     df = _load_history(inst, token, days, kite, auth_err)
 
     active = (settings.active_strategy or "").lower()
-    reports = {key: _run_one(key, inst, kite, df) for key in STRATEGIES}
+    reports = {key: _run_one(key, inst, kite, df) for key in RESEARCH_STRATEGIES}
 
     comparison = []
-    for key, rep in reports.items():
+    for key in RESEARCH_STRATEGIES:
+        rep = reports[key]
         name, aliases = STRATEGIES[key]
         pf = _safe_pf(rep.profit_factor)
         comparison.append({
@@ -252,13 +285,13 @@ def _guarded(fn, *args, **kwargs):
 
 @router.get("/api/research/backtest")
 def get_research_backtest(days: int = 180, symbol: str = "NIFTY"):
-    """Backtest all strategies and return a comparative summary."""
+    """Backtest all 7 intraday strategies and return a comparative summary."""
     return _guarded(run_all_backtests, days=days, symbol=symbol)
 
 
 @router.post("/api/research/backtest")
 def post_research_backtest(days: int = 180, symbol: str = "NIFTY"):
-    """Backtest all strategies and return a comparative summary."""
+    """Backtest all 7 intraday strategies and return a comparative summary."""
     return _guarded(run_all_backtests, days=days, symbol=symbol)
 
 
@@ -283,6 +316,72 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
     inst, token = _resolve_instrument(symbol, kite)
     df = _load_history(inst, token, days, kite, auth_err)
+
+    if key == "crsd":
+        from backtest.pair_backtester import PairBacktester
+        from backtest.performance import PerformanceAnalyzer
+        from data.sector_peer_manager import SectorPeerManager
+        from strategy.crsd_strategy import CRSDStrategy
+        from config.settings import settings
+
+        peer_ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
+        backtester = PairBacktester(
+            strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx),
+            instrument=inst,
+            peer_context=peer_ctx,
+            app_settings=settings,
+        )
+        trades = backtester.generate_trades(df, initial_capital=settings.risk.initial_capital)
+        report = PerformanceAnalyzer.generate_report(trades, initial_capital=settings.risk.initial_capital)
+
+        target_gross = sum(float(t.get("target_gross_pnl", 0)) for t in trades)
+        hedge_gross = sum(float(t.get("hedge_gross_pnl", 0)) for t in trades)
+        target_cost = sum(float(t.get("target_cost", 0)) for t in trades)
+        hedge_cost = sum(float(t.get("hedge_cost", 0)) for t in trades)
+        total_costs = target_cost + hedge_cost
+        peer_symbols = peer_ctx.peer_symbols if peer_ctx else []
+
+        return {
+            "success": True,
+            "strategy": key,
+            "data_source": "REAL_KITE",
+            "pair_info": {
+                "target_symbol": inst.symbol,
+                "hedge_basket": peer_symbols,
+                "target_gross_pnl": round(target_gross, 2),
+                "hedge_gross_pnl": round(hedge_gross, 2),
+                "target_costs": round(target_cost, 2),
+                "hedge_costs": round(hedge_cost, 2),
+                "total_leg_costs": round(total_costs, 2),
+            },
+            "trades": trades,
+            "report": {
+                "symbol": inst.symbol,
+                "strategy": "CRSD",
+                "total_trades": report.total_trades,
+                "long_trades": report.long_trades,
+                "short_trades": report.short_trades,
+                "winning_trades": report.winning_trades,
+                "losing_trades": report.losing_trades,
+                "win_rate_pct": round(report.win_rate_pct, 1),
+                "gross_pnl": round(report.gross_pnl, 2),
+                "total_transaction_costs": round(report.total_transaction_costs, 2),
+                "net_pnl": round(report.net_pnl, 2),
+                "profit_factor": _safe_pf(report.profit_factor),
+                "sharpe_ratio": report.sharpe_ratio,
+                "cagr_pct": report.cagr_pct,
+                "max_drawdown_pct": report.max_drawdown_pct,
+                "max_consecutive_losses": report.max_consecutive_losses,
+                "avg_r_multiple": report.avg_r_multiple,
+                "expectancy_rupees": report.expectancy_rupees,
+                "long_win_rate": report.long_win_rate,
+                "short_win_rate": report.short_win_rate,
+                "long_net_pnl": report.long_net_pnl,
+                "short_net_pnl": report.short_net_pnl,
+                "yearly_returns": report.yearly_returns,
+            },
+        }
+
     report = _run_one(key, inst, kite, df)
 
     return {

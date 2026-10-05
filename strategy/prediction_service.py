@@ -39,6 +39,7 @@ from strategy.base_strategy import SignalAction, StrategySignal
 from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
 from strategy.dual_ema_strategy import BufferedDualEMAStrategy
 from strategy.aou_oss_strategy import AouOssStrategy
+from strategy.crsd_strategy import CRSDStrategy
 from strategy.orb_strategy import IntradayORBStrategy
 from strategy.sector_impulse_strategy import SectorImpulseStrategy
 from strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
@@ -52,11 +53,20 @@ STRATEGY_KEYS = (
     "sector_impulse",
     "ssf_l5_srm",
     "aou_oss",
+    "crsd",
 )
 
 # Every live strategy is independently evaluated and can contribute
 # to consensus when it returns a valid evaluable result.
-LIVE_CONSENSUS_STRATEGIES = STRATEGY_KEYS
+LIVE_CONSENSUS_STRATEGIES = (
+    "orb",
+    "cpr",
+    "dual_ema",
+    "apex",
+    "sector_impulse",
+    "ssf_l5_srm",
+    "aou_oss",
+)
 
 REQUIRED_CANDLE_COLUMNS = {
     "datetime",
@@ -171,11 +181,25 @@ class SingleStrategyPrediction:
     reason: str = ""
     levels: Optional[Dict[str, Any]] = None
     metrics: Optional[Dict[str, Any]] = None
+    hedge_symbol: Optional[str] = None
+    hedge_action: Optional[str] = None
+    hedge_entry: Optional[float] = None
+    hedge_legs: Optional[Dict[str, float]] = None
+    strategy: Optional[str] = None
+    symbol: Optional[str] = None
+    pair_prices: Optional[Dict[str, float]] = None
+    hedge_notional_weights: Optional[Dict[str, float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "status": self.status,
         }
+
+        if self.strategy is not None:
+            payload["strategy"] = self.strategy
+
+        if self.symbol is not None:
+            payload["symbol"] = self.symbol
 
         if self.direction is not None:
             payload["direction"] = self.direction
@@ -188,6 +212,37 @@ class SingleStrategyPrediction:
 
         if self.target is not None:
             payload["target"] = round(float(self.target), 2)
+
+        if self.hedge_symbol is not None:
+            payload["hedge_symbol"] = self.hedge_symbol
+
+        if self.hedge_action is not None:
+            payload["hedge_action"] = self.hedge_action
+
+        if self.hedge_entry is not None:
+            payload["hedge_entry"] = round(
+                float(self.hedge_entry),
+                2,
+            )
+
+        if self.hedge_legs is not None:
+            payload["hedge_legs"] = {
+                str(k): round(float(v), 4)
+                for k, v in self.hedge_legs.items()
+            }
+
+        if self.hedge_notional_weights is not None:
+            payload["hedge_notional_weights"] = {
+                str(k): round(float(v), 4)
+                for k, v in self.hedge_notional_weights.items()
+            }
+
+        if self.pair_prices is not None:
+            payload["pair_prices"] = {
+                str(k): round(float(v), 2)
+                for k, v in self.pair_prices.items()
+                if v is not None and math.isfinite(v)
+            }
 
         if self.reason:
             payload["reason"] = str(self.reason)
@@ -842,6 +897,12 @@ class PredictionService:
             else "SHORT"
         )
 
+        hedge_action_str = (
+            signal.hedge_action.value
+            if isinstance(signal.hedge_action, SignalAction)
+            else (str(signal.hedge_action) if signal.hedge_action else None)
+        )
+
         return SingleStrategyPrediction(
             status=status,
             direction=direction,
@@ -858,6 +919,223 @@ class PredictionService:
             ),
             levels=levels or {},
             metrics=metrics or {},
+            hedge_symbol=signal.hedge_symbol,
+            hedge_action=hedge_action_str,
+            hedge_entry=signal.hedge_price,
+        )
+
+    @staticmethod
+    def _prediction_from_crsd_signal(
+        status: str,
+        signal: StrategySignal,
+        default_reason: str,
+        levels: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        min_hedge_legs: int = 1,
+    ) -> SingleStrategyPrediction:
+        """
+        Validate and construct a pair-level CRSD prediction.
+
+        Validates both the primary target leg and every constituent of the
+        hedge basket:
+        - Primary symbol, action, price, and timestamp.
+        - Full hedge basket: valid symbols, non-zero finite weights, minimum leg
+          count, and target stock exclusion.
+        - Primary hedge leg: opposite action and verified positive price.
+        """
+        target_sym = str(signal.symbol or "").strip().upper()
+        if not target_sym:
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="CRSD signal rejected: primary target symbol is missing.",
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        if signal.action not in (SignalAction.BUY, SignalAction.SELL):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=f"CRSD signal rejected: invalid primary action '{signal.action}'.",
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        if signal.price is None or not (
+            isinstance(signal.price, (int, float))
+            and signal.price > 0
+            and math.isfinite(signal.price)
+        ):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=f"CRSD signal rejected: invalid primary price '{signal.price}'.",
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        if not isinstance(signal.timestamp, datetime):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=f"CRSD signal rejected: invalid timestamp '{signal.timestamp}'.",
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        # Validate hedge basket
+        hedge_legs = signal.hedge_legs
+        if not hedge_legs or not isinstance(hedge_legs, dict):
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason="CRSD signal rejected: hedge basket is missing or empty.",
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        if len(hedge_legs) < min_hedge_legs:
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=(
+                    f"CRSD signal rejected: insufficient hedge legs ({len(hedge_legs)} "
+                    f"< min {min_hedge_legs})."
+                ),
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
+        validated_basket: Dict[str, float] = {}
+        for h_sym, h_weight in hedge_legs.items():
+            clean_h_sym = str(h_sym or "").strip().upper()
+            if not clean_h_sym:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason="CRSD signal rejected: empty hedge symbol in basket.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            if clean_h_sym == target_sym:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"CRSD signal rejected: target symbol '{target_sym}' cannot be inside its own hedge basket.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            try:
+                w_val = float(h_weight)
+            except (TypeError, ValueError):
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"CRSD signal rejected: non-numeric hedge weight '{h_weight}' for {clean_h_sym}.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            if not math.isfinite(w_val) or abs(w_val) < 1e-6:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"CRSD signal rejected: zero or invalid hedge weight {w_val} for {clean_h_sym}.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            validated_basket[clean_h_sym] = w_val
+
+        # Primary hedge leg validation if present
+        hedge_symbol_str: Optional[str] = None
+        hedge_action_str: Optional[str] = None
+        hedge_entry_val: Optional[float] = None
+
+        if signal.hedge_symbol:
+            clean_primary_hedge = str(signal.hedge_symbol).strip().upper()
+            if clean_primary_hedge not in validated_basket:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"CRSD signal rejected: primary hedge '{clean_primary_hedge}' not in validated basket.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            if signal.hedge_action not in (SignalAction.BUY, SignalAction.SELL):
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"CRSD signal rejected: invalid hedge action '{signal.hedge_action}'.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            is_opposite = (
+                (signal.action == SignalAction.BUY and signal.hedge_action == SignalAction.SELL)
+                or (signal.action == SignalAction.SELL and signal.hedge_action == SignalAction.BUY)
+            )
+            if not is_opposite:
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=(
+                        f"CRSD signal rejected: hedge action '{signal.hedge_action}' "
+                        f"must be opposite to primary action '{signal.action}'."
+                    ),
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            if signal.hedge_price is None or not (
+                isinstance(signal.hedge_price, (int, float))
+                and signal.hedge_price > 0
+                and math.isfinite(signal.hedge_price)
+            ):
+                return SingleStrategyPrediction(
+                    status="NO_TRADE",
+                    reason=f"CRSD signal rejected: invalid hedge price '{signal.hedge_price}'.",
+                    levels=levels or {},
+                    metrics=metrics or {},
+                )
+
+            hedge_symbol_str = clean_primary_hedge
+            hedge_action_str = (
+                signal.hedge_action.value
+                if isinstance(signal.hedge_action, SignalAction)
+                else str(signal.hedge_action)
+            )
+            hedge_entry_val = float(signal.hedge_price)
+
+        direction = (
+            "LONG"
+            if signal.action == SignalAction.BUY
+            else "SHORT"
+        )
+
+        pair_prices: Dict[str, float] = {target_sym: float(signal.price)}
+        if signal.hedge_symbol and signal.hedge_price:
+            pair_prices[str(signal.hedge_symbol).upper()] = float(signal.hedge_price)
+
+        return SingleStrategyPrediction(
+            status=status,
+            direction=direction,
+            entry=float(signal.price),
+            stop_loss=(
+                float(signal.stop_loss)
+                if signal.stop_loss is not None
+                else None
+            ),
+            target=(
+                float(signal.target)
+                if signal.target is not None
+                else None
+            ),
+            reason=(
+                signal.reason
+                or default_reason
+            ),
+            levels=levels or {},
+            metrics=metrics or {},
+            hedge_symbol=hedge_symbol_str,
+            hedge_action=hedge_action_str,
+            hedge_entry=hedge_entry_val,
+            hedge_legs=validated_basket,
+            strategy="crsd",
+            symbol=target_sym,
+            pair_prices=pair_prices,
+            hedge_notional_weights=validated_basket,
         )
 
     @staticmethod
@@ -896,6 +1174,7 @@ class PredictionService:
         peer_context: Optional[Any] = None,
         kite_client: Optional[Any] = None,
         ssf_strategy: Optional[Any] = None,
+        live_ltp_by_symbol: Optional[Dict[str, float]] = None,
     ) -> Tuple[
         Dict[str, SingleStrategyPrediction],
         Dict[str, Any],
@@ -1112,6 +1391,25 @@ class PredictionService:
             predictions["aou_oss"] = (
                 self._error_prediction(
                     "AOU-OSS",
+                    exc,
+                )
+            )
+
+        try:
+            predictions["crsd"] = (
+                self._evaluate_crsd(
+                    inst,
+                    live_df,
+                    ltp,
+                    peer_context=peer_context,
+                    kite_client=kite_client,
+                    live_ltp_by_symbol=live_ltp_by_symbol,
+                )
+            )
+        except Exception as exc:
+            predictions["crsd"] = (
+                self._error_prediction(
+                    "CRSD",
                     exc,
                 )
             )
@@ -1978,6 +2276,355 @@ class PredictionService:
                 f"rho={rho_text})."
             ),
             levels=levels,
+        )
+
+    # ================================================================
+    # CRSD (Cross-Sectional Residual Shock Divergence)
+    # ================================================================
+
+    def _evaluate_crsd(
+        self,
+        inst: InstrumentConfig,
+        df_15m: pd.DataFrame,
+        ltp: float,
+        peer_context: Optional[Any] = None,
+        kite_client: Optional[Any] = None,
+        live_ltp_by_symbol: Optional[Dict[str, float]] = None,
+    ) -> SingleStrategyPrediction:
+        if df_15m.empty:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "CRSD cannot evaluate: "
+                    "no 15-minute candle data is available."
+                ),
+                levels={},
+                metrics={},
+            )
+
+        _, days = self._prepare_data(
+            df_15m
+        )
+
+        if not days:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "CRSD cannot evaluate: "
+                    "no valid trading-session data found."
+                ),
+                levels={},
+                metrics={},
+            )
+
+        try:
+            from data.sector_peer_manager import SectorPeerManager
+
+            sec = SectorPeerManager.get_sector_for_symbol(
+                inst.symbol
+            )
+            if sec is None:
+                return SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        "CRSD cannot evaluate: "
+                        f"no authoritative sector classification for {inst.symbol}."
+                    ),
+                    levels={},
+                    metrics={},
+                )
+        except Exception as exc:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "CRSD sector classification error "
+                    f"for {inst.symbol}: {exc}"
+                ),
+                levels={},
+                metrics={},
+            )
+
+        latest_date, today_df = days[-1]
+
+        lookback_df = (
+            pd.concat(
+                [
+                    day_df
+                    for _, day_df in days[:-1]
+                ],
+                ignore_index=True,
+            )
+            if len(days) > 1
+            else pd.DataFrame()
+        )
+
+        ctx = peer_context
+
+        if ctx is None or not hasattr(ctx, "frames") or not hasattr(ctx, "market"):
+            try:
+                from strategy.crsd_strategy import (
+                    build_crsd_context,
+                )
+
+                ctx = build_crsd_context(
+                    symbol=inst.symbol,
+                    cache_dir=self.cache_dir,
+                    kite_client=kite_client,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[{inst.symbol}] CRSD build_crsd_context unavailable: {type(exc).__name__}: {exc}"
+                )
+                return SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        "CRSD peer context build failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    levels={},
+                    metrics={},
+                )
+
+        if ctx is None:
+            return SingleStrategyPrediction(
+                status="UNAVAILABLE",
+                reason=(
+                    "CRSD peer context (peer/market data) "
+                    "is unavailable."
+                ),
+                levels={},
+                metrics={},
+            )
+
+        strategy = CRSDStrategy(
+            inst,
+            self.settings.strategy,
+            ctx=ctx,
+        )
+
+        strategy.seed_context(
+            lookback_df
+        )
+        strategy.reset_session(
+            latest_date
+        )
+
+        current_signal: Optional[
+            StrategySignal
+        ] = None
+
+        for _, row in today_df.iterrows():
+            candle = self._candle_dict(
+                row
+            )
+
+            vwap = _positive_number(
+                row.get("vwap")
+            )
+
+            if vwap is None:
+                vwap = float(candle["close"])
+
+            current_signal = strategy.on_candle(
+                candle,
+                vwap,
+            )
+
+        model = getattr(
+            strategy,
+            "model",
+            None,
+        )
+
+        levels: Dict[str, Any] = {}
+
+        if model:
+            lam = _finite_number(
+                model.get("lam")
+            )
+            entry_z = _finite_number(
+                model.get("entry_z")
+            )
+            exit_z = _finite_number(
+                model.get("exit_z")
+            )
+            sigma_d = _finite_number(
+                model.get("sigma_d")
+            )
+            syms_list = model.get("syms", [])
+            sel_syms = [
+                syms_list[k]
+                for k in model.get("sel", [])
+                if k < len(syms_list)
+            ]
+
+            levels = {
+                "lam": (
+                    round(lam, 3)
+                    if lam is not None
+                    else None
+                ),
+                "entry_z": (
+                    round(entry_z, 2)
+                    if entry_z is not None
+                    else None
+                ),
+                "exit_z": (
+                    round(exit_z, 2)
+                    if exit_z is not None
+                    else None
+                ),
+                "sigma_d": (
+                    round(sigma_d, 6)
+                    if sigma_d is not None
+                    else None
+                ),
+                "hedge_peers": sel_syms,
+            }
+
+        lf = getattr(strategy, "last_features", {}) or {}
+        metrics: Dict[str, Any] = {}
+        if lf:
+            z_val = _finite_number(lf.get("z"))
+            z_cs_val = _finite_number(lf.get("z_cs"))
+            cp_val = _finite_number(lf.get("cp_recent"))
+            stress_val = _finite_number(lf.get("stress"))
+            spread_val = _finite_number(lf.get("spread"))
+
+            metrics = {
+                "z": (
+                    round(z_val, 3)
+                    if z_val is not None
+                    else None
+                ),
+                "z_cs": (
+                    round(z_cs_val, 3)
+                    if z_cs_val is not None
+                    else None
+                ),
+                "cp_recent": (
+                    round(cp_val, 3)
+                    if cp_val is not None
+                    else None
+                ),
+                "stress": (
+                    round(stress_val, 3)
+                    if stress_val is not None
+                    else None
+                ),
+                "liq_ok": bool(lf.get("liq_ok", False)),
+                "spread": (
+                    round(spread_val, 6)
+                    if spread_val is not None
+                    else None
+                ),
+            }
+
+        risk_scale = float(getattr(strategy, "risk_scale", 1.0))
+        levels["risk_scale"] = risk_scale
+        metrics["risk_scale"] = risk_scale
+
+        if current_signal is not None and current_signal.action in (
+            SignalAction.BUY,
+            SignalAction.SELL,
+        ):
+            if strategy.hedge_legs:
+                top_hedge_sym = max(
+                    strategy.hedge_legs.keys(),
+                    key=lambda s: abs(strategy.hedge_legs[s]),
+                )
+                hedge_w = strategy.hedge_legs[top_hedge_sym]
+                hedge_action = (
+                    SignalAction.SELL
+                    if hedge_w < 0
+                    else SignalAction.BUY
+                )
+                hedge_price = None
+                if live_ltp_by_symbol and top_hedge_sym in live_ltp_by_symbol:
+                    hp = live_ltp_by_symbol[top_hedge_sym]
+                    if hp is not None and hp > 0 and math.isfinite(hp):
+                        hedge_price = float(hp)
+
+                if hedge_price is None:
+                    hedge_bar = ctx.bar(
+                        top_hedge_sym,
+                        current_signal.timestamp,
+                    )
+                    if (
+                        hedge_bar
+                        and hedge_bar.get("close", 0) > 0
+                        and math.isfinite(hedge_bar["close"])
+                    ):
+                        hedge_price = float(hedge_bar["close"])
+
+                if hedge_price is None or hedge_price <= 0:
+                    return SingleStrategyPrediction(
+                        status="UNAVAILABLE",
+                        reason=(
+                            f"CRSD hedge leg {top_hedge_sym} live price is unavailable or stale."
+                        ),
+                        levels=levels,
+                        metrics=metrics,
+                    )
+
+                current_signal.hedge_symbol = top_hedge_sym
+                current_signal.hedge_action = hedge_action
+                current_signal.hedge_price = hedge_price
+
+            status = (
+                "CRSD_LONG"
+                if current_signal.action == SignalAction.BUY
+                else "CRSD_SHORT"
+            )
+            return self._prediction_from_crsd_signal(
+                status=status,
+                signal=current_signal,
+                default_reason=(
+                    "CRSD relative-value shock "
+                    "generated a validated signal."
+                ),
+                levels=levels,
+                metrics=metrics,
+            )
+
+        if model is None:
+            disabled_reason = getattr(
+                strategy,
+                "disabled_reason",
+                None,
+            )
+            reason = (
+                str(disabled_reason)
+                if disabled_reason
+                else "CRSD model is not currently eligible."
+            )
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                reason=reason,
+                levels=levels,
+                metrics=metrics,
+            )
+
+        z_val = _finite_number(lf.get("z"))
+        z_text = (
+            f"{z_val:.2f}"
+            if z_val is not None
+            else "N/A"
+        )
+        entry_z_text = (
+            f"{model.get('entry_z')}"
+            if model.get("entry_z") is not None
+            else "N/A"
+        )
+
+        return SingleStrategyPrediction(
+            status="MONITORING",
+            reason=(
+                "Monitoring CRSD residual divergence "
+                f"(Z={z_text}, entry_Z={entry_z_text})."
+            ),
+            levels=levels,
+            metrics=metrics,
         )
 
     # ================================================================

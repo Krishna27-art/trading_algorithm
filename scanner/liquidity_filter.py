@@ -30,7 +30,7 @@ class LiquidityFilterResult:
     volume: int = 0
     avg_volume_20d: int = 0
     adtv: float = 0.0
-    spread_pct: float = 0.0
+    spread_pct: Optional[float] = None
     rejection_reasons: List[str] = None
 
     def __post_init__(self):
@@ -120,15 +120,21 @@ class LiquidityFilter:
             rejections.append(f"ADTV ₹{adtv:,.0f} < Min ₹{self.config.min_avg_traded_value:,.0f}")
 
         # 5. Bid-Ask Spread check (if market depth available)
-        spread_pct = 0.0
+        spread_pct = None
         depth = stock_quote_data.get("depth")
-        if depth and isinstance(depth, dict):
+        if not depth or not isinstance(depth, dict):
+            rejections.append("Live market depth unavailable; spread cannot be validated.")
+        else:
             buy_orders = depth.get("buy", [])
             sell_orders = depth.get("sell", [])
-            if buy_orders and sell_orders and buy_orders[0].get("price") and sell_orders[0].get("price"):
-                best_bid = float(buy_orders[0]["price"])
-                best_ask = float(sell_orders[0]["price"])
-                if best_bid > 0 and best_ask >= best_bid:
+            if not buy_orders or not sell_orders:
+                rejections.append("Live market depth is incomplete; spread cannot be validated.")
+            else:
+                best_bid = float(buy_orders[0].get("price", 0))
+                best_ask = float(sell_orders[0].get("price", 0))
+                if best_bid <= 0 or best_ask <= best_bid:
+                    rejections.append("Invalid live bid/ask spread.")
+                else:
                     spread_pct = round(((best_ask - best_bid) / best_bid) * 100.0, 2)
                     if spread_pct > self.config.max_spread_pct:
                         rejections.append(f"Spread {spread_pct}% > Max {self.config.max_spread_pct}%")

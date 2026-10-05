@@ -593,20 +593,46 @@ class MarketStreamManager:
                 clean_symbol,
             )
 
-            # Immediately enqueue initial strategy evaluation using the latest completed candle
-            # so signals appear immediately on startup rather than forcing a 15-30 minute wait.
+            # Enqueue initial strategy evaluation only if the latest candle belongs to the CURRENT session.
             try:
                 latest_row = df.iloc[-1].to_dict()
+                latest_timestamp = latest_row.get("datetime")
+                if latest_timestamp is None:
+                    logger.warning(
+                        "[%s] Historical warm-up produced no timestamp; live evaluation skipped.",
+                        clean_symbol,
+                    )
+                    return True
+
+                today = now_ist_naive().date()
+                row_date = latest_timestamp.date() if hasattr(latest_timestamp, "date") else None
+                if row_date != today:
+                    logger.info(
+                        "[%s] Historical warm-up is not current-session data (latest=%s today=%s); strategy evaluation skipped.",
+                        clean_symbol,
+                        latest_timestamp,
+                        today,
+                    )
+                    return True
+
                 latest_candle = {
                     "symbol": clean_symbol,
-                    "datetime": latest_row.get("datetime"),
+                    "datetime": latest_timestamp,
                     "open": float(latest_row.get("open", 0.0)),
                     "high": float(latest_row.get("high", 0.0)),
                     "low": float(latest_row.get("low", 0.0)),
                     "close": float(latest_row.get("close", 0.0)),
                     "volume": int(latest_row.get("volume", 0)),
                 }
-                latest_vwap = float(latest_row.get("vwap", latest_candle["close"]))
+                latest_vwap = latest_row.get("vwap")
+                if latest_vwap is not None:
+                    try:
+                        latest_vwap = float(latest_vwap)
+                    except (TypeError, ValueError):
+                        latest_vwap = None
+                if latest_vwap is not None and latest_vwap <= 0:
+                    latest_vwap = None
+
                 self._enqueue_evaluation(
                     candle_dict=latest_candle,
                     vwap=latest_vwap,
@@ -642,23 +668,39 @@ class MarketStreamManager:
         """
         Warm every subscribed cash symbol with real completed history.
 
-        No synthetic/fallback market data is produced.
+        Uses bounded concurrency (ThreadPoolExecutor max_workers=4)
+        within Kite API limits.
         """
+        from concurrent.futures import ThreadPoolExecutor
 
-        for token, symbol in token_to_symbol.items():
+        items = list(token_to_symbol.items())
+
+        def _worker(tok: int, sym: str):
             with self._lock:
-                if (
-                    generation
-                    != self._stream_generation
-                ):
+                if generation != self._stream_generation:
                     return
-
             self._warm_one_symbol_historical_state(
-                token=int(token),
-                symbol=symbol,
+                token=int(tok),
+                symbol=sym,
                 kite_client=kite_client,
                 generation=generation,
             )
+
+        with ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="history-warm",
+        ) as executor:
+            futures = [
+                executor.submit(_worker, token, symbol)
+                for token, symbol in items
+            ]
+            for future in futures:
+                try:
+                    future.result()
+                except Exception:
+                    logger.exception(
+                        "[MarketStreamManager] Historical warm-up worker failed."
+                    )
 
     def _book_worker_loop(self) -> None:
         while True:
@@ -1675,11 +1717,6 @@ class MarketStreamManager:
                         else 1
                     )
 
-                    # Receipt time for feed-freshness monitoring.
-                    self.last_tick_time = (
-                        now_ist()
-                    )
-
                 tick_batch = (
                     ticks
                     if isinstance(
@@ -1692,6 +1729,9 @@ class MarketStreamManager:
                 cash_ticks: List[
                     dict
                 ] = []
+
+                accepted_tick_count = 0
+                latest_exchange_timestamp = None
 
                 for tick in tick_batch:
 
@@ -1756,6 +1796,12 @@ class MarketStreamManager:
                                     exchange_timestamp
                                 ),
                             )
+                            accepted_tick_count += 1
+                            if (
+                                latest_exchange_timestamp is None
+                                or exchange_timestamp > latest_exchange_timestamp
+                            ):
+                                latest_exchange_timestamp = exchange_timestamp
 
                         else:
                             logger.debug(
@@ -1785,6 +1831,12 @@ class MarketStreamManager:
                             ssf_one_minute_runtime.on_tick(
                                 tick
                             )
+                            accepted_tick_count += 1
+                            if (
+                                latest_exchange_timestamp is None
+                                or exchange_timestamp > latest_exchange_timestamp
+                            ):
+                                latest_exchange_timestamp = exchange_timestamp
 
                         # NIFTY is also intentionally part of
                         # token_to_symbol so it must enter the
@@ -1829,6 +1881,13 @@ class MarketStreamManager:
 
                     if price <= 0:
                         continue
+
+                    accepted_tick_count += 1
+                    if (
+                        latest_exchange_timestamp is None
+                        or exchange_timestamp > latest_exchange_timestamp
+                    ):
+                        latest_exchange_timestamp = exchange_timestamp
 
                     # --------------------------------------------------
                     # Detect partial first candle.
@@ -1911,6 +1970,10 @@ class MarketStreamManager:
                             "cash ticks in CandleAggregator"
                         )
 
+                if accepted_tick_count > 0 and latest_exchange_timestamp is not None:
+                    with self._lock:
+                        self.last_tick_time = latest_exchange_timestamp
+
             # ==========================================================
             # CONNECTION CALLBACKS
             # ==========================================================
@@ -1983,19 +2046,36 @@ class MarketStreamManager:
                 code,
                 reason,
             ):
+                error_text = f"code={code} reason={reason}"
                 with self._lock:
                     self.state = (
                         StreamState.ERROR
                     )
 
-                    self.last_error = (
-                        f"code={code} reason={reason}"
-                    )
+                    self.last_error = error_text
 
                 logger.error(
                     "[MarketStreamManager] KiteTicker error: %s",
-                    self.last_error,
+                    error_text,
                 )
+
+                # Authentication failures must invalidate the cached client.
+                try:
+                    from broker.kite_adapter import get_active_kite_with_diagnostics
+
+                    client, validation_error = get_active_kite_with_diagnostics(
+                        force_validate=True
+                    )
+
+                    if client is None and validation_error:
+                        logger.error(
+                            "[MarketStreamManager] Kite authentication became invalid: %s",
+                            validation_error,
+                        )
+                except Exception:
+                    logger.exception(
+                        "[MarketStreamManager] Failed to revalidate Kite session after stream error."
+                    )
 
             def on_reconnect(
                 ws,

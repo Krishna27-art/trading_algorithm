@@ -27,17 +27,6 @@ INDEX_SYMBOL_ALIASES = {
     "INDIAVIX": "INDIA VIX",
 }
 
-CANONICAL_INDEX_TOKENS = {
-    "NIFTY": 256265,          # NSE:NIFTY 50
-    "NIFTY 50": 256265,
-    "BANKNIFTY": 260105,      # NSE:NIFTY BANK
-    "NIFTY BANK": 260105,
-    "FINNIFTY": 257801,       # NSE:NIFTY FIN SERVICE
-    "MIDCPNIFTY": 288009,     # NSE:NIFTY MID SELECT
-    "INDIA VIX": 264969,      # NSE:INDIA VIX
-    "INDIAVIX": 264969,
-}
-
 UNIVERSE_TOKEN_CACHE_VERSION = 1
 UNIVERSE_TOKEN_CACHE_TTL = timedelta(hours=24)
 
@@ -198,13 +187,10 @@ class InstrumentResolver:
         """
         sym_clean = symbol.strip().upper()
 
-        if exchange == "NSE" and sym_clean in CANONICAL_INDEX_TOKENS:
-            return CANONICAL_INDEX_TOKENS[sym_clean]
-
-        lookup_symbol = INDEX_SYMBOL_ALIASES.get(
-            sym_clean,
-            sym_clean,
-        )
+        if exchange == "NSE" and sym_clean in INDEX_SYMBOL_ALIASES:
+            lookup_symbol = INDEX_SYMBOL_ALIASES[sym_clean]
+        else:
+            lookup_symbol = sym_clean
 
         instruments = self.get_instruments(
             kite_client,

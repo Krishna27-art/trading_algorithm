@@ -20,13 +20,13 @@ from data.time_utils import now_ist_naive
 class LiveSymbolState:
     symbol: str
     token: Optional[int] = None
-    ltp: float = 0.0
-    open: float = 0.0
-    high: float = 0.0
-    low: float = 0.0
-    close: float = 0.0
-    volume: int = 0
-    vwap: float = 0.0
+    ltp: Optional[float] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[int] = None
+    vwap: Optional[float] = None
     last_tick_time: Optional[datetime] = None
     latest_completed_candle: Optional[Dict[str, Any]] = None
     completed_candles: List[Dict[str, Any]] = field(default_factory=list)
@@ -266,18 +266,18 @@ class LiveMarketState:
 
             state.ltp = price
             state.close = price
-            if state.open == 0.0:
+            if state.open is None:
                 state.open = price
                 state.high = price
                 state.low = price
             else:
-                state.high = max(state.high, price)
-                state.low = min(state.low, price)
+                state.high = max(state.high, price) if state.high is not None else price
+                state.low = min(state.low, price) if state.low is not None else price
 
             # `volume` must be an incremental quantity.
             # Do not pass Kite's cumulative `volume_traded` here.
             if volume > 0:
-                state.volume += int(volume)
+                state.volume = (state.volume or 0) + int(volume)
 
             state.last_tick_time = ts
             state.updated_at = ts
@@ -293,7 +293,7 @@ class LiveMarketState:
                 state = LiveSymbolState(symbol=symbol)
                 self._symbols[symbol] = state
 
-            state.vwap = vwap
+            state.vwap = float(vwap) if (vwap is not None and vwap > 0) else None
 
             # NEVER overwrite live LTP/close with a completed candle close.
             # update_tick() is the only live-price writer.

@@ -1169,9 +1169,10 @@ class AouOssStrategy(BaseStrategy):
         self.entry_event_timestamp = None
         self.entry_bar_number = None
 
+        self.market_context = {}
         self.state = AOUState(
-            l2_spread_bps=self.state.l2_spread_bps,
-            l2_passed=self.state.l2_passed,
+            l2_spread_bps=None,
+            l2_passed=False,
         )
 
         logger.info(

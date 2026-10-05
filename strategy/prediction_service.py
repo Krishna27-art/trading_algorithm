@@ -498,6 +498,21 @@ class PredictionService:
             )
 
         direction = "LONG" if signal.action == SignalAction.BUY else "SHORT"
+        valid_risk, risk_reason = PredictionService._validate_signal_risk(
+            direction=direction,
+            entry=float(signal.price),
+            stop_loss=float(signal.stop_loss),
+            target=float(signal.target),
+        )
+        if not valid_risk:
+            return SingleStrategyPrediction(
+                status="NO_TRADE",
+                direction="NEUTRAL",
+                reason=f"Risk validation rejected signal: {risk_reason}",
+                levels=levels or {},
+                metrics=metrics or {},
+            )
+
         hedge_action_str = (
             signal.hedge_action.value
             if isinstance(signal.hedge_action, SignalAction)
@@ -651,6 +666,75 @@ class PredictionService:
         )
 
     @staticmethod
+    def _validate_signal_risk(
+        direction: str,
+        entry: Optional[float],
+        stop_loss: Optional[float],
+        target: Optional[float],
+    ) -> Tuple[bool, Optional[str]]:
+        if direction not in ("LONG", "SHORT"):
+            return True, None
+        if entry is None or entry <= 0:
+            return False, "Invalid entry price."
+        if stop_loss is None or stop_loss <= 0:
+            return False, "Invalid stop loss."
+        if direction == "LONG":
+            if stop_loss >= entry:
+                return False, f"Long stop loss ({stop_loss}) must be below entry ({entry})."
+            if target is not None and target <= entry:
+                return False, f"Long target ({target}) must be above entry ({entry})."
+        elif direction == "SHORT":
+            if stop_loss <= entry:
+                return False, f"Short stop loss ({stop_loss}) must be above entry ({entry})."
+            if target is not None and target >= entry:
+                return False, f"Short target ({target}) must be below entry ({entry})."
+        return True, None
+
+    def _get_live_apex_context(
+        self,
+        symbol: str,
+        book_snapshot: Optional[Any] = None,
+        kite_client: Optional[Any] = None,
+        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
+        peer_context: Optional[Any] = None,
+    ) -> Optional[Dict[str, Any]]:
+        india_vix = None
+        if live_ltp_by_symbol:
+            raw_vix = live_ltp_by_symbol.get("INDIA VIX") or live_ltp_by_symbol.get("INDIAVIX")
+            if isinstance(raw_vix, tuple) and len(raw_vix) == 2:
+                india_vix = _positive_number(raw_vix[0])
+            elif raw_vix is not None:
+                india_vix = _positive_number(raw_vix)
+
+        order_imbalance = None
+        if book_snapshot and isinstance(book_snapshot, dict):
+            buy_depth = book_snapshot.get("buy", [])
+            sell_depth = book_snapshot.get("sell", [])
+            total_buy_qty = sum(item.get("quantity", 0) for item in buy_depth if isinstance(item, dict))
+            total_sell_qty = sum(item.get("quantity", 0) for item in sell_depth if isinstance(item, dict))
+            if (total_buy_qty + total_sell_qty) > 0:
+                order_imbalance = (total_buy_qty - total_sell_qty) / float(total_buy_qty + total_sell_qty)
+
+        sector_rs = None
+        market_rs = None
+        if peer_context is not None and hasattr(peer_context, "sector_rs"):
+            sector_rs = _finite_number(getattr(peer_context, "sector_rs", None))
+            market_rs = _finite_number(getattr(peer_context, "market_rs", None))
+
+        if india_vix is None and order_imbalance is None and sector_rs is None and market_rs is None:
+            return None
+
+        return {
+            "india_vix": india_vix,
+            "calendar_blackout": False,
+            "gift_nifty_gap": None,
+            "sector_rs": sector_rs,
+            "market_rs": market_rs,
+            "catalyst_score": None,
+            "order_imbalance": order_imbalance,
+        }
+
+    @staticmethod
     def _error_prediction(strategy_name: str, exc: Exception) -> SingleStrategyPrediction:
         return SingleStrategyPrediction(
             status="ERROR",
@@ -722,8 +806,24 @@ class PredictionService:
             }
             return predictions, self.calculate_consensus(predictions)
 
+        today = now_ist_naive().date()
+        latest_date, current_session_df = days[-1]
+        if latest_date != today:
+            predictions = {
+                key: SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        f"Current-session completed candle data is unavailable. "
+                        f"Latest available session={latest_date}, today={today}."
+                    ),
+                    levels={},
+                    metrics={},
+                )
+                for key in STRATEGY_KEYS
+            }
+            return predictions, self.calculate_consensus(predictions)
+
         # Use the current session's opening price for session-level calculations.
-        current_session_df = days[-1][1]
         session_reference_price = _positive_number(current_session_df["open"].iloc[0])
         if session_reference_price is None:
             predictions = {
@@ -752,16 +852,34 @@ class PredictionService:
                 exchange="NSE",
                 instrument_type="EQ",
                 kite_client=kite_client,
-                fallback=1,
+                fallback=None,
             )
         except Exception as exc:
-            logger.warning(
-                f"[{clean_symbol}] Could not resolve live lot size: {type(exc).__name__}: {exc}"
-            )
-            lot_size = 1
+            predictions = {
+                key: SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason=(
+                        f"Live instrument metadata unavailable: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    levels={},
+                    metrics={},
+                )
+                for key in STRATEGY_KEYS
+            }
+            return predictions, self.calculate_consensus(predictions)
 
         if lot_size is None or lot_size <= 0:
-            lot_size = 1
+            predictions = {
+                key: SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason="Live instrument lot size is unavailable.",
+                    levels={},
+                    metrics={},
+                )
+                for key in STRATEGY_KEYS
+            }
+            return predictions, self.calculate_consensus(predictions)
 
         try:
             inst = create_instrument_config_for_equity(
@@ -787,7 +905,19 @@ class PredictionService:
             ("orb", "ORB", lambda: self._evaluate_orb(inst, live_df, ltp)),
             ("cpr", "CPR", lambda: self._evaluate_cpr(inst, live_df, ltp)),
             ("dual_ema", "Dual EMA", lambda: self._evaluate_dual_ema(inst, live_df, ltp)),
-            ("apex", "APEX", lambda: self._evaluate_apex(inst, live_df, ltp)),
+            (
+                "apex",
+                "APEX",
+                lambda: self._evaluate_apex(
+                    inst,
+                    live_df,
+                    ltp,
+                    book_snapshot=book_snapshot,
+                    kite_client=kite_client,
+                    live_ltp_by_symbol=live_ltp_by_symbol,
+                    peer_context=resolved_peer_context,
+                ),
+            ),
             (
                 "sector_impulse",
                 "Sector Impulse",
@@ -998,7 +1128,16 @@ class PredictionService:
     # APEX
     # ======================================================================
 
-    def _evaluate_apex(self, inst: InstrumentConfig, df_15m: pd.DataFrame, ltp: float) -> SingleStrategyPrediction:
+    def _evaluate_apex(
+        self,
+        inst: InstrumentConfig,
+        df_15m: pd.DataFrame,
+        ltp: float,
+        book_snapshot: Optional[Any] = None,
+        kite_client: Optional[Any] = None,
+        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
+        peer_context: Optional[Any] = None,
+    ) -> SingleStrategyPrediction:
         _, days = self._prepare_data(df_15m)
         if len(days) < 2:
             return SingleStrategyPrediction(
@@ -1011,6 +1150,24 @@ class PredictionService:
         strategy = ApexStrategy(inst, self.settings.strategy)
         strategy.seed_context(lookback_df)
         strategy.reset_session(latest_date)
+
+        apex_context = self._get_live_apex_context(
+            symbol=inst.symbol,
+            book_snapshot=book_snapshot,
+            kite_client=kite_client,
+            live_ltp_by_symbol=live_ltp_by_symbol,
+            peer_context=peer_context,
+        )
+
+        if apex_context is None:
+            return SingleStrategyPrediction(
+                "UNAVAILABLE",
+                reason="APEX required live market context is unavailable.",
+                levels={},
+                metrics={},
+            )
+
+        strategy.set_context(**apex_context)
         current_signal = None
 
         for _, row in today_df.iterrows():
@@ -1236,17 +1393,48 @@ class PredictionService:
                 )
 
             top_hedge_sym = max(hedge_legs, key=lambda s: abs(hedge_legs[s]))
-            live_price = None
-            if live_ltp_by_symbol:
-                live_price = _positive_number(live_ltp_by_symbol.get(top_hedge_sym))
+            raw_hedge = live_ltp_by_symbol.get(top_hedge_sym) if live_ltp_by_symbol else None
 
-            # NEVER fall back to ctx.bar(...).close here. That would turn a stale
-            # historical peer close into a supposedly current hedge entry.
-            if live_price is None:
+            if not isinstance(raw_hedge, tuple) or len(raw_hedge) != 2:
+                if isinstance(raw_hedge, (int, float)) and raw_hedge > 0:
+                    live_price = float(raw_hedge)
+                    live_ts = now_ist_naive()
+                else:
+                    return SingleStrategyPrediction(
+                        "UNAVAILABLE",
+                        reason=f"CRSD live hedge price is unavailable for {top_hedge_sym}.",
+                        levels=levels,
+                        metrics=metrics,
+                        strategy="crsd",
+                        symbol=inst.symbol,
+                    )
+            else:
+                live_price, live_ts = raw_hedge
+                live_price = _positive_number(live_price)
+
+            if live_price is None or live_ts is None:
                 return SingleStrategyPrediction(
                     "UNAVAILABLE",
                     reason=f"CRSD live hedge price is unavailable for {top_hedge_sym}.",
-                    levels=levels, metrics=metrics, strategy="crsd", symbol=inst.symbol,
+                    levels=levels,
+                    metrics=metrics,
+                    strategy="crsd",
+                    symbol=inst.symbol,
+                )
+
+            now = now_ist_naive()
+            if hasattr(live_ts, "tzinfo") and live_ts.tzinfo is not None:
+                live_ts = live_ts.replace(tzinfo=None)
+            age = (now - live_ts).total_seconds()
+
+            if age < 0 or age > 120:
+                return SingleStrategyPrediction(
+                    "UNAVAILABLE",
+                    reason=f"CRSD hedge price for {top_hedge_sym} is stale (age={age:.1f}s).",
+                    levels=levels,
+                    metrics=metrics,
+                    strategy="crsd",
+                    symbol=inst.symbol,
                 )
 
             hedge_weight = float(hedge_legs[top_hedge_sym])
@@ -1446,15 +1634,34 @@ class PredictionService:
             lookback_df=lookback_df,
         )
 
+        if book_snapshot is None:
+            return SingleStrategyPrediction(
+                "UNAVAILABLE",
+                reason="AOU-OSS requires a fresh live Level-2 snapshot.",
+                levels={},
+                metrics={},
+            )
+
+        best_bid, best_ask = self._extract_best_bid_ask(book_snapshot)
+        if (
+            best_bid is None
+            or best_ask is None
+            or best_ask <= best_bid
+            or best_bid <= 0
+        ):
+            return SingleStrategyPrediction(
+                "UNAVAILABLE",
+                reason="AOU-OSS requires a valid live bid/ask spread.",
+                levels={},
+                metrics={},
+            )
+
         with runtime.lock:
             strategy = runtime.strategy
-            if book_snapshot is not None:
-                best_bid, best_ask = self._extract_best_bid_ask(book_snapshot)
-                if best_bid is None or best_ask is None or best_ask <= best_bid:
-                    return SingleStrategyPrediction(
-                        "UNAVAILABLE", reason="AOU-OSS requires a valid live bid/ask spread; missing/invalid L2 fails closed."
-                    )
-                strategy.set_market_context(best_bid=best_bid, best_ask=best_ask)
+            strategy.set_market_context(
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
 
             if runtime.last_candle_open is None:
                 new_candles = today_df

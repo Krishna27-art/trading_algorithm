@@ -95,7 +95,11 @@ def stream_signals():
     stream_status = _stream_status()
     fresh = _stream_feed_is_fresh(stream_status)
 
-    signals = live_signal_engine.get_all_predictions()
+    signals = (
+        live_signal_engine.get_all_predictions()
+        if fresh
+        else {}
+    )
 
     return {
         "status": "success",

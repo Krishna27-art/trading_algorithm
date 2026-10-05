@@ -93,10 +93,27 @@ class LiveSignalEngine:
         self._ssf_runtime = ssf_live_runtime
         self._crsd_runtime = crsd_live_runtime
         self._scanner_snapshot: Optional[Any] = None
+        self._candidate_symbols: Optional[set[str]] = None
+
+    def set_candidate_symbols(self, candidate_symbols: Optional[Any]) -> None:
+        with self._lock:
+            self._candidate_symbols = (
+                {str(s).strip().upper() for s in candidate_symbols}
+                if candidate_symbols is not None
+                else None
+            )
 
     def set_scanner_snapshot(self, snapshot: Optional[Any]) -> None:
         with self._lock:
             self._scanner_snapshot = snapshot
+            if snapshot is not None and hasattr(snapshot, "candidates") and snapshot.candidates:
+                self._candidate_symbols = {
+                    metric.symbol.strip().upper()
+                    for metric in snapshot.candidates
+                    if hasattr(metric, "symbol") and metric.symbol
+                }
+            elif snapshot is None:
+                self._candidate_symbols = None
 
     def get_scanner_snapshot(self) -> Optional[Any]:
         with self._lock:
@@ -431,6 +448,11 @@ class LiveSignalEngine:
             )
             return None
 
+        with self._lock:
+            candidates = self._candidate_symbols
+        if candidates is not None and symbol not in candidates:
+            return None
+
         if not self._mark_processed_candle(
             symbol,
             candle_timestamp,
@@ -482,20 +504,19 @@ class LiveSignalEngine:
             )
             return None
 
-        # Ensure the callback's VWAP is available without overwriting an
-        # authoritative per-candle VWAP supplied by the aggregator.
-        if "vwap" not in data.columns:
-            data["vwap"] = float(vwap) if self._valid_price(vwap) else None
-
-        # Use the candle's own VWAP when available; only use the callback value
-        # for the matching completed candle when the column is missing/invalid.
+        # Do not create a synthetic VWAP column from one callback scalar across the whole DataFrame.
         if self._valid_price(vwap):
             mask = data["datetime"] == candle_timestamp
             if mask.any():
-                existing = data.loc[mask, "vwap"]
-                if existing.isna().all() or not self._valid_price(
-                    existing.iloc[-1]
-                ):
+                existing = data.loc[mask, "vwap"] if "vwap" in data.columns else None
+
+                if "vwap" not in data.columns:
+                    data["vwap"] = pd.Series(
+                        [pd.NA] * len(data),
+                        dtype="Float64",
+                    )
+
+                if existing is None or existing.isna().all() or not self._valid_price(existing.iloc[-1]):
                     data.loc[mask, "vwap"] = float(vwap)
 
         try:
@@ -607,9 +628,17 @@ class LiveSignalEngine:
 
             live_states = live_market_state.get_all_symbols_state()
             live_ltp_by_symbol = {
-                sym: st.ltp
+                sym: (
+                    float(st.ltp),
+                    st.last_tick_time,
+                )
                 for sym, st in live_states.items()
-                if st is not None and st.ltp is not None and st.ltp > 0
+                if (
+                    st is not None
+                    and st.ltp is not None
+                    and st.ltp > 0
+                    and st.last_tick_time is not None
+                )
             }
 
             crsd_ctx = self._crsd_runtime.get_context(

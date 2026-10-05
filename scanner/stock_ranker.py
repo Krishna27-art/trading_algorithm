@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -694,6 +694,34 @@ class StockUniverseScanner:
                 )
                 continue
 
+            quote_timestamp = q_data.get("timestamp") or q_data.get("last_trade_time")
+
+            if not isinstance(quote_timestamp, datetime):
+                results.append(
+                    self._unavailable_result(
+                        record,
+                        token=token,
+                        reasons=["Kite quote timestamp unavailable"],
+                    )
+                )
+                continue
+
+            quote_age = (
+                now_ist_naive() - quote_timestamp.replace(tzinfo=None)
+            ).total_seconds()
+
+            if quote_age < 0 or quote_age > 120:
+                results.append(
+                    self._unavailable_result(
+                        record,
+                        token=token,
+                        reasons=[
+                            f"Kite quote is stale or future-dated: age={quote_age:.1f}s"
+                        ],
+                    )
+                )
+                continue
+
             ohlc = q_data.get("ohlc")
             if not isinstance(ohlc, dict):
                 results.append(
@@ -870,10 +898,20 @@ class StockUniverseScanner:
                 2,
             )
 
-            rvol = round(
-                volume / avg_vol_20d,
-                2,
-            )
+            # Intraday RVOL: compare cumulative session volume to expected volume through current elapsed session
+            quote_time = quote_timestamp.time()
+            market_open_dt = datetime.combine(quote_timestamp.date(), time(9, 15))
+            quote_dt = datetime.combine(quote_timestamp.date(), quote_time)
+            elapsed_minutes = max(1, min(375, int((quote_dt - market_open_dt).total_seconds() / 60)))
+            expected_cum_volume = avg_vol_20d * (elapsed_minutes / 375.0)
+
+            if expected_cum_volume > 0:
+                rvol = round(
+                    volume / expected_cum_volume,
+                    2,
+                )
+            else:
+                rvol = 0.0
 
             if atr_14 <= 0:
                 results.append(

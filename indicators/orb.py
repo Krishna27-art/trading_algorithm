@@ -52,20 +52,25 @@ class ORBCalculator:
 
         if timestamps_are_candle_open:
             orb_bars = bars.between_time("09:15", "09:30")
-            if len(orb_bars) < 2:
-                orb_bars = bars.between_time("09:15", "09:45")
+            expected_times = {"09:15", "09:30"}
         else:
-            orb_bars = bars.between_time("09:15", "09:45")
-            if len(orb_bars) > 2 and "09:30" in [t.strftime("%H:%M") for t in orb_bars.index]:
-                orb_bars = orb_bars.between_time("09:30", "09:45")
+            orb_bars = bars.between_time("09:30", "09:45")
+            expected_times = {"09:30", "09:45"}
 
         if len(orb_bars) < 2:
-            if len(bars) >= 2:
-                orb_bars = bars.iloc[:2]
-            else:
-                return None
+            return None
 
-        orb_bars = orb_bars.iloc[:2]
+        actual_times = {
+            ts.strftime("%H:%M")
+            for ts in orb_bars.index
+        }
+
+        if not expected_times.issubset(actual_times):
+            return None
+
+        orb_bars = orb_bars.loc[
+            orb_bars.index.strftime("%H:%M").isin(expected_times)
+        ].sort_index().iloc[:2]
 
         or_high = float(orb_bars["high"].max())
         or_low = float(orb_bars["low"].min())

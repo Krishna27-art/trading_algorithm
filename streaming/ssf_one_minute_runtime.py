@@ -202,20 +202,23 @@ class SSFOneMinuteRuntime:
     def _seed_historical_data(self, kite_client: Any) -> None:
         """
         Fetch real 1-minute candles from Kite for regime and return seeding.
+        Uses ThreadPoolExecutor (max_workers=4) and resolved token map.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         today = now_ist_naive().date()
         start_date = today - timedelta(days=2)
 
         stock_symbols = list(self._stock_symbols)
         index_symbols = list(self._index_symbols)
 
-        for sym in stock_symbols:
+        def _seed_stock(sym: str) -> None:
             if not self._running:
                 return
             try:
-                token = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
+                token = self._symbol_to_token.get(sym) or instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
                 if not token:
-                    continue
+                    return
                 df = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite_client,
                     instrument_token=token,
@@ -224,20 +227,18 @@ class SSFOneMinuteRuntime:
                     interval="minute",
                 )
                 if df is not None and not df.empty:
-                    token_val = self._symbol_to_token.get(sym) or token
-                    if token_val:
-                        ssf_live_runtime.seed_regime_history(sym, int(token_val), df)
+                    ssf_live_runtime.seed_regime_history(sym, int(token), df)
                     ssf_return_tracker.seed(sym, df)
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for stock %s: %s", sym, exc)
 
-        for idx in index_symbols:
+        def _seed_index(idx: str) -> None:
             if not self._running:
                 return
             try:
-                token = instrument_resolver.resolve_token(idx, exchange="NSE", kite_client=kite_client)
+                token = self._symbol_to_token.get(idx) or instrument_resolver.resolve_token(idx, exchange="NSE", kite_client=kite_client)
                 if not token:
-                    continue
+                    return
                 df = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite_client,
                     instrument_token=token,
@@ -249,6 +250,10 @@ class SSFOneMinuteRuntime:
                     ssf_return_tracker.seed(idx, df)
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for index %s: %s", idx, exc)
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="ssf-seed") as executor:
+            list(executor.map(_seed_stock, stock_symbols))
+            list(executor.map(_seed_index, index_symbols))
 
     def seed_historical_data(
         self,

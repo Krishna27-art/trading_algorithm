@@ -284,7 +284,13 @@ class SectorPeerManager:
                 except Exception as e:
                     logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, e)
 
-            return cached_candidate
+            if cached_candidate is not None:
+                logger.warning(
+                    "Cached peer context for %s is stale relative to the latest completed candle; refusing stale live context.",
+                    sym,
+                )
+
+            return None
 
         df_leader = load_df(leader_sym)
         df_market = load_df(market_sym)

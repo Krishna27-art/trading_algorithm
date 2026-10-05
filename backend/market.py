@@ -155,7 +155,7 @@ def get_market_prices() -> Dict[str, Any]:
             freshness = "STALE"  # cannot prove freshness without an exchange timestamp
         else:
             age = (now_naive - q_ts).total_seconds()
-            freshness = "LIVE" if age <= QUOTE_STALE_AFTER_SECONDS else "STALE"
+            freshness = "LIVE" if 0 <= age <= QUOTE_STALE_AFTER_SECONDS else "STALE"
 
         stocks_list.append(
             {

@@ -546,8 +546,12 @@ class HistoricalDataLoader:
                         cached = cached[cached["datetime"] <= prev_close_dt]
                         if not cached.empty:
                             return cached.sort_values("datetime").reset_index(drop=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.exception(
+                        "Pre-market historical cache read failed for token %s: %s",
+                        instrument_token,
+                        exc,
+                    )
             # If no valid cache on disk, fetch prior completed days up to yesterday
             try:
                 start_date = today - timedelta(days=int(lookback_days))
@@ -562,17 +566,13 @@ class HistoricalDataLoader:
                     request_pause_seconds=request_pause_seconds,
                 )
                 return fresh
-            except Exception:
-                return pd.DataFrame(
-                    columns=[
-                        "datetime",
-                        "open",
-                        "high",
-                        "low",
-                        "close",
-                        "volume",
-                    ]
+            except Exception as exc:
+                logger.exception(
+                    "Pre-market historical Kite fetch failed for token %s: %s",
+                    instrument_token,
+                    exc,
                 )
+                raise
 
         cached = pd.DataFrame()
 
@@ -653,20 +653,14 @@ class HistoricalDataLoader:
                 request_pause_seconds=request_pause_seconds,
             )
         except Exception as exc:
-            if not cached.empty:
-                logger.info(
-                    f"Incremental Kite fetch failed for token {instrument_token}: {exc}. "
-                    "Using existing cached history."
-                )
-                return cached
+            logger.error(
+                f"Incremental Kite fetch failed for token {instrument_token}: {exc}"
+            )
             raise
 
         if fresh.empty:
-            if not cached.empty:
-                return cached
             raise RuntimeError(
-                f"Kite returned no intraday candles for "
-                f"token {instrument_token} on {today}."
+                f"Kite returned no fresh completed candles for token {instrument_token}."
             )
 
         fresh["datetime"] = (

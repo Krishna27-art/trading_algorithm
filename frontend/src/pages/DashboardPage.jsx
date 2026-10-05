@@ -27,7 +27,13 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
 
   // Canonical active streaming signal extraction
   const activeSignal = useMemo(() => {
-    const rawSignals = streamSignals.data?.signals || {}
+    const liveFeedFresh =
+      streamSignals.data?.data_fresh === true &&
+      streamSignals.data?.stream_connected === true
+
+    const rawSignals = liveFeedFresh
+      ? (streamSignals.data?.signals || {})
+      : {}
 
     const activeCandidates = []
 

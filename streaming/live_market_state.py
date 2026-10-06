@@ -305,6 +305,8 @@ class LiveMarketState:
             # Set it directly — do NOT accumulate it as if it were incremental.
             if volume is not None and volume >= 0:
                 state.volume = int(volume)
+            else:
+                state.volume = None
 
             state.last_tick_time = ts
             state.updated_at = ts

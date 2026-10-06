@@ -454,15 +454,19 @@ class HistoricalDataLoader:
             except Exception as e:
                 logger.warning(f"Could not load metadata from {meta_path}: {e}")
 
-        if meta is not None:
-            if expected_interval is not None and "interval" in meta:
-                if str(meta.get("interval")) != str(expected_interval):
+        if expected_interval is not None or expected_token is not None:
+            if meta is None:
+                raise ValueError(
+                    f"Metadata required for token/interval validation of {csv_path} is missing."
+                )
+            if expected_interval is not None:
+                if "interval" not in meta or str(meta.get("interval")) != str(expected_interval):
                     raise ValueError(
                         f"Cached interval mismatch for {csv_path}: "
                         f"{meta.get('interval')!r} != {expected_interval!r}"
                     )
-            if expected_token is not None and "instrument_token" in meta:
-                if int(meta.get("instrument_token")) != int(expected_token):
+            if expected_token is not None:
+                if "instrument_token" not in meta or int(meta.get("instrument_token")) != int(expected_token):
                     raise ValueError(
                         f"Cached instrument token mismatch for {csv_path}: "
                         f"{meta.get('instrument_token')!r} != {expected_token!r}"

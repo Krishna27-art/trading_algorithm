@@ -9,7 +9,7 @@ import { getMarketPrices } from '../api/market'
 import { formatCurrency, formatNumber } from '../utils/format'
 
 function formatCompactVolume(vol) {
-  if (vol === null || vol === undefined || Number.isNaN(vol)) {
+  if (vol === null || vol === undefined || Number.isNaN(vol) || Number(vol) < 0) {
     return 'N/A'
   }
 
@@ -90,6 +90,24 @@ export default function StocksPage({ isAuthenticated }) {
     }
   }, [stocks])
 
+  const categoryCounts = useMemo(() => {
+    let large = 0
+    let mid = 0
+    let small = 0
+    stocks.forEach((s) => {
+      const cat = s.category?.toLowerCase()
+      if (cat === 'large') large++
+      else if (cat === 'mid') mid++
+      else if (cat === 'small') small++
+    })
+    return {
+      all: stocks.length,
+      large,
+      mid,
+      small,
+    }
+  }, [stocks])
+
   const isAuthRequired = data?.status === 'AUTH_REQUIRED' && !isAuthenticated
   const isRealKite =
     (data?.data_source === 'REAL_KITE' || data?.data_source === 'KITE_STREAM' || data?.data_source === 'STREAM') &&
@@ -105,7 +123,9 @@ export default function StocksPage({ isAuthenticated }) {
               <div className="h-6 w-6 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
                 <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
               </div>
-              <h1 className="text-base font-bold tracking-tight text-[var(--text)]">700 Stocks</h1>
+              <h1 className="text-base font-bold tracking-tight text-[var(--text)]">
+                {stocks.length > 0 ? `${stocks.length} Stocks` : 'Stock Universe'}
+              </h1>
             </div>
 
             {isAuthRequired ? (
@@ -117,7 +137,7 @@ export default function StocksPage({ isAuthenticated }) {
             )}
 
             <span className="text-xs text-[var(--text-faint)] font-mono">
-              Universe: {stocks.length ? `${stocks.length} Constituents` : '700 Constituents'}
+              Universe: {stocks.length > 0 ? `${stocks.length} Constituents` : '0 Constituents (Offline)'}
             </span>
           </div>
 
@@ -142,7 +162,9 @@ export default function StocksPage({ isAuthenticated }) {
           <p className="text-xs text-[var(--text-faint)]">Total Scanned</p>
           <div className="flex items-baseline gap-2 mt-1">
             <span className="text-lg font-num font-bold text-[var(--text)]">{stats.total}</span>
-            <span className="text-xs text-[var(--text-dim)]">100L / 100M / 500S</span>
+            <span className="text-xs text-[var(--text-dim)]">
+              {stocks.length > 0 ? `${categoryCounts.large}L / ${categoryCounts.mid}M / ${categoryCounts.small}S` : '0 Loaded'}
+            </span>
           </div>
         </div>
 
@@ -198,10 +220,10 @@ export default function StocksPage({ isAuthenticated }) {
           {/* Category Tabs */}
           <div className="flex items-center gap-1 bg-white/[0.03] p-1 rounded-md border border-[var(--border)]">
             {[
-              { id: 'all', label: 'All (700)' },
-              { id: 'large', label: 'Large (100)' },
-              { id: 'mid', label: 'Mid (100)' },
-              { id: 'small', label: 'Small (500)' },
+              { id: 'all', label: `All (${categoryCounts.all})` },
+              { id: 'large', label: `Large (${categoryCounts.large})` },
+              { id: 'mid', label: `Mid (${categoryCounts.mid})` },
+              { id: 'small', label: `Small (${categoryCounts.small})` },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -323,7 +345,7 @@ export default function StocksPage({ isAuthenticated }) {
 
                       {/* Volume */}
                       <td className="py-2.5 pr-3 text-right text-[var(--text-dim)]">
-                        {isAvailable ? formatCompactVolume(stock.volume) : 'N/A'}
+                        {isAvailable && stock.volume !== null && stock.volume !== undefined ? formatCompactVolume(stock.volume) : 'N/A'}
                       </td>
 
                       {/* VWAP */}

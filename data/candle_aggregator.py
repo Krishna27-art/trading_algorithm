@@ -576,11 +576,15 @@ class CandleAggregator:
 
         try:
             vol = int(volume)
+            if vol < 0:
+                raise ValueError("Negative volume")
         except (TypeError, ValueError):
-            vol = 0
-
-        if vol < 0:
-            vol = 0
+            logger.warning(
+                "[%s] Dropping tick with invalid volume: %r",
+                self.symbol,
+                volume,
+            )
+            return
 
         callback_payload = None
 

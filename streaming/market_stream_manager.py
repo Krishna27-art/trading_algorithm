@@ -1892,13 +1892,32 @@ class MarketStreamManager:
                     new_futures: Dict[int, str] = {}
                     new_index: Dict[int, str] = {}
 
+                    try:
+                        nfo_instruments = instrument_resolver.get_instruments(
+                            kite, exchange="NFO"
+                        )
+                    except Exception as nfo_err:
+                        logger.warning(
+                            "[MarketStreamManager] Failed fetching NFO instruments for aux futures: %s",
+                            nfo_err,
+                        )
+                        nfo_instruments = []
+
+                    futures_by_name: Dict[str, List[Dict[str, Any]]] = {}
+                    for inst in nfo_instruments:
+                        if isinstance(inst, dict):
+                            n = str(inst.get("name") or "").strip().upper()
+                            if n:
+                                futures_by_name.setdefault(n, []).append(inst)
+
                     for sym in list(self.token_to_symbol.values()):
                         with self._lock:
                             if gen != self._stream_generation:
                                 return
                         try:
+                            fut_candidates = futures_by_name.get(sym)
                             fut_info = instrument_resolver.find_nearest_single_stock_future(
-                                sym, kite_client=kite
+                                sym, instruments=fut_candidates, kite_client=kite
                             )
                             if fut_info is not None:
                                 raw_tok = fut_info.get("instrument_token")
@@ -1997,6 +2016,23 @@ class MarketStreamManager:
                 response,
             ):
                 is_reconnect = False
+                try:
+                    ws.subscribe(
+                        tokens_to_subscribe
+                    )
+                    ws.set_mode(
+                        ws.MODE_FULL,
+                        tokens_to_subscribe,
+                    )
+                except Exception as sub_exc:
+                    logger.exception(
+                        "[MarketStreamManager] Failed to subscribe universe tokens on connect."
+                    )
+                    with self._lock:
+                        self.state = StreamState.ERROR
+                        self.last_error = f"subscribe_failed:{type(sub_exc).__name__}"
+                    return
+
                 with self._lock:
                     self.state = (
                         StreamState.CONNECTED
@@ -2012,15 +2048,6 @@ class MarketStreamManager:
                         is_reconnect = True
                     else:
                         self._ever_connected = True
-
-                ws.subscribe(
-                    tokens_to_subscribe
-                )
-
-                ws.set_mode(
-                    ws.MODE_FULL,
-                    tokens_to_subscribe,
-                )
 
                 if is_reconnect:
                     # On reconnect: reset per-symbol aggregation state to

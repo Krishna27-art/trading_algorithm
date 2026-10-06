@@ -16,6 +16,7 @@ market data on the REAL path.
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -44,17 +45,17 @@ class StockRankingMetrics:
     token: Optional[int] = None
     category: str = "large"
     name: str = ""
-    ltp: float = 0.0
-    prev_close: float = 0.0
-    open_price: float = 0.0
-    gap_pct: float = 0.0
-    volume: int = 0
-    avg_volume_20d: int = 0
-    rvol: float = 0.0
-    atr_14: float = 0.0
-    atr_pct: float = 0.0
-    vwap: float = 0.0
-    vwap_dist_pct: float = 0.0
+    ltp: Optional[float] = None
+    prev_close: Optional[float] = None
+    open_price: Optional[float] = None
+    gap_pct: Optional[float] = None
+    volume: Optional[int] = None
+    avg_volume_20d: Optional[int] = None
+    rvol: Optional[float] = None
+    atr_14: Optional[float] = None
+    atr_pct: Optional[float] = None
+    vwap: Optional[float] = None
+    vwap_dist_pct: Optional[float] = None
     rvol_score: float = 0.0
     gap_score: float = 0.0
     vol_score: float = 0.0
@@ -83,6 +84,7 @@ class ScannerSnapshot:
                 item.liquidity_status == LiquidityStatus.PASS.value
                 and item.token is not None
                 and item.token > 0
+                and item.ltp is not None
                 and item.ltp > 0
             )
         ]
@@ -306,11 +308,11 @@ class StockUniverseScanner:
         record: Any,
         *,
         token: Optional[int] = None,
-        ltp: float = 0.0,
-        prev_close: float = 0.0,
-        open_price: float = 0.0,
-        volume: int = 0,
-        avg_volume_20d: int = 0,
+        ltp: Optional[float] = None,
+        prev_close: Optional[float] = None,
+        open_price: Optional[float] = None,
+        volume: Optional[int] = None,
+        avg_volume_20d: Optional[int] = None,
         reasons: Optional[List[str]] = None,
     ) -> StockRankingMetrics:
         """Create one consistent DATA_UNAVAILABLE scanner result."""
@@ -345,6 +347,9 @@ class StockUniverseScanner:
         REAL mode never falls back to synthetic data unless the caller
         explicitly passes allow_synthetic=True.
         """
+        if allow_synthetic and (os.environ.get("PRODUCTION", "").lower() in ("true", "1") or os.environ.get("ENV", "").lower() == "production"):
+            raise RuntimeError("Synthetic market data is strictly prohibited in production.")
+
         self.resolve_tokens(
             kite_client=kite_client,
             force_refresh=False,

@@ -173,8 +173,12 @@ def stream_signals():
 
     fresh = len(signals) > 0 and _stream_feed_is_fresh(stream_stat)
 
+    status_str = "success" if (stream_connected and fresh) else ("STALE" if stream_connected else "DISCONNECTED")
+    market_data_status = "AVAILABLE" if (stream_connected and fresh) else ("STALE" if stream_connected else "UNAVAILABLE")
+
     return {
-        "status": "success",
+        "status": status_str,
+        "market_data_status": market_data_status,
         "stream_state": stream_stat.get("state", "UNKNOWN"),
         "stream_connected": stream_connected,
         "last_tick_time": stream_stat.get("last_tick_time"),
@@ -234,15 +238,20 @@ def stream_market():
 
         instruments[sym] = state_dict
 
+    feed_fresh = _stream_feed_is_fresh(stream_stat)
+    status_str = "success" if (stream_connected and feed_fresh) else ("STALE" if stream_connected else "DISCONNECTED")
+    market_data_status = "AVAILABLE" if (stream_connected and feed_fresh) else ("STALE" if stream_connected else "UNAVAILABLE")
+
     return {
-        "status": "success",
+        "status": status_str,
+        "market_data_status": market_data_status,
         "stream_state": stream_stat.get("state", "UNKNOWN"),
         "stream_connected": stream_connected,
         "last_tick_time": stream_stat.get("last_tick_time"),
         "last_tick_age_seconds": stream_stat.get(
             "last_tick_age_seconds"
         ),
-        "data_fresh": _stream_feed_is_fresh(stream_stat),
+        "data_fresh": feed_fresh,
         "instruments": instruments,
         "count": len(instruments),
     }

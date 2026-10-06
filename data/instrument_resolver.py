@@ -215,18 +215,12 @@ class InstrumentResolver:
             exchange=exchange,
         )
 
-        lookup_candidates = {
-            lookup_symbol,
-            f"{lookup_symbol}-BE",
-            lookup_symbol.replace("-BE", ""),
-        }
-
         for inst in instruments:
             tradingsymbol = str(
                 inst.get("tradingsymbol") or ""
             ).strip().upper()
 
-            if tradingsymbol not in lookup_candidates:
+            if tradingsymbol != lookup_symbol:
                 continue
 
             raw_token = inst.get("instrument_token")
@@ -471,14 +465,7 @@ class InstrumentResolver:
                 continue
 
         for target in target_symbols:
-            # 1. Exact match
-            # 2. -BE series fallback (e.g. TNTELE -> TNTELE-BE)
-            # 3. Strip -BE fallback (e.g. HFCL-BE -> HFCL)
-            token = (
-                inst_by_sym.get(target)
-                or inst_by_sym.get(f"{target}-BE")
-                or inst_by_sym.get(target.replace("-BE", ""))
-            )
+            token = inst_by_sym.get(target)
             if token is not None:
                 resolved[target] = token
                 token_to_symbols.setdefault(token, []).append(target)

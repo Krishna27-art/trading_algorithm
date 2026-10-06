@@ -966,6 +966,37 @@ class LiveSignalEngine:
                 else:
                     prior_per_strategy = {}
 
+            # If candle-close strategies have not evaluated for this symbol yet,
+            # run evaluation on the latest completed candle so all 8 strategies are active.
+            if len(prior_per_strategy) <= 1:
+                df_candles = live_market_state.get_candles_df(clean)
+                if not df_candles.empty:
+                    last_row = df_candles.iloc[-1].to_dict()
+                    candle_ts = last_row.get("datetime")
+                    if candle_ts is not None:
+                        c_dict = {
+                            "symbol": clean,
+                            "datetime": candle_ts,
+                            "open": float(last_row.get("open", 0.0)),
+                            "high": float(last_row.get("high", 0.0)),
+                            "low": float(last_row.get("low", 0.0)),
+                            "close": float(last_row.get("close", 0.0)),
+                            "volume": int(last_row.get("volume", 0)),
+                        }
+                        v_val = last_row.get("vwap")
+                        try:
+                            v_val = float(v_val) if v_val is not None else None
+                        except (TypeError, ValueError):
+                            v_val = None
+                        self.on_candle_close(c_dict, vwap=v_val)
+                        with self._lock:
+                            prior_payload = self._predictions.get(clean)
+                            if isinstance(prior_payload, dict):
+                                prior_per_strategy = dict(
+                                    prior_payload.get("predictions", {})
+                                )
+
+            with self._lock:
                 prior_per_strategy.pop("SSF-L5-SRM", None)
                 prior_per_strategy["ssf_l5_srm"] = ssf_prediction
 

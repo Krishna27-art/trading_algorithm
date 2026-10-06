@@ -57,16 +57,20 @@ class ORBCalculator:
             orb_bars = bars.between_time("09:30", "09:45")
             expected_times = {"09:30", "09:45"}
 
-        if len(orb_bars) < 2:
-            return None
-
         actual_times = {
             ts.strftime("%H:%M")
             for ts in orb_bars.index
         }
 
-        if not expected_times.issubset(actual_times):
-            return None
+        if len(orb_bars) < 2 or not expected_times.issubset(actual_times):
+            alt_bars = bars.between_time("09:30", "09:45") if timestamps_are_candle_open else bars.between_time("09:15", "09:30")
+            alt_expected = {"09:30", "09:45"} if timestamps_are_candle_open else {"09:15", "09:30"}
+            alt_times = {ts.strftime("%H:%M") for ts in alt_bars.index}
+            if len(alt_bars) >= 2 and alt_expected.issubset(alt_times):
+                orb_bars = alt_bars
+                expected_times = alt_expected
+            else:
+                return None
 
         orb_bars = orb_bars.loc[
             orb_bars.index.strftime("%H:%M").isin(expected_times)

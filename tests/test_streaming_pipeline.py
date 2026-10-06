@@ -262,3 +262,49 @@ def test_seed_historical_candles_populates_live_history():
     assert state.get_symbol_state("TCS").ltp == 3500.0
 
 
+def test_market_stream_manager_timestamp_compatibility():
+    """Verify get_status safely computes tick age for naive, IST, UTC and None timestamps."""
+    from zoneinfo import ZoneInfo
+    from data.time_utils import now_ist
+
+    manager = MarketStreamManager()
+
+    # 1. Missing timestamps -> None age
+    manager.last_tick_time = None
+    manager.last_equity_tick_time = None
+    st = manager.get_status()
+    assert st["last_tick_age_seconds"] is None
+    assert st["last_equity_tick_age_seconds"] is None
+
+    # 2. Naive timestamps (e.g. from exchange/pandas)
+    naive_now = datetime.now()
+    manager.last_tick_time = naive_now
+    manager.last_equity_tick_time = naive_now
+    st = manager.get_status()
+    assert st["last_tick_age_seconds"] is not None
+    assert st["last_tick_age_seconds"] >= 0.0
+    assert st["last_equity_tick_age_seconds"] is not None
+    assert st["last_equity_tick_age_seconds"] >= 0.0
+
+    # 3. Timezone-aware IST timestamps
+    ist_now = now_ist()
+    manager.last_tick_time = ist_now
+    manager.last_equity_tick_time = ist_now
+    st = manager.get_status()
+    assert st["last_tick_age_seconds"] is not None
+    assert st["last_tick_age_seconds"] >= 0.0
+    assert st["last_equity_tick_age_seconds"] is not None
+    assert st["last_equity_tick_age_seconds"] >= 0.0
+
+    # 4. Timezone-aware UTC timestamps
+    utc_now = datetime.now(ZoneInfo("UTC"))
+    manager.last_tick_time = utc_now
+    manager.last_equity_tick_time = utc_now
+    st = manager.get_status()
+    assert st["last_tick_age_seconds"] is not None
+    assert st["last_tick_age_seconds"] >= 0.0
+    assert st["last_equity_tick_age_seconds"] is not None
+    assert st["last_equity_tick_age_seconds"] >= 0.0
+
+
+

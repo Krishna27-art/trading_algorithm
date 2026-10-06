@@ -122,9 +122,7 @@ class LiquidityFilter:
         # 5. Bid-Ask Spread check (if market depth available)
         spread_pct = None
         depth = stock_quote_data.get("depth")
-        if not depth or not isinstance(depth, dict):
-            rejections.append("Live market depth unavailable; spread cannot be validated.")
-        else:
+        if depth and isinstance(depth, dict):
             buy_orders = depth.get("buy", [])
             sell_orders = depth.get("sell", [])
             if not buy_orders or not sell_orders:

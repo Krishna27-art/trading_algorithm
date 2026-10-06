@@ -155,6 +155,7 @@ def test_sector_impulse_model_fitting_and_signal_generation():
     dts = []
     px_m, px_sec, px_l, px_i = 24000.0, 5000.0, 2500.0, 1000.0
 
+    prev_rl = 0.0
     for d in range(days):
         day = d0 + timedelta(days=d)
         t0 = datetime.combine(day, datetime.min.time()) + timedelta(hours=9, minutes=15)
@@ -165,7 +166,8 @@ def test_sector_impulse_model_fitting_and_signal_generation():
             rsec = 0.5 * rm + rng.normal(0, 0.002)
             rl = 0.4 * rm + 0.3 * rsec + rng.normal(0, 0.005)  # leader idiosyncratic impulse
             # Own stock lags leader with lag 1
-            ri = 0.3 * rm + 0.2 * rsec + 0.4 * rl + rng.normal(0, 0.001)
+            ri = 0.3 * rm + 0.2 * rsec + 0.4 * prev_rl + rng.normal(0, 0.001)
+            prev_rl = rl
 
             px_m *= (1 + rm)
             px_sec *= (1 + rsec)

@@ -49,7 +49,7 @@ from data.candle_aggregator import MultiSymbolCandleAggregator
 from data.historical_loader import HistoricalDataLoader
 from data.instrument_resolver import instrument_resolver
 from data.sector_peer_manager import get_sector_index_symbol
-from data.time_utils import now_ist, now_ist_iso, now_ist_naive
+from data.time_utils import now_ist, now_ist_iso, now_ist_naive, to_ist_aware
 from streaming.crsd_live_runtime import crsd_live_runtime
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
@@ -2389,26 +2389,28 @@ class MarketStreamManager:
             last_tick_age_seconds = None
 
             if self.last_tick_time is not None:
-
-                last_tick_age_seconds = max(
-                    0.0,
-                    (
-                        now_ist()
-                        - self.last_tick_time
-                    ).total_seconds(),
-                )
+                aware_last_tick = to_ist_aware(self.last_tick_time)
+                if aware_last_tick is not None:
+                    last_tick_age_seconds = max(
+                        0.0,
+                        (
+                            now_ist()
+                            - aware_last_tick
+                        ).total_seconds(),
+                    )
 
             last_equity_tick_age_seconds = None
 
             if self.last_equity_tick_time is not None:
-
-                last_equity_tick_age_seconds = max(
-                    0.0,
-                    (
-                        now_ist()
-                        - self.last_equity_tick_time
-                    ).total_seconds(),
-                )
+                aware_last_equity = to_ist_aware(self.last_equity_tick_time)
+                if aware_last_equity is not None:
+                    last_equity_tick_age_seconds = max(
+                        0.0,
+                        (
+                            now_ist()
+                            - aware_last_equity
+                        ).total_seconds(),
+                    )
 
             return {
                 "state": (

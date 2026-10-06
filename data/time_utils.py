@@ -37,3 +37,30 @@ def today_ist() -> date:
 def now_ist_iso() -> str:
     """Return current Asia/Kolkata timestamp with explicit +05:30 offset."""
     return now_ist().isoformat()
+
+
+def to_ist_aware(dt: Any) -> Optional[datetime]:
+    """
+    Convert any timestamp (datetime, ISO string, epoch) to timezone-aware Asia/Kolkata.
+    Safely bridges naive and aware timestamps, assuming naive timestamps from NSE/Kite are IST.
+    """
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=IST)
+    return dt.astimezone(IST)
+
+
+def to_ist_naive(dt: Any) -> Optional[datetime]:
+    """Convert any timestamp to timezone-naive IST datetime."""
+    aware = to_ist_aware(dt)
+    if aware is None:
+        return None
+    return aware.replace(tzinfo=None)

@@ -682,9 +682,19 @@ class HistoricalDataLoader:
             logger.error(
                 f"Incremental Kite fetch failed for token {instrument_token}: {exc}"
             )
+            if cached is not None and not cached.empty:
+                logger.warning(
+                    f"Falling back to existing valid intraday cache for token {instrument_token}."
+                )
+                return cached
             raise
 
         if fresh.empty:
+            if cached is not None and not cached.empty:
+                logger.warning(
+                    f"Kite returned no fresh completed candles for token {instrument_token}; falling back to existing cache."
+                )
+                return cached
             raise RuntimeError(
                 f"Kite returned no fresh completed candles for token {instrument_token}."
             )

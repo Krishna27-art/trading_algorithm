@@ -44,7 +44,11 @@ import pandas as pd
 
 from data.time_utils import now_ist, now_ist_iso
 from strategy.base_strategy import SignalAction
-from strategy.prediction_service import prediction_service
+from strategy.prediction_service import (
+    SingleStrategyPrediction,
+    _positive_number,
+    prediction_service,
+)
 from strategy.ssf_l5_srm_strategy import BookSnapshot
 from streaming.crsd_live_runtime import crsd_live_runtime
 from streaming.live_market_state import live_market_state
@@ -359,16 +363,15 @@ class LiveSignalEngine:
         price: float,
         timestamp: Optional[datetime] = None,
     ) -> bool:
-        """
-        Optional direct tick hook.
+        """Record real exchange-timestamped tick LTP."""
+        if timestamp is None:
+            logger.warning(
+                "[LiveSignalEngine] Rejecting tick without exchange timestamp."
+            )
+            return False
 
-        MarketStreamManager may call this on every valid tick in a future
-        wiring update. It makes the engine independent of candle-close timing.
-        """
         normalized_symbol = self._normalize_symbol(symbol)
-        normalized_ts = self._normalize_timestamp(
-            timestamp or now_ist()
-        )
+        normalized_ts = self._normalize_timestamp(timestamp)
 
         if normalized_symbol is None:
             return False
@@ -450,7 +453,15 @@ class LiveSignalEngine:
 
         with self._lock:
             candidates = self._candidate_symbols
-        if candidates is not None and symbol not in candidates:
+
+        if candidates is None:
+            logger.info(
+                "[LiveSignalEngine] Scanner snapshot unavailable; "
+                "strategy evaluation is disabled."
+            )
+            return None
+
+        if symbol not in candidates:
             return None
 
         if not self._mark_processed_candle(
@@ -794,9 +805,33 @@ class LiveSignalEngine:
         if clean is None:
             return
 
+        with self._lock:
+            candidates = self._candidate_symbols
+
+        if candidates is None or clean not in candidates:
+            return
+
         if not isinstance(snapshot, BookSnapshot):
-            # snapshot may come from the aggregator as the raw BookSnapshot;
-            # if it is not the right type, skip rather than error.
+            return
+
+        snapshot_ts = self._normalize_timestamp(
+            getattr(snapshot, "timestamp", None)
+        )
+        if snapshot_ts is None:
+            return
+
+        from data.time_utils import now_ist_naive
+        now_naive = now_ist_naive()
+        if hasattr(snapshot_ts, "tzinfo") and snapshot_ts.tzinfo is not None:
+            snapshot_ts = snapshot_ts.replace(tzinfo=None)
+        age = (now_naive - snapshot_ts).total_seconds()
+
+        if age < 0 or age > self._max_ltp_age_seconds:
+            logger.warning(
+                "[LiveSignalEngine] Rejecting stale L5 snapshot for %s: age=%.1fs",
+                clean,
+                age,
+            )
             return
 
         state = live_market_state.get_symbol_state(clean)
@@ -821,8 +856,8 @@ class LiveSignalEngine:
             bids=snapshot.bids,
             asks=snapshot.asks,
             ltp=snapshot.ltp,
-            fut_ltp=ctx.fut_ltp,        # None until futures feed is wired
-            fut_oi=ctx.fut_oi,          # None until futures feed is wired
+            fut_ltp=ctx.fut_ltp,
+            fut_oi=ctx.fut_oi,
             sector_ret_30m=ctx.sector_ret_30m,
             stock_ret_30m=ctx.stock_ret_30m,
             circuit_lower=ctx.circuit_lower or snapshot.circuit_lower,
@@ -832,9 +867,7 @@ class LiveSignalEngine:
             stock_return_updated_at=ctx.stock_return_updated_at,
         )
 
-        ltp_timestamp = self._normalize_timestamp(
-            getattr(snapshot, "timestamp", None)
-        )
+        ltp_timestamp = snapshot_ts
 
         try:
             strategy = self._ssf_runtime.get_strategy(
@@ -843,23 +876,11 @@ class LiveSignalEngine:
                 current_price=float(ltp),
             )
             signal = strategy.on_book_update(enriched)
-            if signal is None:
-                return
 
-            ssf_prediction = (
-                prediction_service
-                ._prediction_from_signal(
-                    status=(
-                        "SSF_LONG"
-                        if signal.action == SignalAction.BUY
-                        else "SSF_SHORT"
-                    ),
-                    signal=signal,
-                    ltp=float(ltp),
-                    default_reason=(
-                        signal.reason
-                        or "SSF Level-5 generated a validated live signal."
-                    ),
+            if signal is None:
+                ssf_prediction = SingleStrategyPrediction(
+                    status="WAITING",
+                    reason="Current Level-5 conditions do not qualify.",
                     levels=(
                         getattr(
                             strategy,
@@ -868,14 +889,37 @@ class LiveSignalEngine:
                         )
                         or {}
                     ),
+                    metrics={},
+                    strategy="ssf_l5_srm",
+                    symbol=clean,
                 )
-            )
+            else:
+                ssf_prediction = (
+                    prediction_service
+                    ._prediction_from_signal(
+                        status=(
+                            "SSF_LONG"
+                            if signal.action == SignalAction.BUY
+                            else "SSF_SHORT"
+                        ),
+                        signal=signal,
+                        ltp=float(ltp),
+                        default_reason=(
+                            signal.reason
+                            or "SSF Level-5 generated a validated live signal."
+                        ),
+                        levels=(
+                            getattr(
+                                strategy,
+                                "last_features",
+                                {}
+                            )
+                            or {}
+                        ),
+                    )
+                )
 
             with self._lock:
-                # _predictions stores flat result dicts (see _store_result /
-                # on_candle_close). Read the prior per-strategy predictions
-                # from the "predictions" key of the existing payload — never
-                # treat the whole payload as a (preds, consensus) tuple.
                 prior_payload = self._predictions.get(clean)
                 if isinstance(prior_payload, dict):
                     prior_per_strategy = dict(
@@ -884,9 +928,6 @@ class LiveSignalEngine:
                 else:
                     prior_per_strategy = {}
 
-                # Merge the fresh SSF prediction into the prior per-strategy
-                # dict so that candle-close results for other strategies are
-                # preserved alongside this book-update SSF result.
                 prior_per_strategy.pop("SSF-L5-SRM", None)
                 prior_per_strategy["ssf_l5_srm"] = ssf_prediction
 
@@ -894,9 +935,6 @@ class LiveSignalEngine:
                     prior_per_strategy
                 )
 
-            # Build a full flat result dict — identical shape to what
-            # on_candle_close / _store_result produces so that
-            # get_all_predictions() / get_live_signals() work uniformly.
             result = {
                 "symbol": clean,
                 "token": token,
@@ -944,6 +982,96 @@ class LiveSignalEngine:
                 type(exc).__name__,
                 exc,
             )
+            ssf_prediction = SingleStrategyPrediction(
+                status="ERROR",
+                reason=f"SSF evaluation failed: {type(exc).__name__}: {exc}",
+                levels={},
+                metrics={},
+                strategy="ssf_l5_srm",
+                symbol=clean,
+            )
+            with self._lock:
+                prior_payload = self._predictions.get(clean)
+                if isinstance(prior_payload, dict):
+                    prior_per_strategy = dict(
+                        prior_payload.get("predictions", {})
+                    )
+                    prior_per_strategy["ssf_l5_srm"] = ssf_prediction
+                    consensus = prediction_service.calculate_consensus(prior_per_strategy)
+                    prior_payload["predictions"] = {
+                        k: (v.to_dict() if hasattr(v, "to_dict") else v)
+                        for k, v in prior_per_strategy.items()
+                    }
+                    prior_payload["consensus"] = consensus
+                    self._store_result(clean, prior_payload)
+
+    def on_tick(
+        self,
+        symbol: str,
+        price: float,
+        timestamp: datetime,
+    ) -> None:
+        """
+        Monitor active intrabar stop/target/time-exits on real ticks.
+        """
+        clean = self._normalize_symbol(symbol)
+        if clean is None or not self._valid_price(price):
+            return
+
+        with self._lock:
+            payload = self._predictions.get(clean)
+            if not isinstance(payload, dict):
+                return
+            predictions = dict(payload.get("predictions", {}))
+
+        updated = False
+        for strat_name, pred in list(predictions.items()):
+            if not isinstance(pred, dict):
+                continue
+            status = pred.get("status")
+            direction = pred.get("direction")
+            if status in {"UNAVAILABLE", "ERROR", "NO_TRADE", "WAITING", "STOPPED_OUT", "TARGET_HIT"}:
+                continue
+            if direction not in {"LONG", "SHORT"}:
+                continue
+
+            levels = pred.get("levels") or {}
+            stop = _positive_number(levels.get("stop") or pred.get("stop_loss"))
+            target = _positive_number(levels.get("target") or pred.get("target"))
+
+            breached = False
+            exit_reason = None
+            if direction == "LONG":
+                if stop is not None and price <= stop:
+                    breached = True
+                    exit_reason = f"Intrabar stop breached: price {price:.2f} <= stop {stop:.2f}"
+                elif target is not None and price >= target:
+                    breached = True
+                    exit_reason = f"Intrabar target reached: price {price:.2f} >= target {target:.2f}"
+            elif direction == "SHORT":
+                if stop is not None and price >= stop:
+                    breached = True
+                    exit_reason = f"Intrabar stop breached: price {price:.2f} >= stop {stop:.2f}"
+                elif target is not None and price <= target:
+                    breached = True
+                    exit_reason = f"Intrabar target reached: price {price:.2f} <= target {target:.2f}"
+
+            if breached:
+                updated_pred = dict(pred)
+                updated_pred["status"] = "NO_TRADE"
+                updated_pred["direction"] = "NEUTRAL"
+                updated_pred["reason"] = exit_reason
+                predictions[strat_name] = updated_pred
+                updated = True
+
+        if updated:
+            consensus = prediction_service.calculate_consensus(predictions)
+            result = dict(payload)
+            result["ltp"] = round(float(price), 2)
+            result["ltp_timestamp"] = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+            result["predictions"] = predictions
+            result["consensus"] = consensus
+            self._store_result(clean, result)
 
     def get_ssf_strategy(
         self,

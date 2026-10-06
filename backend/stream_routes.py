@@ -7,10 +7,13 @@ caller subscribe arbitrary/fabricated instrument tokens.
 """
 
 import logging
-from typing import Any, Dict
+import math
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from config.universe import StockUniverse
+from data.time_utils import now_ist_naive
 from backend.security import verify_shared_secret
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
@@ -19,6 +22,13 @@ from streaming.market_stream_manager import market_stream_manager
 logger = logging.getLogger("backend_api.stream")
 
 router = APIRouter()
+
+# Universe metadata — loaded once at module startup.
+_universe = StockUniverse()
+_universe_map: Dict[str, Any] = {
+    record.symbol: record
+    for record in _universe.all_stocks
+}
 
 
 STREAM_DATA_STALE_AFTER_SECONDS = 120
@@ -44,6 +54,26 @@ def _stream_feed_is_fresh(stream_status: Dict[str, Any]) -> bool:
     return 0 <= age <= STREAM_DATA_STALE_AFTER_SECONDS
 
 
+def _symbol_feed_is_fresh(
+    symbol: str,
+    max_age_seconds: int = STREAM_DATA_STALE_AFTER_SECONDS,
+) -> bool:
+    state = live_market_state.get_symbol_state(symbol)
+    if state is None:
+        return False
+
+    ts = state.last_tick_time
+    if ts is None:
+        return False
+
+    now = now_ist_naive()
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+    age = (now - ts).total_seconds()
+
+    return 0 <= age <= max_age_seconds
+
+
 def _stream_state() -> str:
     try:
         return str(
@@ -66,7 +96,10 @@ def start_stream() -> Dict[str, Any]:
             "symbols_count": result.get("symbols_count", 0),
         }
     except RuntimeError as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+        msg = str(e)
+        if "authenticate" in msg.lower() or "active zerodha" in msg.lower() or "auth" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=msg)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=msg)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -91,22 +124,30 @@ def stream_status():
 
 @router.get("/api/stream/signals")
 def stream_signals():
-    """Return only signals backed by a fresh Kite stream."""
-    stream_status = _stream_status()
-    fresh = _stream_feed_is_fresh(stream_status)
+    """Return only signals backed by a fresh Kite stream and fresh symbol ticks."""
+    stream_stat = _stream_status()
+    stream_connected = stream_stat.get("connected") is True
 
-    signals = (
+    all_signals = (
         live_signal_engine.get_all_predictions()
-        if fresh
+        if stream_connected
         else {}
     )
 
+    signals = {
+        sym: sig
+        for sym, sig in all_signals.items()
+        if _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
+    }
+
+    fresh = len(signals) > 0 and _stream_feed_is_fresh(stream_stat)
+
     return {
         "status": "success",
-        "stream_state": stream_status.get("state", "UNKNOWN"),
-        "stream_connected": stream_status.get("connected", False),
-        "last_tick_time": stream_status.get("last_tick_time"),
-        "last_tick_age_seconds": stream_status.get(
+        "stream_state": stream_stat.get("state", "UNKNOWN"),
+        "stream_connected": stream_connected,
+        "last_tick_time": stream_stat.get("last_tick_time"),
+        "last_tick_age_seconds": stream_stat.get(
             "last_tick_age_seconds"
         ),
         "data_fresh": fresh,
@@ -117,24 +158,60 @@ def stream_signals():
 
 @router.get("/api/stream/market")
 def stream_market():
-    """Return in-memory market state tagged with Kite stream freshness."""
-    stream_status = _stream_status()
-    fresh = _stream_feed_is_fresh(stream_status)
+    """Return in-memory market state tagged with per-symbol Kite stream freshness."""
+    stream_stat = _stream_status()
+    stream_connected = stream_stat.get("connected") is True
 
-    symbols_state = live_market_state.get_all_symbols_state()
+    symbols_state = live_market_state.get_all_symbols_state() if stream_connected else {}
+
+    instruments = {}
+    for sym, state in symbols_state.items():
+        state_dict = state.to_dict()
+        state_dict["data_fresh"] = _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
+
+        # Enrich with universe metadata and computed fields.
+        record = _universe_map.get(sym)
+        if record is not None:
+            state_dict["name"] = record.name
+            state_dict["category"] = record.category
+            state_dict["rank"] = record.market_cap_rank
+        else:
+            state_dict.setdefault("name", "")
+            state_dict.setdefault("category", "")
+            state_dict.setdefault("rank", None)
+
+        ltp: Optional[float] = state_dict.get("ltp")
+        open_price: Optional[float] = state_dict.get("open")
+        state_dict["open_price"] = open_price
+
+        if (
+            ltp is not None
+            and open_price is not None
+            and math.isfinite(ltp)
+            and math.isfinite(open_price)
+            and open_price > 0
+        ):
+            change = round(ltp - open_price, 4)
+            state_dict["change"] = change
+            state_dict["change_pct"] = round(100.0 * change / open_price, 4)
+            state_dict["status"] = "LIVE"
+        else:
+            state_dict["change"] = None
+            state_dict["change_pct"] = None
+            state_dict["status"] = "DATA_UNAVAILABLE" if ltp is None else "LIVE"
+
+        instruments[sym] = state_dict
 
     return {
         "status": "success",
-        "stream_state": stream_status.get("state", "UNKNOWN"),
-        "stream_connected": stream_status.get("connected", False),
-        "last_tick_time": stream_status.get("last_tick_time"),
-        "last_tick_age_seconds": stream_status.get(
+        "stream_state": stream_stat.get("state", "UNKNOWN"),
+        "stream_connected": stream_connected,
+        "last_tick_time": stream_stat.get("last_tick_time"),
+        "last_tick_age_seconds": stream_stat.get(
             "last_tick_age_seconds"
         ),
-        "data_fresh": fresh,
-        "instruments": {
-            sym: state.to_dict()
-            for sym, state in symbols_state.items()
-        },
-        "count": len(symbols_state),
+        "data_fresh": _stream_feed_is_fresh(stream_stat),
+        "instruments": instruments,
+        "count": len(instruments),
     }
+

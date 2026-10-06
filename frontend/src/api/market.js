@@ -8,11 +8,13 @@ export const getStrategyState = (strategy) =>
 export const getMarketPrices = async () => {
   const data = await apiGet('/api/stream/market')
   const instruments = data?.instruments || {}
-  const stocks = Object.values(instruments)
+  const stocks = Object.entries(instruments)
+    .filter(([sym]) => sym !== 'NIFTY')
+    .map(([, state]) => state)
   return {
     ...data,
     stocks,
-    data_source: data?.data_fresh ? 'STREAM' : 'STREAM_STALE',
+    data_source: data?.data_fresh ? 'KITE_STREAM' : 'STREAM_STALE',
   }
 }
 

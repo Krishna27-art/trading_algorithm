@@ -215,8 +215,8 @@ def get_system_health() -> Dict[str, Any]:
         "strategy_engine": engine_state,
         "signal_count": prediction_count,
         "active_signal_count": producing_signal_count,
-        # Read-only pre-signal risk validator is active in PredictionService.
-        "risk_engine": "ACTIVE",
+        # Pre-signal geometry risk validator is active in PredictionService.
+        "risk_engine": "GEOMETRY_VALIDATION_ONLY",
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
         "overall_status": overall,
         "timestamp": now_ist_iso(),

@@ -243,9 +243,20 @@ class DailyHistoryContextWarmer:
                     )
 
             if not self._stop_event.is_set():
-                self._last_target_date = (
-                    target_date
-                )
+                # Only mark this target_date as complete when every stock
+                # succeeded. If any stock failed, leave _last_target_date
+                # unchanged so the next warmer cycle retries the full set.
+                if failed_count == 0:
+                    self._last_target_date = (
+                        target_date
+                    )
+                else:
+                    logger.warning(
+                        "Daily history refresh had %d failure(s) for %s; "
+                        "will retry on next cycle.",
+                        failed_count,
+                        target_date,
+                    )
 
             logger.info(
                 "Daily history context refresh complete: "

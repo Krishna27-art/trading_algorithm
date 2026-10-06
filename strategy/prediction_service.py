@@ -74,6 +74,7 @@ REQUIRED_CANDLE_COLUMNS = {
     "high",
     "low",
     "close",
+    "volume",
 }
 
 IST = "Asia/Kolkata"
@@ -299,11 +300,8 @@ class PredictionService:
         if not REQUIRED_CANDLE_COLUMNS.issubset(data.columns):
             return False
 
-        for column in ("open", "high", "low", "close"):
+        for column in ("open", "high", "low", "close", "volume"):
             data[column] = pd.to_numeric(data[column], errors="coerce")
-
-        if "volume" in data.columns:
-            data["volume"] = pd.to_numeric(data["volume"], errors="coerce").fillna(0.0)
 
         if "vwap" in data.columns:
             data["vwap"] = pd.to_numeric(data["vwap"], errors="coerce")
@@ -314,22 +312,23 @@ class PredictionService:
             & data["high"].notna()
             & data["low"].notna()
             & data["close"].notna()
+            & data["volume"].notna()
             & np.isfinite(data["open"].to_numpy())
             & np.isfinite(data["high"].to_numpy())
             & np.isfinite(data["low"].to_numpy())
             & np.isfinite(data["close"].to_numpy())
+            & np.isfinite(data["volume"].to_numpy())
             & (data["open"] > 0)
             & (data["high"] > 0)
             & (data["low"] > 0)
             & (data["close"] > 0)
+            & (data["volume"] >= 0)
             & (data["high"] >= data["low"])
             & (data["high"] >= data["open"])
             & (data["high"] >= data["close"])
             & (data["low"] <= data["open"])
             & (data["low"] <= data["close"])
         )
-        if "volume" in data.columns:
-            valid = valid & data["volume"].notna() & np.isfinite(data["volume"].to_numpy()) & (data["volume"] >= 0)
         return bool(valid.all())
 
     def _prepare_live_candles(self, df_15m: pd.DataFrame) -> pd.DataFrame:
@@ -431,13 +430,15 @@ class PredictionService:
 
     @staticmethod
     def _candle_dict(row: pd.Series) -> Dict[str, Any]:
+        vol = row.get("volume")
+        vol_float = float(vol) if pd.notna(vol) else None
         return {
             "datetime": row["datetime"],
             "open": float(row["open"]),
             "high": float(row["high"]),
             "low": float(row["low"]),
             "close": float(row["close"]),
-            "volume": float(row.get("volume", 0.0) if pd.notna(row.get("volume", None)) else 0.0),
+            "volume": vol_float,
         }
 
     # ======================================================================
@@ -707,13 +708,29 @@ class PredictionService:
                 india_vix = _positive_number(raw_vix)
 
         order_imbalance = None
-        if book_snapshot and isinstance(book_snapshot, dict):
-            buy_depth = book_snapshot.get("buy", [])
-            sell_depth = book_snapshot.get("sell", [])
-            total_buy_qty = sum(item.get("quantity", 0) for item in buy_depth if isinstance(item, dict))
-            total_sell_qty = sum(item.get("quantity", 0) for item in sell_depth if isinstance(item, dict))
-            if (total_buy_qty + total_sell_qty) > 0:
-                order_imbalance = (total_buy_qty - total_sell_qty) / float(total_buy_qty + total_sell_qty)
+        if book_snapshot is not None:
+            if isinstance(book_snapshot, dict):
+                buy_depth = book_snapshot.get("buy", [])
+                sell_depth = book_snapshot.get("sell", [])
+                total_buy_qty = sum(item.get("quantity", 0) for item in buy_depth if isinstance(item, dict))
+                total_sell_qty = sum(item.get("quantity", 0) for item in sell_depth if isinstance(item, dict))
+                if (total_buy_qty + total_sell_qty) > 0:
+                    order_imbalance = (total_buy_qty - total_sell_qty) / float(total_buy_qty + total_sell_qty)
+            elif hasattr(book_snapshot, "bids") and hasattr(book_snapshot, "asks"):
+                buy_depth = getattr(book_snapshot, "bids", []) or []
+                sell_depth = getattr(book_snapshot, "asks", []) or []
+                total_buy_qty = sum(
+                    int(level[1])
+                    for level in buy_depth[:5]
+                    if isinstance(level, (list, tuple)) and len(level) >= 2
+                )
+                total_sell_qty = sum(
+                    int(level[1])
+                    for level in sell_depth[:5]
+                    if isinstance(level, (list, tuple)) and len(level) >= 2
+                )
+                if (total_buy_qty + total_sell_qty) > 0:
+                    order_imbalance = (total_buy_qty - total_sell_qty) / float(total_buy_qty + total_sell_qty)
 
         sector_rs = None
         market_rs = None
@@ -1392,55 +1409,59 @@ class PredictionService:
                     levels=levels, metrics=metrics, strategy="crsd", symbol=inst.symbol,
                 )
 
-            top_hedge_sym = max(hedge_legs, key=lambda s: abs(hedge_legs[s]))
-            raw_hedge = live_ltp_by_symbol.get(top_hedge_sym) if live_ltp_by_symbol else None
+            validated_hedge_prices = {}
+            now = now_ist_naive()
 
-            if not isinstance(raw_hedge, tuple) or len(raw_hedge) != 2:
-                if isinstance(raw_hedge, (int, float)) and raw_hedge > 0:
-                    live_price = float(raw_hedge)
-                    live_ts = now_ist_naive()
+            for hedge_sym in hedge_legs:
+                raw_h = live_ltp_by_symbol.get(hedge_sym) if live_ltp_by_symbol else None
+                if not isinstance(raw_h, tuple) or len(raw_h) != 2:
+                    if isinstance(raw_h, (int, float)) and raw_h > 0:
+                        h_price = float(raw_h)
+                        h_ts = now
+                    else:
+                        return SingleStrategyPrediction(
+                            "UNAVAILABLE",
+                            reason=f"CRSD live hedge price is unavailable for {hedge_sym}.",
+                            levels=levels,
+                            metrics=metrics,
+                            strategy="crsd",
+                            symbol=inst.symbol,
+                        )
                 else:
+                    h_price, h_ts = raw_h
+                    h_price = _positive_number(h_price)
+
+                if h_price is None or h_ts is None:
                     return SingleStrategyPrediction(
                         "UNAVAILABLE",
-                        reason=f"CRSD live hedge price is unavailable for {top_hedge_sym}.",
+                        reason=f"CRSD live hedge price is unavailable for {hedge_sym}.",
                         levels=levels,
                         metrics=metrics,
                         strategy="crsd",
                         symbol=inst.symbol,
                     )
-            else:
-                live_price, live_ts = raw_hedge
-                live_price = _positive_number(live_price)
 
-            if live_price is None or live_ts is None:
-                return SingleStrategyPrediction(
-                    "UNAVAILABLE",
-                    reason=f"CRSD live hedge price is unavailable for {top_hedge_sym}.",
-                    levels=levels,
-                    metrics=metrics,
-                    strategy="crsd",
-                    symbol=inst.symbol,
-                )
+                if hasattr(h_ts, "tzinfo") and h_ts.tzinfo is not None:
+                    h_ts = h_ts.replace(tzinfo=None)
+                age = (now - h_ts).total_seconds()
 
-            now = now_ist_naive()
-            if hasattr(live_ts, "tzinfo") and live_ts.tzinfo is not None:
-                live_ts = live_ts.replace(tzinfo=None)
-            age = (now - live_ts).total_seconds()
+                if age < 0 or age > 120:
+                    return SingleStrategyPrediction(
+                        "UNAVAILABLE",
+                        reason=f"CRSD hedge price for {hedge_sym} is stale (age={age:.1f}s).",
+                        levels=levels,
+                        metrics=metrics,
+                        strategy="crsd",
+                        symbol=inst.symbol,
+                    )
 
-            if age < 0 or age > 120:
-                return SingleStrategyPrediction(
-                    "UNAVAILABLE",
-                    reason=f"CRSD hedge price for {top_hedge_sym} is stale (age={age:.1f}s).",
-                    levels=levels,
-                    metrics=metrics,
-                    strategy="crsd",
-                    symbol=inst.symbol,
-                )
+                validated_hedge_prices[hedge_sym] = h_price
 
+            top_hedge_sym = max(hedge_legs, key=lambda s: abs(hedge_legs[s]))
             hedge_weight = float(hedge_legs[top_hedge_sym])
             current_signal.hedge_symbol = top_hedge_sym
             current_signal.hedge_action = SignalAction.SELL if hedge_weight < 0 else SignalAction.BUY
-            current_signal.hedge_price = live_price
+            current_signal.hedge_price = validated_hedge_prices[top_hedge_sym]
 
             status = "CRSD_LONG" if current_signal.action == SignalAction.BUY else "CRSD_SHORT"
             return self._prediction_from_crsd_signal(
@@ -1802,16 +1823,26 @@ class PredictionService:
         cls,
         predictions: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Equal-vote consensus over seven single-name live strategies."""
-        live_predictions = {
-            name: prediction
-            for name, prediction in predictions.items()
-            if name in cls.LIVE_CONSENSUS_STRATEGIES
-        }
+        """Equal-vote consensus over the complete set of seven single-name live strategies."""
+        total_live = len(cls.LIVE_CONSENSUS_STRATEGIES)
+
+        # Normalize complete expected 7-strategy set so absent strategies are UNAVAILABLE
+        normalized_predictions = {}
+        for name in cls.LIVE_CONSENSUS_STRATEGIES:
+            if name in predictions:
+                normalized_predictions[name] = predictions[name]
+            else:
+                normalized_predictions[name] = SingleStrategyPrediction(
+                    status="UNAVAILABLE",
+                    reason="Strategy has not produced a current live evaluation.",
+                    levels={},
+                    metrics={},
+                    strategy=name,
+                )
+
         excluded_strategies = sorted(
             name for name in predictions if name not in cls.LIVE_CONSENSUS_STRATEGIES
         )
-        total_live = len(live_predictions)
 
         def _get_status(p: Any) -> str:
             if isinstance(p, dict):
@@ -1825,18 +1856,18 @@ class PredictionService:
 
         evaluable_count = sum(
             1
-            for prediction in live_predictions.values()
+            for prediction in normalized_predictions.values()
             if _get_status(prediction) not in {"UNAVAILABLE", "ERROR", ""}
         )
         long_count = sum(
             1
-            for prediction in live_predictions.values()
+            for prediction in normalized_predictions.values()
             if _get_status(prediction) not in {"UNAVAILABLE", "ERROR", ""}
             and _get_direction(prediction) == "LONG"
         )
         short_count = sum(
             1
-            for prediction in live_predictions.values()
+            for prediction in normalized_predictions.values()
             if _get_status(prediction) not in {"UNAVAILABLE", "ERROR", ""}
             and _get_direction(prediction) == "SHORT"
         )
@@ -1876,14 +1907,14 @@ class PredictionService:
             direction = "LONG"
             agreeing = long_count
             strength = "STRONG" if long_count >= 3 else "MODERATE" if long_count >= 2 else "WEAK"
-            label = f"{strength} LONG ({long_count}/{evaluable_count})"
+            label = f"{strength} LONG ({long_count}/{total_live})"
         else:
             direction = "SHORT"
             agreeing = short_count
             strength = "STRONG" if short_count >= 3 else "MODERATE" if short_count >= 2 else "WEAK"
-            label = f"{strength} SHORT ({short_count}/{evaluable_count})"
+            label = f"{strength} SHORT ({short_count}/{total_live})"
 
-        agreement_pct = round((agreeing / evaluable_count) * 100.0, 1)
+        agreement_pct = round((agreeing / total_live) * 100.0, 1)
         return {
             **base,
             "direction": direction,

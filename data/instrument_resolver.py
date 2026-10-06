@@ -22,9 +22,27 @@ INDEX_SYMBOL_ALIASES = {
     "BANKNIFTY": "NIFTY BANK",
     "NIFTY BANK": "NIFTY BANK",
     "FINNIFTY": "NIFTY FIN SERVICE",
+    "NIFTY FIN SERVICE": "NIFTY FIN SERVICE",
+    "NIFTYFINSERVICE": "NIFTY FIN SERVICE",
     "MIDCPNIFTY": "NIFTY MID SELECT",
     "INDIA VIX": "INDIA VIX",
     "INDIAVIX": "INDIA VIX",
+    "NIFTY IT": "NIFTY IT",
+    "NIFTYIT": "NIFTY IT",
+    "NIFTY AUTO": "NIFTY AUTO",
+    "NIFTYAUTO": "NIFTY AUTO",
+    "NIFTY PHARMA": "NIFTY PHARMA",
+    "NIFTYPHARMA": "NIFTY PHARMA",
+    "NIFTY FMCG": "NIFTY FMCG",
+    "NIFTYFMCG": "NIFTY FMCG",
+    "NIFTY METAL": "NIFTY METAL",
+    "NIFTYMETAL": "NIFTY METAL",
+    "NIFTY ENERGY": "NIFTY ENERGY",
+    "NIFTYENERGY": "NIFTY ENERGY",
+    "NIFTY INFRA": "NIFTY INFRA",
+    "NIFTYINFRA": "NIFTY INFRA",
+    "NIFTY COMMODITIES": "NIFTY COMMODITIES",
+    "NIFTYCOMMODITIES": "NIFTY COMMODITIES",
 }
 
 UNIVERSE_TOKEN_CACHE_VERSION = 1
@@ -426,27 +444,9 @@ class InstrumentResolver:
 
         # 2. No trustworthy cache -> authoritative Kite master.
         if kite_client is None:
-            # If target_cache exists and has all target symbols, return it as offline fallback
-            if target_cache.exists():
-                try:
-                    with open(target_cache, "r", encoding="utf-8") as f:
-                        payload = json.load(f)
-                    raw_tokens = payload.get("tokens", {})
-                    if isinstance(raw_tokens, dict) and target_symbols.issubset(raw_tokens.keys()):
-                        fallback_tokens = {
-                            s: int(raw_tokens[s])
-                            for s in target_symbols
-                            if int(raw_tokens[s]) > 0
-                        }
-                        if len(fallback_tokens) == len(target_symbols):
-                            logger.info(
-                                f"Using existing universe token cache as offline fallback: {len(fallback_tokens)} symbols."
-                            )
-                            return fallback_tokens, []
-                except Exception:
-                    pass
             logger.error(
-                "Cannot resolve universe tokens: no valid cache and no Kite client."
+                "Cannot resolve universe tokens: "
+                "no valid validated cache and no Kite client."
             )
             return {}, sorted(target_symbols)
 

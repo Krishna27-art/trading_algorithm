@@ -90,7 +90,9 @@ export default function StocksPage({ isAuthenticated }) {
   }, [stocks])
 
   const isAuthRequired = data?.status === 'AUTH_REQUIRED' && !isAuthenticated
-  const isRealKite = data?.data_source === 'REAL_KITE'
+  const isRealKite =
+    (data?.data_source === 'REAL_KITE' || data?.data_source === 'KITE_STREAM' || data?.data_source === 'STREAM') &&
+    data?.data_fresh === true
 
   return (
     <div className="space-y-4 animate-fade-in">

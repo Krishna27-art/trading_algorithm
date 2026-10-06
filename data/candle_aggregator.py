@@ -1126,6 +1126,20 @@ class MultiSymbolCandleAggregator:
             if len(bids) != 5 or len(asks) != 5:
                 return None
 
+            # Reject a crossed or locked market (best bid >= best ask).
+            if bids[0][0] >= asks[0][0]:
+                return None
+
+            # Bid levels must be in descending price order.
+            for i in range(1, len(bids)):
+                if bids[i][0] > bids[i - 1][0]:
+                    return None
+
+            # Ask levels must be in ascending price order.
+            for i in range(1, len(asks)):
+                if asks[i][0] < asks[i - 1][0]:
+                    return None
+
             from strategy.ssf_l5_srm_strategy import BookSnapshot
 
             # Optional fields. Missing OI/circuit values are allowed.

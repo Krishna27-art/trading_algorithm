@@ -384,15 +384,21 @@ class StockUniverseScanner:
                     )
                 )
 
-                threading.Thread(
-                    target=daily_history_context_warmer.refresh,
-                    args=(
-                        client,
-                        latest_context_date,
-                    ),
-                    name="manual-daily-history-refresh",
-                    daemon=True,
-                ).start()
+                # Run synchronously so _scan_real_kite() reads the
+                # freshly written cache — not the stale one.
+                # The warmer's internal _refresh_lock prevents concurrent
+                # duplicate refreshes.
+                try:
+                    daily_history_context_warmer.refresh(
+                        kite_client=client,
+                        target_date=latest_context_date,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Force history refresh failed (will scan with "
+                        "existing cache): %s",
+                        exc,
+                    )
 
             try:
                 metrics = self._scan_real_kite(
@@ -1422,18 +1428,24 @@ class StockUniverseScanner:
             )
         )
 
-        combined = tradables + untradables
-
         for rank, metric in enumerate(
-            combined,
+            tradables,
             start=1,
         ):
             metric.rank = rank
 
+        for rank, metric in enumerate(
+            untradables,
+            start=len(tradables) + 1,
+        ):
+            metric.rank = rank
+
+        self.last_diagnostics = tradables + untradables
+
         return (
-            combined[:top_n]
+            tradables[:top_n]
             if top_n > 0
-            else combined
+            else tradables
         )
 
     def get_top_instrument_configs(

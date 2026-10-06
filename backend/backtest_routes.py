@@ -31,9 +31,6 @@ logger = logging.getLogger("backend_api.backtest")
 
 router = APIRouter(dependencies=[Depends(verify_shared_secret)])
 
-# Real NSE instrument token of the NIFTY 50 index (a fixed exchange constant).
-NIFTY_50_TOKEN = 256265
-
 _backtest_slot = threading.Semaphore(1)
 
 # strategy key -> (display name, accepted aliases)
@@ -125,7 +122,12 @@ def _resolve_instrument(symbol: str, kite):
         return inst, token or None
 
     inst = copy.deepcopy(settings.instruments[0])  # never mutate shared settings
-    token = instrument_resolver.resolve_token("NIFTY", exchange="NSE", kite_client=kite) or NIFTY_50_TOKEN
+    token = instrument_resolver.resolve_token("NIFTY", exchange="NSE", kite_client=kite)
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="NIFTY instrument token unavailable from Kite.",
+        )
     inst.instrument_token = token
     return inst, token
 

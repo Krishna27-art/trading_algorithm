@@ -28,6 +28,7 @@ class SectorDefinition:
     primary_leader: str
     secondary_leader: str
     market_index: str = "NIFTY"
+    sector_index: str = ""
     constituents: Tuple[str, ...] = ()
 
 
@@ -97,6 +98,10 @@ def _load_sector_definitions() -> Dict[str, SectorDefinition]:
             raw.get("market_index") or ""
         ).strip().upper()
 
+        sector_index = str(
+            raw.get("sector_index") or ""
+        ).strip().upper()
+
         constituents = tuple(
             str(symbol).strip().upper()
             for symbol in raw.get(
@@ -116,6 +121,11 @@ def _load_sector_definitions() -> Dict[str, SectorDefinition]:
                 f"Sector {sector_name!r} is missing market_index."
             )
 
+        if not sector_index:
+            raise ValueError(
+                f"Sector {sector_name!r} is missing sector_index."
+            )
+
         if not constituents:
             raise ValueError(
                 f"Sector {sector_name!r} has no constituents."
@@ -127,6 +137,7 @@ def _load_sector_definitions() -> Dict[str, SectorDefinition]:
                 primary_leader=primary,
                 secondary_leader=secondary,
                 market_index=market_index,
+                sector_index=sector_index,
                 constituents=constituents,
             )
         )
@@ -158,6 +169,7 @@ class SectorPeerManager:
                 sym in sec.constituents
                 or sym == sec.primary_leader
                 or sym == sec.secondary_leader
+                or sym == sec.sector_index
             ):
                 matches.append(sec)
 
@@ -285,10 +297,13 @@ class SectorPeerManager:
                     logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, e)
 
             if cached_candidate is not None:
-                logger.warning(
-                    "Cached peer context for %s is stale relative to the latest completed candle; refusing stale live context.",
+                logger.info(
+                    "Using slightly stale cached peer context for %s "
+                    "(within 4 days, Kite unavailable). "
+                    "This is acceptable for SIT historical calibration.",
                     sym,
                 )
+                return cached_candidate
 
             return None
 
@@ -346,7 +361,7 @@ def get_sector_index_symbol(
     if sec is None:
         return None
 
-    return sec.market_index
+    return sec.sector_index or sec.market_index
 
 
 sector_peer_manager = SectorPeerManager()

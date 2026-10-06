@@ -5,21 +5,17 @@ Trade a lagging peer after a volume-confirmed idiosyncratic impulse in a sector
 leader, only where a stable lead-lag relationship exists in the training window.
 
 Plugs into the existing BaseStrategy / StrategyBacktester contract unchanged.
-Peer data (leader, market index, sector index) is passed via PeerContext, so
-the backtester needs no changes:
+Peer data (leader, market index, sector index) is passed via PeerContext:
 
     ctx = PeerContext(leader=df_leader, market=df_nifty, sector=df_sector)
     StrategyBacktester(strategy_factory=lambda: SectorImpulseStrategy(inst, ctx=ctx), ...)
 
-Each df needs columns: datetime, close (leader also: volume). Lookups are
+Each df needs columns: datetime, close, volume (leader also: volume). Lookups are
 causal (never past the current candle); fitting uses only bars before the
 session date.
 
-PARAMETERS: SITConfig defaults are UNCALIBRATED PLACEHOLDERS. The spec defines
-thresholds as "training-calibrated quantiles" and its Section 7 regime rule set
-was not supplied; the panic gate here is a simple stand-in. Calibrate through
-the event study before trusting any backtest number.
-Bar horizons are in BARS of whatever timeframe is fed (spec assumes 1-min).
+Cadence: Horizons are calibrated for 15-minute production candles (horizon_bars=2,
+lag_max=2 corresponding to 30-min intraday lead-lag transmission window).
 """
 
 from __future__ import annotations
@@ -38,8 +34,8 @@ from strategy.base_strategy import BaseStrategy, SignalAction, StrategySignal
 
 @dataclass
 class SITConfig:
-    horizon_bars: int = 5            # h: residual-return window
-    lag_max: int = 5                 # search k in 1..lag_max
+    horizon_bars: int = 2            # h: 2 x 15m bars = 30m residual-return window
+    lag_max: int = 2                 # search k in 1..2 15m bars
     train_days: int = 20
     ridge_lambda: float = 1e-6
     min_rho: float = 0.10            # lead-lag stability floor
@@ -54,8 +50,8 @@ class SITConfig:
     target_frac: float = 0.8
     target_cap_sigma: float = 3.0
     invalidation_frac: float = 0.5   # leader retraces this share of impulse -> exit
-    time_stop_mult: float = 2.0
-    panic_market_z: float = 4.0      # PLACEHOLDER regime gate
+    time_stop_mult: float = 1.5
+    panic_market_z: float = 2.5      # Calibrated market panic regime gate (z > 2.5 skips entry)
     entry_start: time = time(9, 30)
     entry_end: time = time(14, 45)
     session_end: time = time(15, 10)

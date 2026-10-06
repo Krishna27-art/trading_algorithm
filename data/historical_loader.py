@@ -39,7 +39,7 @@ from __future__ import annotations
 import time as _time
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
@@ -400,7 +400,11 @@ class HistoricalDataLoader:
         logger.info(f"Saved {len(df)} validated bars and metadata to {csv_path}")
 
     @staticmethod
-    def load_cached_data_with_validation(csv_path: Path) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    def load_cached_data_with_validation(
+        csv_path: Path,
+        expected_interval: Optional[str] = None,
+        expected_token: Optional[int] = None,
+    ) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
         """Loads and validates a cached candle CSV, returning dataframe and metadata."""
         import json
         if not csv_path.exists():
@@ -419,6 +423,20 @@ class HistoricalDataLoader:
                     meta = json.load(f)
             except Exception as e:
                 logger.warning(f"Could not load metadata from {meta_path}: {e}")
+
+        if meta is not None:
+            if expected_interval is not None and "interval" in meta:
+                if str(meta.get("interval")) != str(expected_interval):
+                    raise ValueError(
+                        f"Cached interval mismatch for {csv_path}: "
+                        f"{meta.get('interval')!r} != {expected_interval!r}"
+                    )
+            if expected_token is not None and "instrument_token" in meta:
+                if int(meta.get("instrument_token")) != int(expected_token):
+                    raise ValueError(
+                        f"Cached instrument token mismatch for {csv_path}: "
+                        f"{meta.get('instrument_token')!r} != {expected_token!r}"
+                    )
 
         return df, meta
 
@@ -536,7 +554,11 @@ class HistoricalDataLoader:
                 try:
                     cached, _ = (
                         HistoricalDataLoader
-                        .load_cached_data_with_validation(cache_path)
+                        .load_cached_data_with_validation(
+                            cache_path,
+                            expected_interval=interval,
+                            expected_token=instrument_token,
+                        )
                     )
                     if not cached.empty:
                         cached["datetime"] = (
@@ -580,7 +602,11 @@ class HistoricalDataLoader:
             try:
                 cached, _ = (
                     HistoricalDataLoader
-                    .load_cached_data_with_validation(cache_path)
+                    .load_cached_data_with_validation(
+                        cache_path,
+                        expected_interval=interval,
+                        expected_token=instrument_token,
+                    )
                 )
 
                 if not cached.empty:

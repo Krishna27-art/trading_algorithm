@@ -4,6 +4,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 // `updatedAt` represents the source timestamp when one is available.
 // `fetchedAt` represents the browser/network receipt time.
 // They must never be treated as the same thing.
+//
+// Overlapping-request protection: each fetch increments a generation
+// counter before sending the request. Only the response whose generation
+// matches the current counter is accepted. An older in-flight response
+// that arrives after a newer one is silently discarded.
 export function usePolling(
   fetcher,
   {
@@ -21,13 +26,25 @@ export function usePolling(
   const fetcherRef = useRef(fetcher)
   fetcherRef.current = fetcher
 
+  // Monotonically increasing counter. Each request captures its value
+  // before awaiting so stale responses can be detected.
+  const generationRef = useRef(0)
+
   const run = useCallback(async ({ silent = false } = {}) => {
+    generationRef.current += 1
+    const myGeneration = generationRef.current
+
     if (!silent) {
       setStatus((s) => (s === 'success' ? 'success' : 'loading'))
     }
 
     try {
       const result = await fetcherRef.current()
+
+      // Discard this response if a newer request has already completed.
+      if (myGeneration !== generationRef.current) {
+        return
+      }
 
       const receivedAt = new Date()
 
@@ -50,6 +67,11 @@ export function usePolling(
         setUpdatedAt(null)
       }
     } catch (err) {
+      // Discard error from a stale request.
+      if (myGeneration !== generationRef.current) {
+        return
+      }
+
       setError(err)
 
       setStatus((prev) =>

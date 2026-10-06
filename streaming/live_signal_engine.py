@@ -40,6 +40,7 @@ from datetime import datetime, timedelta
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from data.time_utils import now_ist, now_ist_iso
@@ -261,19 +262,21 @@ class LiveSignalEngine:
     def _read_live_ltp(
         self,
         symbol: str,
+        fallback_price: Optional[float] = None,
+        fallback_ts: Optional[datetime] = None,
     ) -> Tuple[
         Optional[float],
         str,
         Optional[datetime],
     ]:
         """
-        Resolve only a FRESH real market LTP.
+        Resolve a verified real market LTP.
 
-        Allowed sources:
-            1. Fresh Level-5 snapshot LTP.
-            2. Fresh engine-captured tick LTP.
-
-        A completed candle close is NEVER used as current_ltp.
+        Resolution hierarchy:
+            1. Fresh Level-5 snapshot LTP (L5_STREAM).
+            2. Fresh engine-captured tick LTP (ENGINE_LIVE_CACHE).
+            3. Fresh LiveMarketState tick LTP (MARKET_STATE_LTP).
+            4. Completed candle close price (CANDLE_CLOSE).
         """
         state = live_market_state.get_symbol_state(
             symbol
@@ -349,8 +352,34 @@ class LiveSignalEngine:
                 )
 
         # --------------------------------------------------------------
-        # 3. No fresh market price
+        # 3. Fresh LiveMarketState tick
         # --------------------------------------------------------------
+        if (
+            state is not None
+            and self._valid_price(state.ltp)
+            and state.last_tick_time is not None
+        ):
+            st_ts = self._normalize_timestamp(state.last_tick_time)
+            if st_ts is not None:
+                age = (now - st_ts).total_seconds()
+                if 0 <= age <= self._max_ltp_age_seconds:
+                    return (
+                        float(state.ltp),
+                        "MARKET_STATE_LTP",
+                        st_ts,
+                    )
+
+        # --------------------------------------------------------------
+        # 4. Completed candle close price fallback
+        # --------------------------------------------------------------
+        if self._valid_price(fallback_price):
+            norm_fallback_ts = self._normalize_timestamp(fallback_ts) if fallback_ts else now
+            return (
+                float(fallback_price),
+                "CANDLE_CLOSE",
+                norm_fallback_ts,
+            )
+
         return (
             None,
             "LIVE_LTP_UNAVAILABLE",
@@ -516,8 +545,8 @@ class LiveSignalEngine:
 
                 if "vwap" not in data.columns:
                     data["vwap"] = pd.Series(
-                        [pd.NA] * len(data),
-                        dtype="Float64",
+                        [np.nan] * len(data),
+                        dtype="float64",
                     )
 
                 if existing is None or existing.isna().all() or not self._valid_price(existing.iloc[-1]):
@@ -531,6 +560,8 @@ class LiveSignalEngine:
             live_ltp, ltp_source, ltp_timestamp = (
                 self._read_live_ltp(
                     symbol=symbol,
+                    fallback_price=candle_close,
+                    fallback_ts=candle_timestamp,
                 )
             )
 
@@ -650,6 +681,20 @@ class LiveSignalEngine:
                 kite_client=kite_client,
             )
 
+            peer_ctx = None
+            try:
+                from data.sector_peer_manager import SectorPeerManager
+                peer_ctx = SectorPeerManager.build_peer_context(
+                    symbol,
+                    kite_client=kite_client,
+                )
+            except Exception as peer_exc:
+                logger.debug(
+                    "[LiveSignalEngine] Peer context construction skipped for %s: %s",
+                    symbol,
+                    peer_exc,
+                )
+
             # current_ltp is explicitly the freshest verified market price,
             # not the completed candle's close unless no fresher price exists.
             stock_metric = (
@@ -665,7 +710,7 @@ class LiveSignalEngine:
                 token=token,
                 stock_metric=stock_metric,
                 book_snapshot=book_snap,
-                peer_context=None,
+                peer_context=peer_ctx,
                 kite_client=kite_client,
                 ssf_strategy=ssf_strat,
                 live_ltp_by_symbol=live_ltp_by_symbol,

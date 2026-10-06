@@ -124,7 +124,7 @@ def stream_status():
 
 from datetime import datetime
 
-SIGNAL_DATA_STALE_AFTER_SECONDS = 1800
+SIGNAL_DATA_STALE_AFTER_SECONDS = 3600
 
 
 def _signal_is_fresh(
@@ -133,7 +133,7 @@ def _signal_is_fresh(
 ) -> bool:
     if not isinstance(sig, dict):
         return False
-    ts_str = sig.get("candle_timestamp") or sig.get("timestamp") or sig.get("ltp_timestamp")
+    ts_str = sig.get("timestamp") or sig.get("candle_timestamp") or sig.get("ltp_timestamp")
     if not ts_str:
         return False
     try:
@@ -167,8 +167,7 @@ def stream_signals():
     signals = {
         sym: sig
         for sym, sig in all_signals.items()
-        if _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
-        and _signal_is_fresh(sig, SIGNAL_DATA_STALE_AFTER_SECONDS)
+        if _signal_is_fresh(sig, SIGNAL_DATA_STALE_AFTER_SECONDS)
     }
 
     stream_fresh = _stream_feed_is_fresh(stream_stat)

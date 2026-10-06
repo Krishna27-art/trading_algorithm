@@ -1244,7 +1244,7 @@ class MultiSymbolCandleAggregator:
                 )
 
             if symbol is None:
-                logger.warning(
+                logger.debug(
                     "Ignoring tick for unsubscribed token %s",
                     token,
                 )

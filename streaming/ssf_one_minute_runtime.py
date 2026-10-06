@@ -58,6 +58,10 @@ class SSFOneMinuteRuntime:
         self._symbol_to_index = {}
         self._symbol_to_token = {}
 
+        # Always include the benchmark market index (NIFTY 50 / NIFTY)
+        self._index_symbols.add("NIFTY 50")
+        self._index_symbols.add("NIFTY")
+
         for sym in self._stock_symbols:
             idx = get_sector_index_symbol(sym)
 
@@ -65,7 +69,7 @@ class SSFOneMinuteRuntime:
                 self._symbol_to_index[sym] = idx
                 self._index_symbols.add(idx)
             else:
-                logger.warning(
+                logger.debug(
                     "[SSFOneMinuteRuntime] No authoritative sector index for %s; "
                     "sector context unavailable.",
                     sym,

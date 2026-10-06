@@ -2349,12 +2349,14 @@ class MarketStreamManager:
             last_tick_age_seconds = None
 
             if self.last_tick_time is not None:
-
+                ts = self.last_tick_time
+                if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+                    ts = ts.replace(tzinfo=None)
                 last_tick_age_seconds = max(
                     0.0,
                     (
-                        now_ist()
-                        - self.last_tick_time
+                        now_ist_naive()
+                        - ts
                     ).total_seconds(),
                 )
 

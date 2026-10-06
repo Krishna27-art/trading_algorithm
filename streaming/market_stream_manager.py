@@ -1715,10 +1715,10 @@ class MarketStreamManager:
                             # cash feed-freshness accounting.
                             accepted_tick_count += 1
 
-                        # NIFTY is also intentionally part of
-                        # token_to_symbol so it must enter the
-                        # normal 15-minute aggregation pipeline.
-                        if tok in self.token_to_symbol:
+                        if (
+                            self.aggregator is not None
+                            and tok in self.aggregator.token_to_symbol_map
+                        ):
                             cash_ticks.append(tick)
 
                         continue

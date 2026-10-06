@@ -122,9 +122,39 @@ def stream_status():
     return market_stream_manager.get_status()
 
 
+from datetime import datetime
+
+SIGNAL_DATA_STALE_AFTER_SECONDS = 1800
+
+
+def _signal_is_fresh(
+    sig: Dict[str, Any],
+    max_age_seconds: int = SIGNAL_DATA_STALE_AFTER_SECONDS,
+) -> bool:
+    if not isinstance(sig, dict):
+        return False
+    ts_str = sig.get("candle_timestamp") or sig.get("timestamp") or sig.get("ltp_timestamp")
+    if not ts_str:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+
+    now = now_ist_naive()
+    if ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+
+    if ts.date() != now.date():
+        return False
+
+    age = (now - ts).total_seconds()
+    return 0 <= age <= max_age_seconds
+
+
 @router.get("/api/stream/signals")
 def stream_signals():
-    """Return only signals backed by a fresh Kite stream and fresh symbol ticks."""
+    """Return only signals backed by a fresh Kite stream, fresh symbol ticks, and fresh signal timestamps."""
     stream_stat = _stream_status()
     stream_connected = stream_stat.get("connected") is True
 
@@ -138,6 +168,7 @@ def stream_signals():
         sym: sig
         for sym, sig in all_signals.items()
         if _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
+        and _signal_is_fresh(sig, SIGNAL_DATA_STALE_AFTER_SECONDS)
     }
 
     fresh = len(signals) > 0 and _stream_feed_is_fresh(stream_stat)
@@ -167,7 +198,8 @@ def stream_market():
     instruments = {}
     for sym, state in symbols_state.items():
         state_dict = state.to_dict()
-        state_dict["data_fresh"] = _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
+        is_fresh = _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
+        state_dict["data_fresh"] = is_fresh
 
         # Enrich with universe metadata and computed fields.
         record = _universe_map.get(sym)
@@ -194,11 +226,11 @@ def stream_market():
             change = round(ltp - open_price, 4)
             state_dict["change"] = change
             state_dict["change_pct"] = round(100.0 * change / open_price, 4)
-            state_dict["status"] = "LIVE"
+            state_dict["status"] = "LIVE" if is_fresh else "STALE"
         else:
             state_dict["change"] = None
             state_dict["change_pct"] = None
-            state_dict["status"] = "DATA_UNAVAILABLE" if ltp is None else "LIVE"
+            state_dict["status"] = "DATA_UNAVAILABLE" if ltp is None else ("LIVE" if is_fresh else "STALE")
 
         instruments[sym] = state_dict
 

@@ -186,16 +186,30 @@ def get_system_health() -> Dict[str, Any]:
 
     if not kite_conn:
         overall = "DISCONNECTED"
-    elif engine_state == "ERROR":
-        overall = "ERROR"
-    elif stream_class == "ERROR":
-        overall = "ERROR"
-    elif market_feed_fresh:
-        overall = "LIVE"
-    elif stream_status.get("connected") is True:
-        overall = "STALE"
+        risk_state = "NOT_APPLICABLE"
     else:
-        overall = "STANDBY"  # authenticated, stream not started
+        try:
+            from strategy.prediction_service import PredictionService
+            test_ok, _ = PredictionService._validate_signal_risk("LONG", 100.0, 95.0, 105.0)
+            test_rej, _ = PredictionService._validate_signal_risk("LONG", 100.0, 105.0, 110.0)
+            if test_ok and not test_rej:
+                risk_state = "ACTIVE" if (market_feed_fresh or stream_status.get("connected") is True) else "STANDBY"
+            else:
+                risk_state = "DEGRADED"
+        except Exception:
+            logger.exception("component=system.health check=risk_engine")
+            risk_state = "ERROR"
+
+        if engine_state == "ERROR":
+            overall = "ERROR"
+        elif stream_class == "ERROR":
+            overall = "ERROR"
+        elif market_feed_fresh:
+            overall = "LIVE"
+        elif stream_status.get("connected") is True:
+            overall = "STALE"
+        else:
+            overall = "STANDBY"  # authenticated, stream not started
 
     return {
         "backend": "ONLINE",
@@ -215,8 +229,7 @@ def get_system_health() -> Dict[str, Any]:
         "strategy_engine": engine_state,
         "signal_count": prediction_count,
         "active_signal_count": producing_signal_count,
-        # Pre-signal geometry risk validator is active in PredictionService.
-        "risk_engine": "GEOMETRY_VALIDATION_ONLY",
+        "risk_engine": risk_state,
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
         "overall_status": overall,
         "timestamp": now_ist_iso(),

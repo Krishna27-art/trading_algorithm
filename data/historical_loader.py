@@ -39,6 +39,7 @@ from __future__ import annotations
 import time as _time
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+import threading
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
@@ -107,6 +108,34 @@ class SupportsHistoricalCandles(Protocol):
         continuous: bool = False,
         oi: bool = False,
     ) -> List[dict]: ...
+
+
+class HistoricalRateLimiter:
+    """
+    Process-wide thread-safe rate limiter for Kite Historical API calls.
+    Zerodha Kite enforces a maximum rate of 3 requests per second for historical data.
+    To avoid 429 rate limit errors across concurrent workers, we enforce a minimum
+    interval of 0.35s between requests (~2.85 req/sec < 3.0 req/sec).
+    """
+
+    def __init__(self, min_interval_seconds: float = 0.35):
+        self._min_interval = min_interval_seconds
+        self._lock = threading.Lock()
+        self._last_call_time: float = 0.0
+
+    def wait_turn(self) -> None:
+        with self._lock:
+            now = _time.time()
+            elapsed = now - self._last_call_time
+            if elapsed < self._min_interval:
+                sleep_needed = self._min_interval - elapsed
+                _time.sleep(sleep_needed)
+                self._last_call_time = _time.time()
+            else:
+                self._last_call_time = now
+
+
+global_historical_rate_limiter = HistoricalRateLimiter(min_interval_seconds=0.35)
 
 
 class HistoricalDataLoader:
@@ -249,6 +278,7 @@ class HistoricalDataLoader:
 
             logger.info(f"Fetching {interval} candles for token {instrument_token}: "
                         f"{chunk_start} -> {chunk_end}")
+            global_historical_rate_limiter.wait_turn()
             try:
                 if hasattr(kite_client, "get_historical_candles"):
                     candles = kite_client.get_historical_candles(

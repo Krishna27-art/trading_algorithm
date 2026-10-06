@@ -11,38 +11,46 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter
 
+from broker.kite_adapter import get_active_kite
 from config.universe import StockUniverse
-from data.time_utils import now_ist_iso
+from data.time_utils import now_ist_iso, now_ist_naive
 from streaming.live_market_state import live_market_state
+from streaming.market_stream_manager import market_stream_manager
 
 logger = logging.getLogger("backend_api.market")
 
 router = APIRouter()
 
-# Load universe metadata once at module level.
-# Failures here are allowed to propagate — if the universe file is missing
-# the whole backend cannot function correctly anyway.
 _universe = StockUniverse()
 _universe_map: Dict[str, Any] = {
     record.symbol: record
     for record in _universe.all_stocks
 }
 
+STREAM_DATA_STALE_AFTER_SECONDS = 120
 
-def _enrich(state_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Add fields required by StocksPage.jsx that are not emitted by
-    LiveSymbolState.to_dict().
 
-    Fields added:
-        name          — company name from the universe JSON
-        category      — large / mid / small from the universe JSON
-        rank          — market_cap_rank from the universe JSON
-        open_price    — alias of state_dict["open"] for frontend field name
-        change        — ltp - open_price (None when data not yet available)
-        change_pct    — 100 * change / open_price (None when unavailable)
-        status        — "LIVE" when ltp is present, "DATA_UNAVAILABLE" otherwise
-    """
+def _symbol_feed_is_fresh(
+    symbol: str,
+    stream_connected: bool,
+    max_age_seconds: int = STREAM_DATA_STALE_AFTER_SECONDS,
+) -> bool:
+    if not stream_connected:
+        return False
+    state = live_market_state.get_symbol_state(symbol)
+    if state is None:
+        return False
+    ts = state.last_tick_time
+    if ts is None:
+        return False
+    now = now_ist_naive()
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+    age = (now - ts).total_seconds()
+    return 0 <= age <= max_age_seconds
+
+
+def _enrich(state_dict: Dict[str, Any], stream_connected: bool) -> Dict[str, Any]:
     symbol = state_dict.get("symbol", "")
     record = _universe_map.get(symbol)
 
@@ -57,8 +65,10 @@ def _enrich(state_dict: Dict[str, Any]) -> Dict[str, Any]:
 
     ltp: Optional[float] = state_dict.get("ltp")
     open_price: Optional[float] = state_dict.get("open")
-
     state_dict["open_price"] = open_price
+
+    is_fresh = _symbol_feed_is_fresh(symbol, stream_connected)
+    state_dict["data_fresh"] = is_fresh
 
     if (
         ltp is not None
@@ -68,34 +78,71 @@ def _enrich(state_dict: Dict[str, Any]) -> Dict[str, Any]:
         and open_price > 0
     ):
         change = round(ltp - open_price, 4)
-        change_pct = round(100.0 * change / open_price, 4)
         state_dict["change"] = change
-        state_dict["change_pct"] = change_pct
-        state_dict["status"] = "LIVE"
+        state_dict["change_pct"] = round(100.0 * change / open_price, 4)
+        state_dict["status"] = "LIVE" if is_fresh else "STALE"
     else:
         state_dict["change"] = None
         state_dict["change_pct"] = None
-        state_dict["status"] = "DATA_UNAVAILABLE" if ltp is None else "LIVE"
+        state_dict["status"] = "DATA_UNAVAILABLE" if ltp is None else ("LIVE" if is_fresh else "STALE")
 
     return state_dict
 
 
 @router.get("/api/market/prices")
 def get_market_prices() -> Dict[str, Any]:
-    """Read-only live market prices for the stock universe served from LiveMarketState."""
+    kite_client = get_active_kite()
+    if kite_client is None:
+        return {
+            "status": "AUTH_REQUIRED",
+            "market_data_status": "UNAVAILABLE",
+            "data_source": "NONE",
+            "stream_connected": False,
+            "data_fresh": False,
+            "count": 0,
+            "timestamp": now_ist_iso(),
+            "stocks": [],
+        }
+
+    try:
+        stream_stat = market_stream_manager.get_status() or {}
+    except Exception:
+        logger.exception("component=market_api check=stream_status")
+        stream_stat = {}
+
+    stream_connected = stream_stat.get("connected") is True
+    age = stream_stat.get("last_tick_age_seconds")
+    stream_fresh = (
+        stream_connected
+        and isinstance(age, (int, float))
+        and 0 <= age <= STREAM_DATA_STALE_AFTER_SECONDS
+    )
+
+    data_source = (
+        "KITE_STREAM"
+        if (stream_connected and stream_fresh)
+        else ("STALE_STREAM" if stream_connected else "DISCONNECTED")
+    )
+    market_data_status = (
+        "AVAILABLE"
+        if (stream_connected and stream_fresh)
+        else ("STALE" if stream_connected else "UNAVAILABLE")
+    )
+
     states = live_market_state.get_all_symbols_state()
 
     stocks_list = [
-        _enrich(state.to_dict())
+        _enrich(state.to_dict(), stream_connected)
         for state in states.values()
     ]
 
     return {
         "status": "success",
-        "data_source": "KITE_STREAM",
+        "market_data_status": market_data_status,
+        "data_source": data_source,
+        "stream_connected": stream_connected,
+        "data_fresh": stream_fresh,
         "count": len(stocks_list),
         "timestamp": now_ist_iso(),
         "stocks": stocks_list,
     }
-
-

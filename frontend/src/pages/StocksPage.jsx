@@ -69,7 +69,8 @@ export default function StocksPage({ isAuthenticated }) {
     let unavailable = 0
 
     stocks.forEach((s) => {
-      if (s.status === 'DATA_UNAVAILABLE' || s.ltp === null) {
+      const isFresh = s.status === 'LIVE' && s.ltp !== null && s.data_fresh === true
+      if (!isFresh) {
         unavailable++
       } else if (s.change > 0) {
         advances++
@@ -249,7 +250,7 @@ export default function StocksPage({ isAuthenticated }) {
               </thead>
               <tbody className="divide-y divide-[var(--border)] font-num">
                 {filteredStocks.map((stock) => {
-                  const isAvailable = stock.status === 'LIVE' && stock.ltp !== null
+                  const isAvailable = stock.status === 'LIVE' && stock.ltp !== null && stock.data_fresh === true
                   const isPositive = isAvailable && stock.change > 0
                   const isNegative = isAvailable && stock.change < 0
                   const pnlClass = isPositive
@@ -334,6 +335,8 @@ export default function StocksPage({ isAuthenticated }) {
                       <td className="py-2.5 pl-2 text-center font-sans">
                         {isAvailable ? (
                           <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" title="Live Kite Quote" />
+                        ) : stock.status === 'STALE' || (stock.ltp !== null && stock.data_fresh === false) ? (
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" title="Stale Quote (Delayed/Inactive Feed)" />
                         ) : (
                           <span className="inline-block w-2 h-2 rounded-full bg-zinc-600" title="Data Unavailable" />
                         )}

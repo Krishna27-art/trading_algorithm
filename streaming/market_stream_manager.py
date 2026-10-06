@@ -121,6 +121,8 @@ class MarketStreamManager:
 
         self.futures_token_to_symbol: Dict[int, str] = {}
         self.index_token_to_symbol: Dict[int, str] = {}
+        self.auxiliary_context_status: str = "NOT_STARTED"
+        self.auxiliary_errors: List[str] = []
         self.scanner_snapshot: Optional[Any] = None
 
         # --------------------------------------------------------------
@@ -1155,6 +1157,9 @@ class MarketStreamManager:
 
             self._drain_history_refresh_queue()
 
+            self.auxiliary_context_status = "INITIALIZING"
+            self.auxiliary_errors.clear()
+
             # ----------------------------------------------------------
             # 1. Resolve authenticated Kite client.
             # ----------------------------------------------------------
@@ -1903,8 +1908,14 @@ class MarketStreamManager:
                                         new_futures[ft] = sym
                                 except (TypeError, ValueError):
                                     pass
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                "[MarketStreamManager] Failed resolving future for %s: %s",
+                                sym,
+                                e,
+                            )
+                            with self._lock:
+                                self.auxiliary_errors.append(f"future:{sym}:{type(e).__name__}")
 
                         try:
                             idx_sym = get_sector_index_symbol(sym)
@@ -1914,8 +1925,14 @@ class MarketStreamManager:
                                 )
                                 if idx_tok:
                                     new_index[int(idx_tok)] = idx_sym
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                "[MarketStreamManager] Failed resolving sector index for %s: %s",
+                                sym,
+                                e,
+                            )
+                            with self._lock:
+                                self.auxiliary_errors.append(f"index:{sym}:{type(e).__name__}")
 
                     # NIFTY benchmark for CRSD.
                     try:
@@ -1925,14 +1942,23 @@ class MarketStreamManager:
                         )
                         if nifty_tok:
                             new_index[int(nifty_tok)] = "NIFTY"
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "[MarketStreamManager] Failed resolving NIFTY benchmark token: %s",
+                            e,
+                        )
+                        with self._lock:
+                            self.auxiliary_errors.append(f"nifty:{type(e).__name__}")
 
                     with self._lock:
                         if gen != self._stream_generation:
                             return
                         self.futures_token_to_symbol.update(new_futures)
                         self.index_token_to_symbol.update(new_index)
+                        if self.auxiliary_errors:
+                            self.auxiliary_context_status = "PARTIAL" if (new_futures or new_index) else "UNAVAILABLE"
+                        else:
+                            self.auxiliary_context_status = "READY"
 
                     aux_tokens = list(
                         dict.fromkeys(
@@ -1958,10 +1984,13 @@ class MarketStreamManager:
                                 "[MarketStreamManager] Failed to subscribe aux tokens."
                             )
 
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "[MarketStreamManager] Aux-token resolution background thread failed."
                     )
+                    with self._lock:
+                        self.auxiliary_context_status = "FAILED"
+                        self.auxiliary_errors.append(f"thread:{type(exc).__name__}")
 
             def on_connect(
                 ws,
@@ -2203,6 +2232,9 @@ class MarketStreamManager:
 
         self._drain_history_refresh_queue()
 
+        self.auxiliary_context_status = "STOPPED"
+        self.auxiliary_errors.clear()
+
         # Stop SSF runtime safely.
         try:
             ssf_one_minute_runtime.stop()
@@ -2387,6 +2419,8 @@ class MarketStreamManager:
 
                 "history_ready_count": len(self._history_ready_symbols),
                 "history_refresh_queue_size": self._history_refresh_queue.qsize(),
+                "auxiliary_context_status": self.auxiliary_context_status,
+                "auxiliary_errors_count": len(self.auxiliary_errors),
             }
 
 

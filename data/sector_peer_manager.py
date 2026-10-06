@@ -241,7 +241,6 @@ class SectorPeerManager:
                 )
             )
 
-            cached_candidate = None
             c_file = c_dir / f"{sym}_15m.csv"
             if c_file.exists():
                 try:
@@ -250,8 +249,6 @@ class SectorPeerManager:
                         df["datetime"] = pd.to_datetime(df["datetime"])
                         if latest_completed is None or df["datetime"].max() >= latest_completed:
                             return df
-                        if df["datetime"].max().date() >= (now_ist_naive().date() - timedelta(days=4)):
-                            cached_candidate = df
                 except Exception as e:
                     logger.debug("Failed to load cached 15m data for %s: %s", sym, e)
 
@@ -270,8 +267,6 @@ class SectorPeerManager:
                                 df["datetime"] = pd.to_datetime(df["datetime"])
                                 if latest_completed is None or df["datetime"].max() >= latest_completed:
                                     return df
-                                if df["datetime"].max().date() >= (now_ist_naive().date() - timedelta(days=4)):
-                                    cached_candidate = df
                         except Exception as exc:
                             logger.debug("Failed to load NIFTY cache %s: %s", alt_file, exc)
 
@@ -295,15 +290,6 @@ class SectorPeerManager:
                             return df
                 except Exception as e:
                     logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, e)
-
-            if cached_candidate is not None:
-                logger.info(
-                    "Using slightly stale cached peer context for %s "
-                    "(within 4 days, Kite unavailable). "
-                    "This is acceptable for SIT historical calibration.",
-                    sym,
-                )
-                return cached_candidate
 
             return None
 

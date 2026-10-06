@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, Set
 
 from broker.kite_adapter import get_active_kite
 from config.settings import settings
@@ -51,6 +51,16 @@ class DailyHistoryContextWarmer:
         self._last_target_date: Optional[
             date
         ] = None
+
+        # Symbols that have actually succeeded for a given target date.
+        # Only this date's entry is kept at a time (pruned on completion
+        # or when the target date changes), so a symbol that failed
+        # remains eligible for retry on the next refresh pass instead of
+        # being silently treated as done.
+        self._succeeded_symbols_by_date: dict[
+            date,
+            Set[str],
+        ] = {}
 
     @staticmethod
     def _latest_completed_trading_day(
@@ -177,6 +187,28 @@ class DailyHistoryContextWarmer:
                 in scanner.universe.all_stocks
             ]
 
+            required_symbols: Set[str] = set(symbols)
+
+            # Drop any bookkeeping left over from a different target
+            # date, then only (re)attempt symbols that have not yet
+            # actually succeeded for THIS target date.
+            if (
+                self._succeeded_symbols_by_date
+                and target_date not in self._succeeded_symbols_by_date
+            ):
+                self._succeeded_symbols_by_date = {}
+
+            already_succeeded = self._succeeded_symbols_by_date.get(
+                target_date,
+                set(),
+            )
+
+            symbols_to_fetch = [
+                symbol
+                for symbol in symbols
+                if symbol not in already_succeeded
+            ]
+
             history_start = (
                 target_date
                 - timedelta(days=40)
@@ -184,16 +216,19 @@ class DailyHistoryContextWarmer:
 
             success_count = 0
             failed_count = 0
+            newly_succeeded: Set[str] = set()
 
             logger.info(
                 "Starting daily history context refresh "
-                "for %d stocks: %s -> %s",
+                "for %d/%d stocks (retrying previously failed/unattempted "
+                "symbols only): %s -> %s",
+                len(symbols_to_fetch),
                 len(symbols),
                 history_start,
                 target_date,
             )
 
-            for symbol in symbols:
+            for symbol in symbols_to_fetch:
                 if self._stop_event.is_set():
                     break
 
@@ -231,6 +266,7 @@ class DailyHistoryContextWarmer:
                     )
 
                     success_count += 1
+                    newly_succeeded.add(symbol)
 
                 except Exception as exc:
                     failed_count += 1
@@ -242,28 +278,37 @@ class DailyHistoryContextWarmer:
                         exc,
                     )
 
-            if not self._stop_event.is_set():
-                # Only mark this target_date as complete when every stock
-                # succeeded. If any stock failed, leave _last_target_date
-                # unchanged so the next warmer cycle retries the full set.
-                if failed_count == 0:
-                    self._last_target_date = (
-                        target_date
-                    )
-                else:
-                    logger.warning(
-                        "Daily history refresh had %d failure(s) for %s; "
-                        "will retry on next cycle.",
-                        failed_count,
-                        target_date,
-                    )
+            succeeded_so_far = (
+                already_succeeded | newly_succeeded
+            )
+            self._succeeded_symbols_by_date = {
+                target_date: succeeded_so_far
+            }
+
+            # Only mark this target date complete once every required
+            # symbol in the universe has actually succeeded. Symbols
+            # that failed (or were never attempted because the run was
+            # stopped) remain outside `succeeded_so_far` and are
+            # therefore retried on the next refresh pass instead of
+            # being silently treated as done.
+            is_fully_refreshed = (
+                not self._stop_event.is_set()
+                and required_symbols.issubset(succeeded_so_far)
+            )
+
+            if is_fully_refreshed:
+                self._last_target_date = target_date
 
             logger.info(
-                "Daily history context refresh complete: "
-                "success=%d failed=%d target=%s",
+                "Daily history context refresh pass complete: "
+                "newly_succeeded=%d failed=%d total_succeeded=%d/%d "
+                "target=%s complete=%s",
                 success_count,
                 failed_count,
+                len(succeeded_so_far),
+                len(required_symbols),
                 target_date,
+                is_fully_refreshed,
             )
 
         finally:

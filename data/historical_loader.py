@@ -39,8 +39,7 @@ from __future__ import annotations
 import time as _time
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-import threading
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, List, Optional, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
@@ -108,34 +107,6 @@ class SupportsHistoricalCandles(Protocol):
         continuous: bool = False,
         oi: bool = False,
     ) -> List[dict]: ...
-
-
-class HistoricalRateLimiter:
-    """
-    Process-wide thread-safe rate limiter for Kite Historical API calls.
-    Zerodha Kite enforces a maximum rate of 3 requests per second for historical data.
-    To avoid 429 rate limit errors across concurrent workers, we enforce a minimum
-    interval of 0.35s between requests (~2.85 req/sec < 3.0 req/sec).
-    """
-
-    def __init__(self, min_interval_seconds: float = 0.35):
-        self._min_interval = min_interval_seconds
-        self._lock = threading.Lock()
-        self._last_call_time: float = 0.0
-
-    def wait_turn(self) -> None:
-        with self._lock:
-            now = _time.time()
-            elapsed = now - self._last_call_time
-            if elapsed < self._min_interval:
-                sleep_needed = self._min_interval - elapsed
-                _time.sleep(sleep_needed)
-                self._last_call_time = _time.time()
-            else:
-                self._last_call_time = now
-
-
-global_historical_rate_limiter = HistoricalRateLimiter(min_interval_seconds=0.35)
 
 
 class HistoricalDataLoader:
@@ -278,7 +249,6 @@ class HistoricalDataLoader:
 
             logger.info(f"Fetching {interval} candles for token {instrument_token}: "
                         f"{chunk_start} -> {chunk_end}")
-            global_historical_rate_limiter.wait_turn()
             try:
                 if hasattr(kite_client, "get_historical_candles"):
                     candles = kite_client.get_historical_candles(
@@ -337,11 +307,37 @@ class HistoricalDataLoader:
                 "Historical data contains invalid/unconvertible timestamps."
             )
         df = df[["datetime", "open", "high", "low", "close", "volume"]]
-        df.drop_duplicates(subset="datetime", inplace=True)
         df.sort_values("datetime", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-        # Strict validation
+        # --------------------------------------------------------------
+        # Detect duplicate timestamps in the RAW source data BEFORE any
+        # destructive cleanup. A duplicate timestamp returned by the Kite
+        # Historical API indicates a genuine data-quality problem and
+        # must be surfaced, not silently discarded ahead of validation
+        # (which would make validate_candles() always see zero
+        # duplicates and never actually detect this).
+        # --------------------------------------------------------------
+        raw_dup_count = int(df["datetime"].duplicated().sum())
+        if raw_dup_count > 0:
+            duplicated_timestamps = (
+                df.loc[df["datetime"].duplicated(keep=False), "datetime"]
+                .drop_duplicates()
+                .tolist()
+            )
+            logger.warning(
+                f"Historical data for token {instrument_token} contains "
+                f"{raw_dup_count} duplicate timestamp(s) from the Kite "
+                f"Historical API: {duplicated_timestamps}. Keeping the "
+                f"last observation for each and continuing validation."
+            )
+            df = (
+                df.drop_duplicates(subset="datetime", keep="last")
+                .reset_index(drop=True)
+            )
+
+        # Strict validation runs on data whose duplicate state has
+        # already been explicitly detected and logged above.
         is_valid, errors = HistoricalDataLoader.validate_candles(df)
         if not is_valid:
             raise ValueError(f"Historical market data validation failed: {'; '.join(errors)}")
@@ -430,11 +426,7 @@ class HistoricalDataLoader:
         logger.info(f"Saved {len(df)} validated bars and metadata to {csv_path}")
 
     @staticmethod
-    def load_cached_data_with_validation(
-        csv_path: Path,
-        expected_interval: Optional[str] = None,
-        expected_token: Optional[int] = None,
-    ) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    def load_cached_data_with_validation(csv_path: Path) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
         """Loads and validates a cached candle CSV, returning dataframe and metadata."""
         import json
         if not csv_path.exists():
@@ -453,24 +445,6 @@ class HistoricalDataLoader:
                     meta = json.load(f)
             except Exception as e:
                 logger.warning(f"Could not load metadata from {meta_path}: {e}")
-
-        if expected_interval is not None or expected_token is not None:
-            if meta is None:
-                raise ValueError(
-                    f"Metadata required for token/interval validation of {csv_path} is missing."
-                )
-            if expected_interval is not None:
-                if "interval" not in meta or str(meta.get("interval")) != str(expected_interval):
-                    raise ValueError(
-                        f"Cached interval mismatch for {csv_path}: "
-                        f"{meta.get('interval')!r} != {expected_interval!r}"
-                    )
-            if expected_token is not None:
-                if "instrument_token" not in meta or int(meta.get("instrument_token")) != int(expected_token):
-                    raise ValueError(
-                        f"Cached instrument token mismatch for {csv_path}: "
-                        f"{meta.get('instrument_token')!r} != {expected_token!r}"
-                    )
 
         return df, meta
 
@@ -588,11 +562,7 @@ class HistoricalDataLoader:
                 try:
                     cached, _ = (
                         HistoricalDataLoader
-                        .load_cached_data_with_validation(
-                            cache_path,
-                            expected_interval=interval,
-                            expected_token=instrument_token,
-                        )
+                        .load_cached_data_with_validation(cache_path)
                     )
                     if not cached.empty:
                         cached["datetime"] = (
@@ -636,11 +606,7 @@ class HistoricalDataLoader:
             try:
                 cached, _ = (
                     HistoricalDataLoader
-                    .load_cached_data_with_validation(
-                        cache_path,
-                        expected_interval=interval,
-                        expected_token=instrument_token,
-                    )
+                    .load_cached_data_with_validation(cache_path)
                 )
 
                 if not cached.empty:

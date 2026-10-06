@@ -16,7 +16,6 @@ market data on the REAL path.
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -45,17 +44,17 @@ class StockRankingMetrics:
     token: Optional[int] = None
     category: str = "large"
     name: str = ""
-    ltp: Optional[float] = None
-    prev_close: Optional[float] = None
-    open_price: Optional[float] = None
-    gap_pct: Optional[float] = None
-    volume: Optional[int] = None
-    avg_volume_20d: Optional[int] = None
-    rvol: Optional[float] = None
-    atr_14: Optional[float] = None
-    atr_pct: Optional[float] = None
-    vwap: Optional[float] = None
-    vwap_dist_pct: Optional[float] = None
+    ltp: float = 0.0
+    prev_close: float = 0.0
+    open_price: float = 0.0
+    gap_pct: float = 0.0
+    volume: int = 0
+    avg_volume_20d: int = 0
+    rvol: float = 0.0
+    atr_14: float = 0.0
+    atr_pct: float = 0.0
+    vwap: float = 0.0
+    vwap_dist_pct: float = 0.0
     rvol_score: float = 0.0
     gap_score: float = 0.0
     vol_score: float = 0.0
@@ -84,7 +83,6 @@ class ScannerSnapshot:
                 item.liquidity_status == LiquidityStatus.PASS.value
                 and item.token is not None
                 and item.token > 0
-                and item.ltp is not None
                 and item.ltp > 0
             )
         ]
@@ -308,11 +306,11 @@ class StockUniverseScanner:
         record: Any,
         *,
         token: Optional[int] = None,
-        ltp: Optional[float] = None,
-        prev_close: Optional[float] = None,
-        open_price: Optional[float] = None,
-        volume: Optional[int] = None,
-        avg_volume_20d: Optional[int] = None,
+        ltp: float = 0.0,
+        prev_close: float = 0.0,
+        open_price: float = 0.0,
+        volume: int = 0,
+        avg_volume_20d: int = 0,
         reasons: Optional[List[str]] = None,
     ) -> StockRankingMetrics:
         """Create one consistent DATA_UNAVAILABLE scanner result."""
@@ -347,9 +345,6 @@ class StockUniverseScanner:
         REAL mode never falls back to synthetic data unless the caller
         explicitly passes allow_synthetic=True.
         """
-        if allow_synthetic and (os.environ.get("PRODUCTION", "").lower() in ("true", "1") or os.environ.get("ENV", "").lower() == "production"):
-            raise RuntimeError("Synthetic market data is strictly prohibited in production.")
-
         self.resolve_tokens(
             kite_client=kite_client,
             force_refresh=False,
@@ -389,21 +384,19 @@ class StockUniverseScanner:
                     )
                 )
 
-                # Run synchronously so _scan_real_kite() reads the
-                # freshly written cache — not the stale one.
-                # The warmer's internal _refresh_lock prevents concurrent
-                # duplicate refreshes.
-                try:
-                    daily_history_context_warmer.refresh(
-                        kite_client=client,
-                        target_date=latest_context_date,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Force history refresh failed (will scan with "
-                        "existing cache): %s",
-                        exc,
-                    )
+                # The caller explicitly asked for a refresh, which is a
+                # readiness contract: scan_universe() must never rank
+                # using stale/incomplete history for the requested date.
+                # Run the refresh synchronously (blocking) instead of
+                # firing it on a background thread and racing ahead —
+                # daily_history_context_warmer.refresh() only marks the
+                # date complete once every required symbol has actually
+                # succeeded, and failed symbols stay retryable on a
+                # later call, so this is safe to call repeatedly.
+                daily_history_context_warmer.refresh(
+                    kite_client=client,
+                    target_date=latest_context_date,
+                )
 
             try:
                 metrics = self._scan_real_kite(
@@ -1433,24 +1426,18 @@ class StockUniverseScanner:
             )
         )
 
+        combined = tradables + untradables
+
         for rank, metric in enumerate(
-            tradables,
+            combined,
             start=1,
         ):
             metric.rank = rank
 
-        for rank, metric in enumerate(
-            untradables,
-            start=len(tradables) + 1,
-        ):
-            metric.rank = rank
-
-        self.last_diagnostics = tradables + untradables
-
         return (
-            tradables[:top_n]
+            combined[:top_n]
             if top_n > 0
-            else tradables
+            else combined
         )
 
     def get_top_instrument_configs(

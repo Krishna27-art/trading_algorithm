@@ -102,17 +102,25 @@ class MarketStreamManager:
         self.tick_count: int = 0
         self.candle_count: int = 0
 
-        # Updated ONLY from cash stock ticks, never from futures/index.
-        # Used for per-stream freshness; per-symbol freshness lives in
-        # LiveSymbolState.last_tick_time.
+        # This is intentionally the server-side receipt timestamp.
+        # It reflects ANY accepted tick (cash, futures, or index) and is
+        # used only as a general "is the socket alive" diagnostic.
         self.last_tick_time: Optional[datetime] = None
 
-        # Set to True once on_connect fires for the first time per start_stream()
-        # call. Subsequent on_connect calls are reconnects.
-        self._ever_connected: bool = False
+        # Freshness of the REQUIRED stock-equity feed specifically.
+        # Only updated from actual cash-stock ticks (never futures or
+        # sector/index ticks). This is the authoritative field for
+        # "is the stock universe data fresh" — futures/index activity
+        # must never be able to make stale equity data look fresh.
+        self.last_equity_tick_time: Optional[datetime] = None
 
         self.last_connect_time: Optional[datetime] = None
         self.last_disconnect_time: Optional[datetime] = None
+
+        # Set on disconnect, consumed on the next successful connect.
+        # Marks that candle/volume state may span a connection gap and
+        # must be recovered before new ticks are trusted.
+        self._awaiting_gap_recovery: bool = False
 
         self.last_error: Optional[str] = None
 
@@ -121,8 +129,6 @@ class MarketStreamManager:
 
         self.futures_token_to_symbol: Dict[int, str] = {}
         self.index_token_to_symbol: Dict[int, str] = {}
-        self.auxiliary_context_status: str = "NOT_STARTED"
-        self.auxiliary_errors: List[str] = []
         self.scanner_snapshot: Optional[Any] = None
 
         # --------------------------------------------------------------
@@ -210,11 +216,11 @@ class MarketStreamManager:
         ] = None
 
         # --------------------------------------------------------------
-        # SSF L5 BOOK COALESCING AND WORKER
+        # SSF L5 BOOK QUEUE AND WORKER
         # --------------------------------------------------------------
-        self._latest_books: Dict[str, Any] = {}
-        self._pending_book_symbols: set[str] = set()
-        self._book_cond = threading.Condition()
+        self._book_queue = queue.Queue(
+            maxsize=L5_QUEUE_SIZE
+        )
 
         self._book_worker_started = False
         self._book_worker_thread: Optional[
@@ -537,17 +543,18 @@ class MarketStreamManager:
         )
 
         try:
-            df = (
-                HistoricalDataLoader
-                .load_or_refresh_intraday_cache(
-                    kite_client=kite_client,
-                    instrument_token=int(token),
-                    cache_path=cache_path,
-                    now=now_ist_naive(),
-                    lookback_days=45,
-                    interval="15minute",
+            with self._history_io_lock:
+                df = (
+                    HistoricalDataLoader
+                    .load_or_refresh_intraday_cache(
+                        kite_client=kite_client,
+                        instrument_token=int(token),
+                        cache_path=cache_path,
+                        now=now_ist_naive(),
+                        lookback_days=45,
+                        interval="15minute",
+                    )
                 )
-            )
 
             if generation is not None:
                 with self._lock:
@@ -710,22 +717,23 @@ class MarketStreamManager:
 
     def _book_worker_loop(self) -> None:
         while True:
-            with self._book_cond:
-                while not self._pending_book_symbols:
-                    self._book_cond.wait()
-                symbol = self._pending_book_symbols.pop()
-                snapshot = self._latest_books.get(symbol)
+            item = self._book_queue.get()
 
-            if snapshot is not None:
-                try:
-                    live_signal_engine.on_book_update(
-                        symbol=symbol,
-                        snapshot=snapshot,
-                    )
-                except Exception:
-                    logger.exception(
-                        "[MarketStreamManager] SSF L5 worker failed."
-                    )
+            try:
+                symbol, snapshot = item
+
+                live_signal_engine.on_book_update(
+                    symbol=symbol,
+                    snapshot=snapshot,
+                )
+
+            except Exception:
+                logger.exception(
+                    "[MarketStreamManager] SSF L5 worker failed."
+                )
+
+            finally:
+                self._book_queue.task_done()
 
     def _seed_ssf_history_background(
         self,
@@ -1157,9 +1165,6 @@ class MarketStreamManager:
 
             self._drain_history_refresh_queue()
 
-            self.auxiliary_context_status = "INITIALIZING"
-            self.auxiliary_errors.clear()
-
             # ----------------------------------------------------------
             # 1. Resolve authenticated Kite client.
             # ----------------------------------------------------------
@@ -1310,25 +1315,160 @@ class MarketStreamManager:
             )
 
             # ----------------------------------------------------------
-            # 4 & 5. Futures/sector tokens resolved in background.
-            #
-            # Resolving 700 futures + sector-index tokens synchronously
-            # requires hundreds of serial Kite API calls and blocks startup
-            # for many seconds. We start with cash-only subscriptions and
-            # subscribe additional tokens once the background resolver
-            # completes.
+            # 4. Resolve real futures tokens.
             # ----------------------------------------------------------
+            self.futures_token_to_symbol.clear()
+
+            for sym in (
+                self.token_to_symbol.values()
+            ):
+                try:
+                    fut_info = (
+                        instrument_resolver
+                        .find_nearest_single_stock_future(
+                            sym,
+                            kite_client=kite_client,
+                        )
+                    )
+
+                    if fut_info is None:
+                        continue
+
+                    raw_fut_token = fut_info.get(
+                        "instrument_token"
+                    )
+
+                    try:
+                        fut_token = int(
+                            raw_fut_token
+                        )
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "[MarketStreamManager] Invalid futures "
+                            "instrument token for %s: %r",
+                            sym,
+                            raw_fut_token,
+                        )
+                        continue
+
+                    if fut_token <= 0:
+                        logger.warning(
+                            "[MarketStreamManager] Non-positive futures "
+                            "instrument token for %s: %s",
+                            sym,
+                            fut_token,
+                        )
+                        continue
+
+                    self.futures_token_to_symbol[
+                        fut_token
+                    ] = sym
+
+                except Exception as exc:
+                    logger.debug(
+                        "[MarketStreamManager] Failed to resolve "
+                        "futures token for %s: %s",
+                        sym,
+                        exc,
+                    )
 
             # ----------------------------------------------------------
-            # 6. Initial subscription: cash tokens only.
+            # 5. Resolve real sector-index tokens.
+            #
+            # Many stocks share the same sector index (e.g. ~70-100
+            # stocks can all map to the same NIFTY sector index symbol),
+            # so resolving the index token fresh for every single stock
+            # repeats the same lookup dozens of times and slows down
+            # startup. Memoize per distinct index symbol for this one
+            # startup pass only — token mapping correctness is unchanged,
+            # only the redundant repeated resolution work is removed.
             # ----------------------------------------------------------
-            all_tokens = list(self.token_to_symbol.keys())
+            self.index_token_to_symbol.clear()
+
+            _resolved_index_tokens: Dict[str, Optional[int]] = {}
+
+            for sym in (
+                self.token_to_symbol.values()
+            ):
+                try:
+                    idx_sym = (
+                        get_sector_index_symbol(
+                            sym
+                        )
+                    )
+
+                    if not idx_sym:
+                        continue
+
+                    if idx_sym in _resolved_index_tokens:
+                        idx_tok = _resolved_index_tokens[idx_sym]
+                    else:
+                        idx_tok = (
+                            instrument_resolver
+                            .resolve_token(
+                                idx_sym,
+                                exchange="NSE",
+                                kite_client=kite_client,
+                            )
+                        )
+                        _resolved_index_tokens[idx_sym] = idx_tok
+
+                    if idx_tok:
+                        self.index_token_to_symbol[
+                            int(idx_tok)
+                        ] = idx_sym
+
+                except Exception as exc:
+                    logger.debug(
+                        "[MarketStreamManager] Failed to resolve "
+                        "index token for %s: %s",
+                        sym,
+                        exc,
+                    )
+
+            # Explicitly resolve and subscribe real NIFTY benchmark token for CRSD market factor
+            try:
+                nifty_tok = (
+                    instrument_resolver.resolve_token(
+                        "NIFTY",
+                        exchange="NSE",
+                        kite_client=kite_client,
+                    )
+                    or instrument_resolver.resolve_token(
+                        "NIFTY 50",
+                        exchange="NSE",
+                        kite_client=kite_client,
+                    )
+                )
+                if nifty_tok:
+                    self.index_token_to_symbol[int(nifty_tok)] = "NIFTY"
+                    self.token_to_symbol[int(nifty_tok)] = "NIFTY"
+            except Exception as exc:
+                logger.debug(
+                    "[MarketStreamManager] Failed to resolve NIFTY token: %s",
+                    exc,
+                )
+
+            # ----------------------------------------------------------
+            # 6. Deduplicate actual subscription tokens.
+            # ----------------------------------------------------------
+            all_tokens = list(
+                dict.fromkeys(
+                    list(
+                        self.token_to_symbol.keys()
+                    )
+                    + list(
+                        self.futures_token_to_symbol.keys()
+                    )
+                    + list(
+                        self.index_token_to_symbol.keys()
+                    )
+                )
+            )
 
             self.subscribed_token_count = (
                 len(all_tokens)
             )
-
-            self._ever_connected = False
 
             self.state = (
                 StreamState.CONNECTING
@@ -1438,7 +1578,7 @@ class MarketStreamManager:
 
                     token = (
                         (state.token if state is not None else None)
-                        or {v: k for k, v in self.token_to_symbol.items()}.get(symbol)
+                        or self.symbol_to_token.get(symbol)
                     )
 
                     self._schedule_symbol_history_refresh(
@@ -1516,10 +1656,19 @@ class MarketStreamManager:
                     snapshot,
                 )
 
-                with self._book_cond:
-                    self._latest_books[symbol] = snapshot
-                    self._pending_book_symbols.add(symbol)
-                    self._book_cond.notify()
+                try:
+                    self._book_queue.put_nowait(
+                        (
+                            symbol,
+                            snapshot,
+                        )
+                    )
+                except queue.Full:
+                    logger.error(
+                        "[MarketStreamManager] SSF L5 queue full; "
+                        "dropping newest snapshot for %s.",
+                        symbol,
+                    )
 
             # ==========================================================
             # CANDLE AGGREGATOR
@@ -1608,13 +1757,12 @@ class MarketStreamManager:
                     dict
                 ] = []
 
-                # Only cash stock ticks drive feed-freshness.
-                # Futures and index ticks must NOT update last_tick_time.
-                cash_accepted_count = 0
-                latest_cash_exchange_timestamp = None
-
                 accepted_tick_count = 0
                 latest_exchange_timestamp = None
+
+                # Tracks freshness of the REQUIRED stock-equity feed only.
+                # Deliberately NOT updated by futures or index ticks.
+                latest_equity_timestamp = None
 
                 for tick in tick_batch:
 
@@ -1679,9 +1827,12 @@ class MarketStreamManager:
                                     exchange_timestamp
                                 ),
                             )
-                            # Futures ticks are intentionally excluded from
-                            # cash feed-freshness accounting.
                             accepted_tick_count += 1
+                            if (
+                                latest_exchange_timestamp is None
+                                or exchange_timestamp > latest_exchange_timestamp
+                            ):
+                                latest_exchange_timestamp = exchange_timestamp
 
                         else:
                             logger.debug(
@@ -1711,14 +1862,17 @@ class MarketStreamManager:
                             ssf_one_minute_runtime.on_tick(
                                 tick
                             )
-                            # Index ticks are intentionally excluded from
-                            # cash feed-freshness accounting.
                             accepted_tick_count += 1
+                            if (
+                                latest_exchange_timestamp is None
+                                or exchange_timestamp > latest_exchange_timestamp
+                            ):
+                                latest_exchange_timestamp = exchange_timestamp
 
-                        if (
-                            self.aggregator is not None
-                            and tok in self.aggregator.token_to_symbol_map
-                        ):
+                        # NIFTY is also intentionally part of
+                        # token_to_symbol so it must enter the
+                        # normal 15-minute aggregation pipeline.
+                        if tok in self.token_to_symbol:
                             cash_ticks.append(tick)
 
                         continue
@@ -1760,12 +1914,20 @@ class MarketStreamManager:
                         continue
 
                     accepted_tick_count += 1
-                    cash_accepted_count += 1
                     if (
-                        latest_cash_exchange_timestamp is None
-                        or exchange_timestamp > latest_cash_exchange_timestamp
+                        latest_exchange_timestamp is None
+                        or exchange_timestamp > latest_exchange_timestamp
                     ):
-                        latest_cash_exchange_timestamp = exchange_timestamp
+                        latest_exchange_timestamp = exchange_timestamp
+
+                    # This is a genuine individual cash-stock tick (not
+                    # futures, not an index) — it is the only thing
+                    # allowed to advance equity-feed freshness.
+                    if (
+                        latest_equity_timestamp is None
+                        or exchange_timestamp > latest_equity_timestamp
+                    ):
+                        latest_equity_timestamp = exchange_timestamp
 
                     # --------------------------------------------------
                     # Detect partial first candle.
@@ -1798,14 +1960,6 @@ class MarketStreamManager:
                         ),
                     )
 
-                    live_signal_engine.on_tick(
-                        symbol=sym,
-                        price=price,
-                        timestamp=(
-                            exchange_timestamp
-                        ),
-                    )
-
                     # --------------------------------------------------
                     # LiveMarketState expects incremental volume.
                     #
@@ -1815,21 +1969,18 @@ class MarketStreamManager:
                     #
                     # Therefore we intentionally pass ZERO here.
                     # This prevents cumulative-volume double counting.
+                    #
+                    # Real session volume is applied once, in bulk, below
+                    # — via live_market_state.add_volume() using the
+                    # exact incremental amounts CandleAggregator.process_ticks()
+                    # computed for the candle. That is the single
+                    # authoritative cumulative-to-incremental conversion;
+                    # it is never recomputed here.
                     # --------------------------------------------------
-                    # Pass cumulative session volume directly so the
-                    # live market state reflects what NSE/Kite shows.
-                    # LiveMarketState.update_tick() sets (not accumulates)
-                    # the volume from volume_traded.
-                    raw_vol_traded = tick.get("volume_traded")
-                    try:
-                        vol_traded = int(raw_vol_traded) if raw_vol_traded is not None else None
-                    except (TypeError, ValueError):
-                        vol_traded = None
-
                     live_market_state.update_tick(
                         symbol=sym,
                         price=price,
-                        volume=vol_traded,
+                        volume=0,
                         timestamp=(
                             exchange_timestamp
                         ),
@@ -1856,9 +2007,29 @@ class MarketStreamManager:
                     and cash_ticks
                 ):
                     try:
-                        self.aggregator.process_ticks(
-                            cash_ticks
+                        applied_volume_by_symbol = (
+                            self.aggregator.process_ticks(
+                                cash_ticks
+                            )
                         )
+
+                        # --------------------------------------------
+                        # Apply the SAME incremental volume the candle
+                        # aggregator just computed to live state. This
+                        # is the single authoritative real-Kite volume
+                        # flow: one computation, two consumers, never
+                        # double counted.
+                        # --------------------------------------------
+                        if applied_volume_by_symbol:
+                            for (
+                                vol_symbol,
+                                vol_amount,
+                            ) in applied_volume_by_symbol.items():
+                                live_market_state.add_volume(
+                                    symbol=vol_symbol,
+                                    volume=vol_amount,
+                                    timestamp=latest_exchange_timestamp,
+                                )
 
                     except Exception:
                         logger.exception(
@@ -1866,173 +2037,24 @@ class MarketStreamManager:
                             "cash ticks in CandleAggregator"
                         )
 
-                # Only cash stock ticks advance the global feed timestamp.
-                if cash_accepted_count > 0 and latest_cash_exchange_timestamp is not None:
+                if latest_equity_timestamp is not None:
                     with self._lock:
-                        self.last_tick_time = latest_cash_exchange_timestamp
+                        self.last_equity_tick_time = (
+                            latest_equity_timestamp
+                        )
+
+                if accepted_tick_count > 0 and latest_exchange_timestamp is not None:
+                    with self._lock:
+                        self.last_tick_time = latest_exchange_timestamp
 
             # ==========================================================
             # CONNECTION CALLBACKS
             # ==========================================================
 
-            def _resolve_and_subscribe_aux_tokens(
-                ws_ref: Any,
-                gen: int,
-                kite: Any,
-            ) -> None:
-                """
-                Background thread: resolve futures + sector-index tokens
-                and extend the WebSocket subscription.
-                """
-                try:
-                    with self._lock:
-                        if gen != self._stream_generation:
-                            return
-
-                    new_futures: Dict[int, str] = {}
-                    new_index: Dict[int, str] = {}
-
-                    try:
-                        nfo_instruments = instrument_resolver.get_instruments(
-                            kite, exchange="NFO"
-                        )
-                    except Exception as nfo_err:
-                        logger.warning(
-                            "[MarketStreamManager] Failed fetching NFO instruments for aux futures: %s",
-                            nfo_err,
-                        )
-                        nfo_instruments = []
-
-                    futures_by_name: Dict[str, List[Dict[str, Any]]] = {}
-                    for inst in nfo_instruments:
-                        if isinstance(inst, dict):
-                            n = str(inst.get("name") or "").strip().upper()
-                            if n:
-                                futures_by_name.setdefault(n, []).append(inst)
-
-                    for sym in list(self.token_to_symbol.values()):
-                        with self._lock:
-                            if gen != self._stream_generation:
-                                return
-                        try:
-                            fut_candidates = futures_by_name.get(sym)
-                            fut_info = instrument_resolver.find_nearest_single_stock_future(
-                                sym, instruments=fut_candidates, kite_client=kite
-                            )
-                            if fut_info is not None:
-                                raw_tok = fut_info.get("instrument_token")
-                                try:
-                                    ft = int(raw_tok)
-                                    if ft > 0:
-                                        new_futures[ft] = sym
-                                except (TypeError, ValueError):
-                                    pass
-                        except Exception as e:
-                            logger.warning(
-                                "[MarketStreamManager] Failed resolving future for %s: %s",
-                                sym,
-                                e,
-                            )
-                            with self._lock:
-                                self.auxiliary_errors.append(f"future:{sym}:{type(e).__name__}")
-
-                        try:
-                            idx_sym = get_sector_index_symbol(sym)
-                            if idx_sym:
-                                idx_tok = instrument_resolver.resolve_token(
-                                    idx_sym, exchange="NSE", kite_client=kite
-                                )
-                                if idx_tok:
-                                    new_index[int(idx_tok)] = idx_sym
-                        except Exception as e:
-                            logger.warning(
-                                "[MarketStreamManager] Failed resolving sector index for %s: %s",
-                                sym,
-                                e,
-                            )
-                            with self._lock:
-                                self.auxiliary_errors.append(f"index:{sym}:{type(e).__name__}")
-
-                    # NIFTY benchmark for CRSD.
-                    try:
-                        nifty_tok = (
-                            instrument_resolver.resolve_token("NIFTY", exchange="NSE", kite_client=kite)
-                            or instrument_resolver.resolve_token("NIFTY 50", exchange="NSE", kite_client=kite)
-                        )
-                        if nifty_tok:
-                            new_index[int(nifty_tok)] = "NIFTY"
-                    except Exception as e:
-                        logger.warning(
-                            "[MarketStreamManager] Failed resolving NIFTY benchmark token: %s",
-                            e,
-                        )
-                        with self._lock:
-                            self.auxiliary_errors.append(f"nifty:{type(e).__name__}")
-
-                    with self._lock:
-                        if gen != self._stream_generation:
-                            return
-                        self.futures_token_to_symbol.update(new_futures)
-                        self.index_token_to_symbol.update(new_index)
-                        if self.auxiliary_errors:
-                            self.auxiliary_context_status = "PARTIAL" if (new_futures or new_index) else "UNAVAILABLE"
-                        else:
-                            self.auxiliary_context_status = "READY"
-
-                    aux_tokens = list(
-                        dict.fromkeys(
-                            list(new_futures.keys()) + list(new_index.keys())
-                        )
-                    )
-
-                    if aux_tokens:
-                        try:
-                            ws_ref.subscribe(aux_tokens)
-                            ws_ref.set_mode(ws_ref.MODE_FULL, aux_tokens)
-                            with self._lock:
-                                self.subscribed_token_count += len(aux_tokens)
-                            logger.info(
-                                "[MarketStreamManager] Subscribed %d aux tokens "
-                                "(%d futures, %d indices).",
-                                len(aux_tokens),
-                                len(new_futures),
-                                len(new_index),
-                            )
-                        except Exception:
-                            logger.exception(
-                                "[MarketStreamManager] Failed to subscribe aux tokens."
-                            )
-
-                except Exception as exc:
-                    logger.exception(
-                        "[MarketStreamManager] Aux-token resolution background thread failed."
-                    )
-                    with self._lock:
-                        self.auxiliary_context_status = "FAILED"
-                        self.auxiliary_errors.append(f"thread:{type(exc).__name__}")
-
             def on_connect(
                 ws,
                 response,
             ):
-                is_reconnect = False
-                try:
-                    ws.subscribe(
-                        tokens_to_subscribe
-                    )
-                    ws.set_mode(
-                        ws.MODE_FULL,
-                        tokens_to_subscribe,
-                    )
-                except Exception as sub_exc:
-                    logger.exception(
-                        "[MarketStreamManager] Failed to subscribe universe tokens on connect."
-                    )
-                    with self._lock:
-                        self.state = StreamState.ERROR
-                        self.last_error = f"subscribe_failed:{type(sub_exc).__name__}"
-                    return
-
                 with self._lock:
                     self.state = (
                         StreamState.CONNECTED
@@ -2044,58 +2066,78 @@ class MarketStreamManager:
 
                     self.last_error = None
 
-                    if self._ever_connected:
-                        is_reconnect = True
-                    else:
-                        self._ever_connected = True
-
-                if is_reconnect:
-                    # On reconnect: reset per-symbol aggregation state to
-                    # prevent partial pre-disconnect candles from being
-                    # emitted as if they were complete.
-                    with self._lock:
-                        self._first_observed_candle.clear()
-                    with self._history_lock:
-                        self._history_ready_symbols.clear()
-                    if self.aggregator is not None:
-                        try:
-                            self.aggregator.reset_all_daily_sessions()
-                        except Exception:
-                            logger.exception(
-                                "[MarketStreamManager] Failed to reset "
-                                "aggregator sessions on reconnect."
-                            )
-                    # Re-warm history in background after reconnect.
-                    with self._lock:
-                        current_gen = self._stream_generation
-                    reconnect_warmup = threading.Thread(
-                        target=self._warm_historical_state,
-                        args=(
-                            dict(self.token_to_symbol),
-                            kite_client,
-                            current_gen,
-                        ),
-                        name="kite-history-rewarm",
-                        daemon=True,
+                    gap_detected = (
+                        self._awaiting_gap_recovery
                     )
-                    reconnect_warmup.start()
 
-                # Start aux-token resolution in background (both initial and reconnect).
-                with self._lock:
-                    current_gen = self._stream_generation
-                threading.Thread(
-                    target=_resolve_and_subscribe_aux_tokens,
-                    args=(ws, current_gen, kite_client),
-                    name="aux-token-resolver",
-                    daemon=True,
-                ).start()
+                    self._awaiting_gap_recovery = False
+
+                ws.subscribe(
+                    tokens_to_subscribe
+                )
+
+                ws.set_mode(
+                    ws.MODE_FULL,
+                    tokens_to_subscribe,
+                )
 
                 logger.info(
-                    "[MarketStreamManager] KiteTicker %s in MODE_FULL "
-                    "— subscribed %d cash instruments.",
-                    "reconnected" if is_reconnect else "connected",
-                    len(tokens_to_subscribe),
+                    "[MarketStreamManager] KiteTicker connected "
+                    "in MODE_FULL — subscribed %d instruments "
+                    "(%d cash, %d futures, %d indices).",
+                    len(
+                        tokens_to_subscribe
+                    ),
+                    len(
+                        self.token_to_symbol
+                    ),
+                    len(
+                        self.futures_token_to_symbol
+                    ),
+                    len(
+                        self.index_token_to_symbol
+                    ),
                 )
+
+                # ------------------------------------------------------
+                # CONNECTION GAP RECOVERY
+                # ------------------------------------------------------
+                # This connect follows a real disconnect (not the
+                # stream's initial connect). Ticks were missed for an
+                # unknown duration while the real market kept moving, so:
+                #
+                # 1. Discard every symbol's in-progress candle so a
+                #    gap-spanning candle is never finalized as if the
+                #    stream had been continuous.
+                # 2. Clear cumulative-volume baselines so the next tick
+                #    re-baselines instead of dumping the whole outage's
+                #    market volume into one candle.
+                # 3. Re-arm the existing "first observed candle" partial
+                #    protection for every symbol, so each symbol's first
+                #    post-gap candle is treated exactly like a fresh
+                #    stream start (ignored + backfilled from real Kite
+                #    historical data) instead of being evaluated as a
+                #    normal live candle.
+                # ------------------------------------------------------
+                if gap_detected:
+                    logger.warning(
+                        "[MarketStreamManager] Reconnected after a "
+                        "stream gap. Discarding in-progress candles and "
+                        "volume baselines to avoid misattributing "
+                        "missed-tick volume or data."
+                    )
+
+                    if self.aggregator is not None:
+                        try:
+                            self.aggregator.handle_connection_gap()
+                        except Exception:
+                            logger.exception(
+                                "[MarketStreamManager] Error recovering "
+                                "aggregator state after connection gap."
+                            )
+
+                    with self._lock:
+                        self._first_observed_candle.clear()
 
             def on_close(
                 ws,
@@ -2110,6 +2152,10 @@ class MarketStreamManager:
                     self.last_disconnect_time = (
                         now_ist()
                     )
+
+                    # Any candle/volume state from here forward may span
+                    # a gap once the stream reconnects.
+                    self._awaiting_gap_recovery = True
 
                 logger.warning(
                     "[MarketStreamManager] KiteTicker closed: "
@@ -2136,30 +2182,23 @@ class MarketStreamManager:
                     error_text,
                 )
 
-                # Authentication failures must invalidate the cached client (run in background thread).
-                def _bg_revalidate():
-                    try:
-                        from broker.kite_adapter import get_active_kite_with_diagnostics
+                # Authentication failures must invalidate the cached client.
+                try:
+                    from broker.kite_adapter import get_active_kite_with_diagnostics
 
-                        client, validation_error = get_active_kite_with_diagnostics(
-                            force_validate=True
+                    client, validation_error = get_active_kite_with_diagnostics(
+                        force_validate=True
+                    )
+
+                    if client is None and validation_error:
+                        logger.error(
+                            "[MarketStreamManager] Kite authentication became invalid: %s",
+                            validation_error,
                         )
-
-                        if client is None and validation_error:
-                            logger.error(
-                                "[MarketStreamManager] Kite authentication became invalid: %s",
-                                validation_error,
-                            )
-                    except Exception:
-                        logger.exception(
-                            "[MarketStreamManager] Failed to revalidate Kite session after stream error."
-                        )
-
-                threading.Thread(
-                    target=_bg_revalidate,
-                    name="bg-kite-revalidate",
-                    daemon=True,
-                ).start()
+                except Exception:
+                    logger.exception(
+                        "[MarketStreamManager] Failed to revalidate Kite session after stream error."
+                    )
 
             def on_reconnect(
                 ws,
@@ -2255,12 +2294,13 @@ class MarketStreamManager:
 
         self._first_observed_candle.clear()
 
+        # A full stop is not a "gap" to recover from on the next start —
+        # start_stream() always begins with fresh aggregator/state.
+        self._awaiting_gap_recovery = False
+
         self._drain_evaluation_queue()
 
         self._drain_history_refresh_queue()
-
-        self.auxiliary_context_status = "STOPPED"
-        self.auxiliary_errors.clear()
 
         # Stop SSF runtime safely.
         try:
@@ -2286,7 +2326,7 @@ class MarketStreamManager:
         except Exception:
             logger.exception(
                 "[MarketStreamManager] Error resetting "
-                "live market state"
+                ""
             )
 
         self.futures_token_to_symbol.clear()
@@ -2349,14 +2389,24 @@ class MarketStreamManager:
             last_tick_age_seconds = None
 
             if self.last_tick_time is not None:
-                ts = self.last_tick_time
-                if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
-                    ts = ts.replace(tzinfo=None)
+
                 last_tick_age_seconds = max(
                     0.0,
                     (
-                        now_ist_naive()
-                        - ts
+                        now_ist()
+                        - self.last_tick_time
+                    ).total_seconds(),
+                )
+
+            last_equity_tick_age_seconds = None
+
+            if self.last_equity_tick_time is not None:
+
+                last_equity_tick_age_seconds = max(
+                    0.0,
+                    (
+                        now_ist()
+                        - self.last_equity_tick_time
                     ).total_seconds(),
                 )
 
@@ -2393,6 +2443,27 @@ class MarketStreamManager:
                         3,
                     )
                     if last_tick_age_seconds is not None
+                    else None
+                ),
+
+                # Authoritative freshness of the REQUIRED stock-equity
+                # feed (cash-stock ticks only — never futures or index
+                # ticks). Consumers that gate on "is market data fresh"
+                # must use this pair, not the general last_tick_* pair
+                # above, which can stay warm purely from futures/index
+                # activity while the actual stock universe is stale.
+                "last_equity_tick_time": (
+                    self.last_equity_tick_time.isoformat()
+                    if self.last_equity_tick_time
+                    else None
+                ),
+
+                "last_equity_tick_age_seconds": (
+                    round(
+                        last_equity_tick_age_seconds,
+                        3,
+                    )
+                    if last_equity_tick_age_seconds is not None
                     else None
                 ),
 
@@ -2448,8 +2519,6 @@ class MarketStreamManager:
 
                 "history_ready_count": len(self._history_ready_symbols),
                 "history_refresh_queue_size": self._history_refresh_queue.qsize(),
-                "auxiliary_context_status": self.auxiliary_context_status,
-                "auxiliary_errors_count": len(self.auxiliary_errors),
             }
 
 

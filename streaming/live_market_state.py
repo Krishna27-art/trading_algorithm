@@ -8,15 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-import logging
 import threading
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from data.time_utils import now_ist_naive
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -138,7 +135,7 @@ class LiveMarketState:
         data["volume"] = pd.to_numeric(
             data["volume"],
             errors="coerce",
-        )
+        ).fillna(0)
 
         data = data.dropna(
             subset=[
@@ -147,7 +144,6 @@ class LiveMarketState:
                 "high",
                 "low",
                 "close",
-                "volume",
             ]
         ).copy()
 
@@ -251,38 +247,17 @@ class LiveMarketState:
                     state.completed_candles[-1]
                 )
 
-            # Seed the real 09:15 session open from the first candle
-            # of today in the historical data. This ensures the live
-            # open is always the real NSE session open, not the price
-            # of the first tick seen after the stream started.
-            if state.open is None:
-                today_date = now_ist_naive().date()
-                for row in state.completed_candles:
-                    dt = row.get("datetime")
-                    try:
-                        dt_val = pd.Timestamp(dt)
-                        if dt_val.date() == today_date:
-                            open_val = float(row.get("open", 0) or 0)
-                            if open_val > 0:
-                                state.open = open_val
-                            break
-                    except Exception:
-                        continue
-
         return len(data)
 
     def update_tick(
         self,
         symbol: str,
         price: float,
-        volume: Optional[int] = None,
+        volume: int = 0,
         timestamp: Optional[datetime] = None,
         token: Optional[int] = None,
     ) -> None:
-        if timestamp is None:
-            logger.warning("[LiveMarketState] Rejecting tick without exchange timestamp.")
-            return
-        ts = timestamp
+        ts = timestamp or now_ist_naive()
         with self._lock:
             state = self._symbols.get(symbol)
             if state is None:
@@ -291,8 +266,6 @@ class LiveMarketState:
 
             state.ltp = price
             state.close = price
-            # Only set open on first tick if it was not already seeded
-            # from the historical 09:15 candle by seed_historical_candles().
             if state.open is None:
                 state.open = price
                 state.high = price
@@ -301,14 +274,53 @@ class LiveMarketState:
                 state.high = max(state.high, price) if state.high is not None else price
                 state.low = min(state.low, price) if state.low is not None else price
 
-            # `volume` is Kite's cumulative session volume (volume_traded).
-            # Set it directly — do NOT accumulate it as if it were incremental.
-            if volume is not None and volume >= 0:
-                state.volume = int(volume)
-            else:
-                state.volume = None
+            # `volume` must be an incremental quantity.
+            # Do not pass Kite's cumulative `volume_traded` here.
+            if volume > 0:
+                state.volume = (state.volume or 0) + int(volume)
 
             state.last_tick_time = ts
+            state.updated_at = ts
+
+    def add_volume(
+        self,
+        symbol: str,
+        volume: int,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """
+        Add an authoritative incremental traded-volume amount for `symbol`.
+
+        This is the single integration point for real Kite session volume
+        reaching live state. The caller (CandleAggregator, via
+        MarketStreamManager) is responsible for converting Kite's
+        cumulative `volume_traded` into a correct incremental amount so
+        that volume is never double counted and never fabricated here.
+
+        This is intentionally separate from update_tick(): update_tick()
+        owns live LTP/OHLC and is called once per raw tick, while volume
+        is only known correctly once a tick has gone through the
+        cumulative-to-incremental conversion shared with candle
+        aggregation. Keeping them separate means that conversion never
+        has to be duplicated.
+        """
+        try:
+            vol = int(volume)
+        except (TypeError, ValueError):
+            return
+
+        if vol <= 0:
+            return
+
+        ts = timestamp or now_ist_naive()
+
+        with self._lock:
+            state = self._symbols.get(symbol)
+            if state is None:
+                state = LiveSymbolState(symbol=symbol)
+                self._symbols[symbol] = state
+
+            state.volume = (state.volume or 0) + vol
             state.updated_at = ts
 
     def update_candle_close(self, candle_dict: Dict[str, Any], vwap: float) -> None:

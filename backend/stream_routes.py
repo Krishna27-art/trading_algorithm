@@ -7,14 +7,12 @@ caller subscribe arbitrary/fabricated instrument tokens.
 """
 
 import logging
-import math
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from config.universe import StockUniverse
-from data.time_utils import now_ist_naive
 from backend.security import verify_shared_secret
+from config.universe import StockUniverse
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
 from streaming.market_stream_manager import market_stream_manager
@@ -23,55 +21,61 @@ logger = logging.getLogger("backend_api.stream")
 
 router = APIRouter()
 
-# Universe metadata — loaded once at module startup.
-_universe = StockUniverse()
-_universe_map: Dict[str, Any] = {
-    record.symbol: record
-    for record in _universe.all_stocks
-}
-
 
 STREAM_DATA_STALE_AFTER_SECONDS = 120
 
+# Static per-symbol reference metadata (rank/name/category), lazily
+# loaded and cached on first use (mirrors how backend/market.py already
+# loads StockUniverse per-request rather than at import time) so a
+# universe-dataset problem surfaces as a normal request-time error
+# instead of crashing the whole app at import/startup.
+_universe_metadata_cache: Dict[str, Any] = {}
+
+
+def _universe_metadata_by_symbol() -> Dict[str, Any]:
+    if not _universe_metadata_cache:
+        _universe_metadata_cache.update(
+            {record.symbol: record for record in StockUniverse().all_stocks}
+        )
+    return _universe_metadata_cache
+
 
 def _stream_status() -> Dict[str, Any]:
+    """
+    Read canonical stream health.
+
+    A genuine failure here must be reported as a genuine failure — never
+    swallowed into an empty dict that lets a caller build a "success"
+    response around unusable/absent data.
+    """
     try:
         return market_stream_manager.get_status() or {}
-    except Exception:
+    except Exception as exc:
         logger.exception("component=stream_routes check=stream_status")
-        return {}
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read stream status. See server logs.",
+        ) from exc
 
 
 def _stream_feed_is_fresh(stream_status: Dict[str, Any]) -> bool:
+    """
+    Whether the REQUIRED stock-equity feed specifically is fresh.
+
+    Deliberately keyed on last_equity_tick_age_seconds, not the general
+    last_tick_age_seconds — the latter can stay warm purely from
+    futures/index activity while the actual stock universe data has
+    stopped updating.
+    """
     if stream_status.get("connected") is not True:
         return False
 
-    age = stream_status.get("last_tick_age_seconds")
+    age = stream_status.get("last_equity_tick_age_seconds")
 
     if not isinstance(age, (int, float)):
         return False
 
     return 0 <= age <= STREAM_DATA_STALE_AFTER_SECONDS
-
-
-def _symbol_feed_is_fresh(
-    symbol: str,
-    max_age_seconds: int = STREAM_DATA_STALE_AFTER_SECONDS,
-) -> bool:
-    state = live_market_state.get_symbol_state(symbol)
-    if state is None:
-        return False
-
-    ts = state.last_tick_time
-    if ts is None:
-        return False
-
-    now = now_ist_naive()
-    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
-        ts = ts.replace(tzinfo=None)
-    age = (now - ts).total_seconds()
-
-    return 0 <= age <= max_age_seconds
 
 
 def _stream_state() -> str:
@@ -96,10 +100,7 @@ def start_stream() -> Dict[str, Any]:
             "symbols_count": result.get("symbols_count", 0),
         }
     except RuntimeError as e:
-        msg = str(e)
-        if "authenticate" in msg.lower() or "active zerodha" in msg.lower() or "auth" in msg.lower():
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=msg)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=msg)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -122,69 +123,36 @@ def stream_status():
     return market_stream_manager.get_status()
 
 
-from datetime import datetime
-
-SIGNAL_DATA_STALE_AFTER_SECONDS = 3600
-
-
-def _signal_is_fresh(
-    sig: Dict[str, Any],
-    max_age_seconds: int = SIGNAL_DATA_STALE_AFTER_SECONDS,
-) -> bool:
-    if not isinstance(sig, dict):
-        return False
-    ts_str = sig.get("timestamp") or sig.get("candle_timestamp") or sig.get("ltp_timestamp")
-    if not ts_str:
-        return False
-    try:
-        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False
-
-    now = now_ist_naive()
-    if ts.tzinfo is not None:
-        ts = ts.replace(tzinfo=None)
-
-    if ts.date() != now.date():
-        return False
-
-    age = (now - ts).total_seconds()
-    return 0 <= age <= max_age_seconds
-
-
 @router.get("/api/stream/signals")
 def stream_signals():
-    """Return only signals backed by a fresh Kite stream, fresh symbol ticks, and fresh signal timestamps."""
-    stream_stat = _stream_status()
-    stream_connected = stream_stat.get("connected") is True
+    """Return only signals backed by a fresh Kite stream."""
+    stream_status = _stream_status()
+    fresh = _stream_feed_is_fresh(stream_status)
 
-    all_signals = (
+    signals = (
         live_signal_engine.get_all_predictions()
-        if stream_connected
+        if fresh
         else {}
     )
 
-    signals = {
-        sym: sig
-        for sym, sig in all_signals.items()
-        if _signal_is_fresh(sig, SIGNAL_DATA_STALE_AFTER_SECONDS)
-    }
-
-    stream_fresh = _stream_feed_is_fresh(stream_stat)
-
-    status_str = "success" if (stream_connected and stream_fresh) else ("STALE" if stream_connected else "DISCONNECTED")
-    market_data_status = "AVAILABLE" if (stream_connected and stream_fresh) else ("STALE" if stream_connected else "UNAVAILABLE")
-
     return {
-        "status": status_str,
-        "market_data_status": market_data_status,
-        "stream_state": stream_stat.get("state", "UNKNOWN"),
-        "stream_connected": stream_connected,
-        "last_tick_time": stream_stat.get("last_tick_time"),
-        "last_tick_age_seconds": stream_stat.get(
+        "status": "success",
+        "stream_state": stream_status.get("state", "UNKNOWN"),
+        "stream_connected": stream_status.get("connected", False),
+        "last_tick_time": stream_status.get("last_tick_time"),
+        "last_tick_age_seconds": stream_status.get(
             "last_tick_age_seconds"
         ),
-        "data_fresh": stream_fresh,
+        # Authoritative freshness of the required stock-equity feed
+        # specifically (what `data_fresh` below is actually computed
+        # from) — never advanced by futures/index-only activity.
+        "last_equity_tick_time": stream_status.get(
+            "last_equity_tick_time"
+        ),
+        "last_equity_tick_age_seconds": stream_status.get(
+            "last_equity_tick_age_seconds"
+        ),
+        "data_fresh": fresh,
         "signals": signals,
         "count": len(signals),
     }
@@ -192,66 +160,54 @@ def stream_signals():
 
 @router.get("/api/stream/market")
 def stream_market():
-    """Return in-memory market state tagged with per-symbol Kite stream freshness."""
-    stream_stat = _stream_status()
-    stream_connected = stream_stat.get("connected") is True
+    """Return in-memory market state tagged with Kite stream freshness."""
+    stream_status = _stream_status()
+    fresh = _stream_feed_is_fresh(stream_status)
 
-    symbols_state = live_market_state.get_all_symbols_state() if stream_connected else {}
+    symbols_state = live_market_state.get_all_symbols_state()
 
-    instruments = {}
+    try:
+        universe_metadata = _universe_metadata_by_symbol()
+    except Exception:
+        # Metadata enrichment is a bonus on top of real live data — a
+        # universe-dataset problem must not take down otherwise-working
+        # live price data.
+        logger.exception("component=stream_routes check=universe_metadata")
+        universe_metadata = {}
+
+    instruments: Dict[str, Any] = {}
+
     for sym, state in symbols_state.items():
-        state_dict = state.to_dict()
-        is_fresh = _symbol_feed_is_fresh(sym, STREAM_DATA_STALE_AFTER_SECONDS)
-        state_dict["data_fresh"] = is_fresh
+        payload = state.to_dict()
 
-        # Enrich with universe metadata and computed fields.
-        record = _universe_map.get(sym)
-        if record is not None:
-            state_dict["name"] = record.name
-            state_dict["category"] = record.category
-            state_dict["rank"] = record.market_cap_rank
-        else:
-            state_dict.setdefault("name", "")
-            state_dict.setdefault("category", "")
-            state_dict.setdefault("rank", None)
+        # Enrich with static universe reference metadata (rank/name/
+        # category). This is real, never-changing reference data already
+        # available server-side — not a fabricated market value — so the
+        # frontend doesn't need a separate, now-removed legacy endpoint
+        # for it.
+        meta = universe_metadata.get(sym)
+        if meta is not None:
+            payload["rank"] = getattr(meta, "market_cap_rank", None)
+            payload["name"] = getattr(meta, "name", None)
+            payload["category"] = getattr(meta, "category", None)
 
-        ltp: Optional[float] = state_dict.get("ltp")
-        open_price: Optional[float] = state_dict.get("open")
-        state_dict["open_price"] = open_price
-
-        if (
-            ltp is not None
-            and open_price is not None
-            and math.isfinite(ltp)
-            and math.isfinite(open_price)
-            and open_price > 0
-        ):
-            change = round(ltp - open_price, 4)
-            state_dict["change"] = change
-            state_dict["change_pct"] = round(100.0 * change / open_price, 4)
-            state_dict["status"] = "LIVE" if is_fresh else "STALE"
-        else:
-            state_dict["change"] = None
-            state_dict["change_pct"] = None
-            state_dict["status"] = "DATA_UNAVAILABLE" if ltp is None else ("LIVE" if is_fresh else "STALE")
-
-        instruments[sym] = state_dict
-
-    feed_fresh = _stream_feed_is_fresh(stream_stat)
-    status_str = "success" if (stream_connected and feed_fresh) else ("STALE" if stream_connected else "DISCONNECTED")
-    market_data_status = "AVAILABLE" if (stream_connected and feed_fresh) else ("STALE" if stream_connected else "UNAVAILABLE")
+        instruments[sym] = payload
 
     return {
-        "status": status_str,
-        "market_data_status": market_data_status,
-        "stream_state": stream_stat.get("state", "UNKNOWN"),
-        "stream_connected": stream_connected,
-        "last_tick_time": stream_stat.get("last_tick_time"),
-        "last_tick_age_seconds": stream_stat.get(
+        "status": "success",
+        "stream_state": stream_status.get("state", "UNKNOWN"),
+        "stream_connected": stream_status.get("connected", False),
+        "last_tick_time": stream_status.get("last_tick_time"),
+        "last_tick_age_seconds": stream_status.get(
             "last_tick_age_seconds"
         ),
-        "data_fresh": feed_fresh,
+        "last_equity_tick_time": stream_status.get(
+            "last_equity_tick_time"
+        ),
+        "last_equity_tick_age_seconds": stream_status.get(
+            "last_equity_tick_age_seconds"
+        ),
+        "data_fresh": fresh,
         "instruments": instruments,
-        "count": len(instruments),
+        "count": len(symbols_state),
     }
-

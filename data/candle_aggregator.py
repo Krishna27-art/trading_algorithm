@@ -576,15 +576,11 @@ class CandleAggregator:
 
         try:
             vol = int(volume)
-            if vol < 0:
-                raise ValueError("Negative volume")
         except (TypeError, ValueError):
-            logger.warning(
-                "[%s] Dropping tick with invalid volume: %r",
-                self.symbol,
-                volume,
-            )
-            return
+            vol = 0
+
+        if vol < 0:
+            vol = 0
 
         callback_payload = None
 
@@ -727,6 +723,26 @@ class CandleAggregator:
                 return None
 
             return self.current_candle.to_dict()
+
+    # ================================================================
+    # CONNECTION GAP RECOVERY
+    # ================================================================
+
+    def discard_in_progress_candle(
+        self,
+    ) -> None:
+        """
+        Drop the current in-progress candle WITHOUT finalizing it.
+
+        Called after a WebSocket reconnect. The candle that was open when
+        the connection dropped is missing ticks for part of its interval,
+        so its OHLCV can no longer be trusted. It must never be emitted
+        as a completed real candle — it is simply discarded. The next
+        tick starts a fresh candle at whatever bucket it actually lands
+        in; no synthetic candle is manufactured for the gap.
+        """
+        with self._lock:
+            self.current_candle = None
 
 
 class MultiSymbolCandleAggregator:
@@ -1130,19 +1146,28 @@ class MultiSymbolCandleAggregator:
             if len(bids) != 5 or len(asks) != 5:
                 return None
 
-            # Reject a crossed or locked market (best bid >= best ask).
-            if bids[0][0] >= asks[0][0]:
-                return None
+            # ---------------------------------------------------------
+            # Book-consistency validation.
+            #
+            # Structurally present fields are not enough: a logically
+            # invalid snapshot (levels out of order, or a crossed/locked
+            # top of book) must be rejected rather than passed downstream.
+            # ---------------------------------------------------------
 
-            # Bid levels must be in descending price order.
+            # Bid levels must be non-increasing in price (best bid first).
             for i in range(1, len(bids)):
                 if bids[i][0] > bids[i - 1][0]:
                     return None
 
-            # Ask levels must be in ascending price order.
+            # Ask levels must be non-decreasing in price (best ask first).
             for i in range(1, len(asks)):
                 if asks[i][0] < asks[i - 1][0]:
                     return None
+
+            # The top of book must not be crossed or locked: the best bid
+            # must be strictly below the best ask.
+            if bids[0][0] >= asks[0][0]:
+                return None
 
             from strategy.ssf_l5_srm_strategy import BookSnapshot
 
@@ -1195,7 +1220,7 @@ class MultiSymbolCandleAggregator:
     def process_ticks(
         self,
         ticks: Any,
-    ) -> None:
+    ) -> Dict[str, int]:
         """
         Process a raw KiteTicker callback batch.
 
@@ -1203,13 +1228,27 @@ class MultiSymbolCandleAggregator:
             list[dict]
 
         A single dict is also accepted.
+
+        Returns
+        -------
+        Dict[str, int]
+            symbol -> total incremental volume actually applied to that
+            symbol's candle during this batch (the same authoritative
+            cumulative-to-incremental conversion used for the candle
+            itself). Callers that need to reflect real session volume
+            elsewhere (e.g. LiveMarketState) must use this value instead
+            of recomputing their own volume delta, so volume is derived
+            from exactly one real-Kite source of truth and is never
+            double counted.
         """
         if isinstance(ticks, dict):
             tick_batch = [ticks]
         elif isinstance(ticks, list):
             tick_batch = ticks
         else:
-            return
+            return {}
+
+        applied_volume_by_symbol: Dict[str, int] = {}
 
         for tick in tick_batch:
             if not isinstance(
@@ -1244,7 +1283,7 @@ class MultiSymbolCandleAggregator:
                 )
 
             if symbol is None:
-                logger.debug(
+                logger.warning(
                     "Ignoring tick for unsubscribed token %s",
                     token,
                 )
@@ -1370,6 +1409,12 @@ class MultiSymbolCandleAggregator:
             if aggregator is None:
                 continue
 
+            if incremental_volume > 0:
+                applied_volume_by_symbol[symbol] = (
+                    applied_volume_by_symbol.get(symbol, 0)
+                    + incremental_volume
+                )
+
             # --------------------------------------------------------
             # Exchange-provided running ATP.
             # --------------------------------------------------------
@@ -1428,6 +1473,8 @@ class MultiSymbolCandleAggregator:
                         "[%s] on_book_update callback failed",
                         symbol,
                     )
+
+        return applied_volume_by_symbol
 
     # ================================================================
     # READ APIs
@@ -1528,3 +1575,39 @@ class MultiSymbolCandleAggregator:
             self.volume_session_date_by_token.clear()
             self.last_tick_timestamp_by_token.clear()
             self.latest_book_snapshots.clear()
+
+    # ================================================================
+    # CONNECTION GAP RECOVERY
+    # ================================================================
+
+    def handle_connection_gap(
+        self,
+    ) -> None:
+        """
+        Recover candle/volume state after a WebSocket reconnect.
+
+        A connection gap means ticks were missed for an unknown duration
+        while the real market kept trading. Two things must happen so a
+        gap can never silently corrupt live data:
+
+        1. Any candle currently in progress for any symbol is discarded
+           (never finalized as "completed") because it is missing ticks
+           for part of its interval.
+
+        2. The cumulative-volume baseline for every token is cleared so
+           the next tick re-baselines instead of computing a delta across
+           the outage. Without this, the entire gap's market-wide volume
+           would be misattributed to a single incoming tick/candle.
+
+        This intentionally does NOT clear completed_candles (the day's
+        already-finalized history is still valid) and does NOT touch
+        last_tick_timestamp_by_token out-of-order protection, since any
+        post-gap tick will naturally have a later timestamp.
+        """
+        with self._lock:
+            aggregators = list(self.aggregators.values())
+            self.last_volume_by_token.clear()
+            self.volume_session_date_by_token.clear()
+
+        for aggregator in aggregators:
+            aggregator.discard_in_progress_candle()

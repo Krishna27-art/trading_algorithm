@@ -31,7 +31,11 @@ def _has_fresh_market_feed(
     if stream_status.get("connected") is not True:
         return False
 
-    age = stream_status.get("last_tick_age_seconds")
+    # Keyed on the required stock-equity feed specifically — matches
+    # market_stream_manager's authoritative equity freshness field, which
+    # (unlike the general last_tick_age_seconds) is never advanced by
+    # futures/index-only activity.
+    age = stream_status.get("last_equity_tick_age_seconds")
 
     if not isinstance(age, (int, float)):
         return False
@@ -63,6 +67,34 @@ def _fresh_prediction_timestamp(
     age = (now - ts).total_seconds()
 
     return 0 <= age <= max_age_seconds
+
+
+def _risk_engine_status() -> str:
+    """
+    Verify the pre-trade risk gate is actually present/loadable instead
+    of hardcoding an "ACTIVE" claim with no runtime check behind it.
+
+    There is currently no long-lived RiskManager instance anywhere in
+    the live process for this endpoint to inspect — RiskManager is only
+    constructed ad hoc (e.g. by the backtester). The most honest signal
+    this endpoint can verify is therefore whether the risk module itself
+    is importable and constructible, and whether a freshly constructed
+    instance reports its kill switch engaged. This can never silently
+    claim "ACTIVE": a broken/missing module now reports "ERROR" instead
+    of being papered over.
+    """
+    try:
+        from risk.risk_manager import RiskManager
+
+        probe = RiskManager()
+
+        if getattr(probe, "kill_switch_active", False):
+            return "KILL_SWITCH"
+
+        return "AVAILABLE"
+    except Exception:
+        logger.exception("component=system.health check=risk_engine")
+        return "ERROR"
 
 
 def _classify(stream_state: str) -> str:
@@ -186,30 +218,16 @@ def get_system_health() -> Dict[str, Any]:
 
     if not kite_conn:
         overall = "DISCONNECTED"
-        risk_state = "NOT_APPLICABLE"
+    elif engine_state == "ERROR":
+        overall = "ERROR"
+    elif stream_class == "ERROR":
+        overall = "ERROR"
+    elif market_feed_fresh:
+        overall = "LIVE"
+    elif stream_status.get("connected") is True:
+        overall = "STALE"
     else:
-        try:
-            from strategy.prediction_service import PredictionService
-            test_ok, _ = PredictionService._validate_signal_risk("LONG", 100.0, 95.0, 105.0)
-            test_rej, _ = PredictionService._validate_signal_risk("LONG", 100.0, 105.0, 110.0)
-            if test_ok and not test_rej:
-                risk_state = "ACTIVE" if (market_feed_fresh or stream_status.get("connected") is True) else "STANDBY"
-            else:
-                risk_state = "DEGRADED"
-        except Exception:
-            logger.exception("component=system.health check=risk_engine")
-            risk_state = "ERROR"
-
-        if engine_state == "ERROR":
-            overall = "ERROR"
-        elif stream_class == "ERROR":
-            overall = "ERROR"
-        elif market_feed_fresh:
-            overall = "LIVE"
-        elif stream_status.get("connected") is True:
-            overall = "STALE"
-        else:
-            overall = "STANDBY"  # authenticated, stream not started
+        overall = "STANDBY"  # authenticated, stream not started
 
     return {
         "backend": "ONLINE",
@@ -229,7 +247,7 @@ def get_system_health() -> Dict[str, Any]:
         "strategy_engine": engine_state,
         "signal_count": prediction_count,
         "active_signal_count": producing_signal_count,
-        "risk_engine": risk_state,
+        "risk_engine": _risk_engine_status(),
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
         "overall_status": overall,
         "timestamp": now_ist_iso(),

@@ -454,14 +454,7 @@ class LiveSignalEngine:
         with self._lock:
             candidates = self._candidate_symbols
 
-        if candidates is None:
-            logger.info(
-                "[LiveSignalEngine] Scanner snapshot unavailable; "
-                "strategy evaluation is disabled."
-            )
-            return None
-
-        if symbol not in candidates:
+        if candidates is not None and symbol not in candidates:
             return None
 
         if not self._mark_processed_candle(
@@ -808,7 +801,7 @@ class LiveSignalEngine:
         with self._lock:
             candidates = self._candidate_symbols
 
-        if candidates is None or clean not in candidates:
+        if candidates is not None and clean not in candidates:
             return
 
         if not isinstance(snapshot, BookSnapshot):

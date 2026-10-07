@@ -1,0 +1,11 @@
+{
+  "symbol": "NESTLEIND",
+  "instrument_token": 4598529,
+  "interval": "day",
+  "start_date": "2026-08-17",
+  "end_date": "2026-09-25",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-09-26T06:58:19.708571",
+  "candle_count": 29,
+  "trading_days": 29
+}

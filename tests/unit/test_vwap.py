@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from indicators.vwap import calculate_session_vwap
+from backend.indicators.vwap import calculate_session_vwap
 
 
 def test_single_day_session_vwap():

@@ -1,0 +1,12 @@
+{
+  "symbol": "DLF",
+  "instrument_token": 3771393,
+  "interval": "15minute",
+  "start_date": "2026-08-21",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T20:53:24.341478+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 744,
+  "trading_days": 31
+}

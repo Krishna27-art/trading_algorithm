@@ -12,9 +12,9 @@ from datetime import date, datetime, timedelta
 import numpy as np
 import pytest
 
-from config.settings import InstrumentConfig, StrategyConfig
-from strategy.base_strategy import BaseStrategy, StrategySignal
-from strategy.ssf_l5_srm_strategy import BookSnapshot, SsfL5SrmStrategy, select_candidates
+from backend.config.settings import InstrumentConfig, StrategyConfig
+from backend.strategy.base_strategy import BaseStrategy, StrategySignal
+from backend.strategy.ssf_l5_srm_strategy import BookSnapshot, SsfL5SrmStrategy, select_candidates
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ def test_select_candidates_ranks_and_trims():
 
 def test_make_book_snapshot_from_quote():
     """Verifies KiteBrokerAdapter parses real Kite quote depth into BookSnapshot."""
-    from broker.kite_adapter import KiteBrokerAdapter
+    from backend.broker.kite_adapter import KiteBrokerAdapter
 
     quote_dict = {
         "instrument_token": 779521,
@@ -123,7 +123,7 @@ def test_make_book_snapshot_from_quote():
 
 def test_multi_symbol_candle_aggregator_buffers_and_dispatches_depth():
     """Verifies MultiSymbolCandleAggregator extracts Level-5 depth from ticks and fires callback."""
-    from data.candle_aggregator import MultiSymbolCandleAggregator
+    from backend.data.candle_aggregator import MultiSymbolCandleAggregator
 
     received_snapshots = []
 

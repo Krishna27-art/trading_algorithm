@@ -3,7 +3,7 @@ Unit tests for SSFOneMinuteRuntime real-token resolution and safety.
 """
 
 import pytest
-from streaming.ssf_one_minute_runtime import SSFOneMinuteRuntime
+from backend.streaming.ssf_runtime import SSFOneMinuteRuntime
 
 
 def test_ssf_runtime_never_creates_fake_tokens(monkeypatch):
@@ -14,7 +14,7 @@ def test_ssf_runtime_never_creates_fake_tokens(monkeypatch):
             self.token_to_symbol_map = kwargs["token_to_symbol_map"]
 
     monkeypatch.setattr(
-        "streaming.ssf_one_minute_runtime.MultiSymbolCandleAggregator",
+        "backend.streaming.ssf_runtime.MultiSymbolCandleAggregator",
         FakeAggregator,
     )
 
@@ -26,7 +26,7 @@ def test_ssf_runtime_never_creates_fake_tokens(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "streaming.ssf_one_minute_runtime.instrument_resolver",
+        "backend.streaming.ssf_runtime.instrument_resolver",
         FakeResolver,
     )
 
@@ -50,7 +50,7 @@ def test_ssf_runtime_raises_when_no_tokens_resolved(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "streaming.ssf_one_minute_runtime.instrument_resolver",
+        "backend.streaming.ssf_runtime.instrument_resolver",
         FakeResolver,
     )
 

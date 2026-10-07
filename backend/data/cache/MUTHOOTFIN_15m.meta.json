@@ -1,0 +1,11 @@
+{
+  "symbol": "MUTHOOTFIN",
+  "instrument_token": 6054401,
+  "interval": "15minute",
+  "start_date": "2026-08-21",
+  "end_date": "2026-10-05",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-05T10:17:53.292191+05:30",
+  "candle_count": 701,
+  "trading_days": 30
+}

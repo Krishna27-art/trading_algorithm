@@ -23,11 +23,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.kite import router as kite_router
-from backend.market import router as market_router
-from backend.signals import router as signals_router
-from backend.stream_routes import router as stream_router
-from backend.system import router as system_router
+from backend.routes.kite import router as kite_router
+from backend.routes.market import router as market_router
+from backend.routes.signals import router as signals_router
+from backend.routes.stream import router as stream_router
+from backend.routes.system import router as system_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("backend_api")
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
     # OFF by default and, if explicitly enabled, starts in app startup only.
     if _env_flag("ENABLE_LEGACY_HISTORY_WARMER", False):
         try:
-            from scanner.history_context_warmer import start_daily_history_warmer
+            from backend.scanner.history_context_warmer import start_daily_history_warmer
 
             start_daily_history_warmer()
             logger.warning("Legacy history warmer enabled via ENABLE_LEGACY_HISTORY_WARMER.")
@@ -92,6 +92,6 @@ app.include_router(system_router)
 # Backtests are offline research: isolated in their own router, protected by
 # the shared secret, and can be switched off entirely in production.
 if _env_flag("ENABLE_BACKTEST_ROUTES", True):
-    from backend.backtest_routes import router as backtest_router
+    from backend.routes.backtest import router as backtest_router
 
     app.include_router(backtest_router)

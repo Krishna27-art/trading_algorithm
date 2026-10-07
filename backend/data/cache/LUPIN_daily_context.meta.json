@@ -1,0 +1,11 @@
+{
+  "symbol": "LUPIN",
+  "instrument_token": 2672641,
+  "interval": "day",
+  "start_date": "2026-08-21",
+  "end_date": "2026-09-30",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-01T21:44:14.322199+05:30",
+  "candle_count": 28,
+  "trading_days": 28
+}

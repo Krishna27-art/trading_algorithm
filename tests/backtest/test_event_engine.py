@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, time
 import pandas as pd
 import pytest
 
-from backtest.event_engine import EventDrivenBacktester, ExecutionPolicy
-from config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
-from indicators.vwap import calculate_session_vwap
+from backend.backtest.strategy_backtester import EventDrivenBacktester, ExecutionPolicy
+from backend.config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
+from backend.indicators.vwap import calculate_session_vwap
 
 
 def _create_simple_session_data() -> pd.DataFrame:

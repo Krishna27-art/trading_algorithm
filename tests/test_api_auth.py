@@ -6,8 +6,8 @@ import pytest
 from fastapi import HTTPException
 from backend.main import app
 from backend.security import verify_shared_secret
-from backend.kite import logout
-from config.settings import settings
+from backend.routes.kite import logout
+from backend.config.settings import settings
 
 
 def test_cors_no_wildcard():

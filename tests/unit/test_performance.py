@@ -5,7 +5,7 @@ Unit tests for Performance Metrics & Golden Dataset Verification.
 from datetime import datetime, date
 import pytest
 import numpy as np
-from backtest.performance import PerformanceAnalyzer, PerformanceReport
+from backend.backtest.performance import PerformanceAnalyzer, PerformanceReport
 
 
 def test_performance_metrics_golden_dataset():

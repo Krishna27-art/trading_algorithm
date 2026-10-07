@@ -1,0 +1,12 @@
+{
+  "symbol": "WELCORP",
+  "instrument_token": 3026177,
+  "interval": "15minute",
+  "start_date": "2026-08-17",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T15:38:24.303517+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 814,
+  "trading_days": 33
+}

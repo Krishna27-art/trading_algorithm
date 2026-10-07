@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
-from data.historical_loader import HistoricalDataLoader
+from backend.data.historical_loader import HistoricalDataLoader
 
 
 def test_valid_candles_pass_validation():

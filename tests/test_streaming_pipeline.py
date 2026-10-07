@@ -2,9 +2,9 @@ from datetime import datetime, time
 import pandas as pd
 import pytest
 
-from streaming.live_market_state import LiveMarketState, live_market_state
-from streaming.live_signal_engine import LiveSignalEngine, live_signal_engine
-from streaming.market_stream_manager import (
+from backend.streaming.live_market_state import LiveMarketState, live_market_state
+from backend.streaming.live_signal_engine import LiveSignalEngine, live_signal_engine
+from backend.streaming.market_stream_manager import (
     MarketStreamManager,
     StreamState,
     market_stream_manager,
@@ -122,7 +122,7 @@ def test_live_market_state_and_signal_engine_candle_close():
 
 
 def test_live_signal_engine_with_level_5_depth():
-    from strategy.ssf_l5_srm_strategy import BookSnapshot
+    from backend.strategy.ssf_l5_srm_strategy import BookSnapshot
 
     token_map = {738561: "RELIANCE"}
     live_market_state.set_token_map(token_map)
@@ -141,9 +141,9 @@ def test_live_signal_engine_with_level_5_depth():
 
 
 def test_fastapi_stream_endpoints(monkeypatch):
-    from backend.stream_routes import stream_market, stream_signals, stream_status
-    import backend.stream_routes as sr_mod
-    from data.time_utils import now_ist_naive
+    from backend.routes.stream import stream_market, stream_signals, stream_status
+    import backend.routes.stream as sr_mod
+    from backend.data.time_utils import now_ist_naive
 
     # Status returns health dictionary
     st = stream_status()
@@ -193,7 +193,7 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
         {"instrument_token": 738561, "tradingsymbol": "RELIANCE", "exchange": "NSE", "lot_size": 1},
         {"instrument_token": 260000, "tradingsymbol": "NIFTY ENERGY", "exchange": "NSE", "lot_size": 1},
     ]
-    mod = sys.modules["streaming.market_stream_manager"]
+    mod = sys.modules["backend.streaming.market_stream_manager"]
     monkeypatch.setattr(mod, "get_active_kite", lambda: fake_kite)
     monkeypatch.setattr(mod, "get_saved_session", lambda: {"api_key": "k", "access_token": "tok"})
 
@@ -243,7 +243,7 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
 def test_market_stream_manager_raises_when_no_kite_client(monkeypatch):
     import sys
 
-    mod = sys.modules["streaming.market_stream_manager"]
+    mod = sys.modules["backend.streaming.market_stream_manager"]
     monkeypatch.setattr(mod, "get_active_kite", lambda: None)
 
     with pytest.raises(RuntimeError, match="No active Zerodha Kite client available"):
@@ -289,7 +289,7 @@ def test_seed_historical_candles_populates_live_history():
 def test_market_stream_manager_timestamp_compatibility():
     """Verify get_status safely computes tick age for naive, IST, UTC and None timestamps."""
     from zoneinfo import ZoneInfo
-    from data.time_utils import now_ist
+    from backend.data.time_utils import now_ist
 
     manager = MarketStreamManager()
 

@@ -7,10 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from data.instrument_resolver import InstrumentResolver, instrument_resolver
-from data.historical_loader import HistoricalDataLoader
-from backend.kite import get_saved_session, get_active_kite_with_diagnostics
-from backend.backtest_routes import trigger_backtest
+from backend.data.instrument_resolver import InstrumentResolver, instrument_resolver
+from backend.data.historical_loader import HistoricalDataLoader
+from backend.routes.kite import get_saved_session, get_active_kite_with_diagnostics
+from backend.routes.backtest import trigger_backtest
 
 
 def test_instrument_resolver_canonical_indices():
@@ -108,11 +108,11 @@ def test_backtest_endpoint_reports_diagnostics_without_kite(monkeypatch):
     # Simulate production mode where synthetic test data is disabled and no active Kite session
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr(
-        "backend.backtest_routes.get_active_kite_with_diagnostics",
+        "backend.routes.backtest.get_active_kite_with_diagnostics",
         lambda force_validate=False: (None, "No active Zerodha Kite session found."),
     )
     monkeypatch.setattr(
-        "data.historical_loader.HistoricalDataLoader.load_cached_data_with_validation",
+        "backend.data.historical_loader.HistoricalDataLoader.load_cached_data_with_validation",
         lambda *args, **kwargs: (None, False),
     )
     with pytest.raises(HTTPException) as exc:

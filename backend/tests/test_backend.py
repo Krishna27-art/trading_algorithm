@@ -33,7 +33,7 @@ def test_correct_secret_accepted(client):
     assert client.post("/kite/logout", headers=AUTH).status_code == 200
 
 def test_unset_secret_is_503(client):
-    sys.modules["config.settings"].settings.app_shared_secret = ""
+    sys.modules["backend.config.settings"].settings.app_shared_secret = ""
     assert client.post("/kite/logout", headers=AUTH).status_code == 503
 
 
@@ -145,7 +145,7 @@ def test_stale_quote_flagged_and_timestamp_is_exchange_time(client):
     assert row["status"] == "STALE" and row["timestamp"] == old.isoformat()
 
 def test_batch_failure_is_explicit_partial_not_swallowed(client, monkeypatch):
-    import backend.market as mk
+    import backend.routes.market as mk
     monkeypatch.setattr(mk, "QUOTE_BATCH_SIZE", 2)
     S.universe = [_rec(s) for s in ("A", "B", "C", "D")]
     def quote(keys):
@@ -210,14 +210,14 @@ def test_stream_signals_reads_engine_once(client):
 
 def test_stream_start_ignores_client_supplied_tokens(client, monkeypatch):
     seen = {}
-    import backend.stream_routes as sr
+    import backend.routes.stream as sr
     monkeypatch.setattr(sr.market_stream_manager, "start_stream",
                         lambda token_to_symbol=None: seen.update(t=token_to_symbol) or {"subscribed_tokens": 1, "symbols_count": 1})
     r = client.post("/api/stream/start", headers=AUTH, json={"999999": "FAKE"})
     assert r.status_code == 200 and seen["t"] is None
 
 def test_stream_start_requires_secret_and_hides_internal_errors(client, monkeypatch):
-    import backend.stream_routes as sr
+    import backend.routes.stream as sr
     assert client.post("/api/stream/start").status_code == 401
     def boom(token_to_symbol=None): raise KeyError("/internal/path/secret")
     monkeypatch.setattr(sr.market_stream_manager, "start_stream", boom)
@@ -386,7 +386,7 @@ def test_evaluation_failure_is_structured_error_not_leaked(client):
 def test_nifty_telemetry_does_not_mutate_shared_settings(client):
     S.kite = _kite(_today_bars(S.now))
     _set_eval(cpr=_pred())
-    cfg = sys.modules["config.settings"].settings.instruments[0]
+    cfg = sys.modules["backend.config.settings"].settings.instruments[0]
     client.get("/api/strategy/telemetry?symbol=NIFTY")
     assert cfg.instrument_token is None and cfg.max_risk_cap is None
 
@@ -421,13 +421,13 @@ def test_backtest_unknown_strategy_400(client):
 
 def test_backtest_unresolved_token_without_cache_is_400_not_token_zero(client):
     S.kite = FakeKite()
-    import backend.backtest_routes as bt
+    import backend.routes.backtest as bt
     r = client.post("/api/strategy/backtest?symbol=ZZZ&strategy=orb", headers=AUTH)
     assert r.status_code == 400 and "instrument_token" in r.json()["detail"]
     assert S.fetch_calls == []  # never attempted a fetch with a fake token
 
 def test_backtest_busy_returns_429(client):
-    import backend.backtest_routes as bt
+    import backend.routes.backtest as bt
     assert bt._backtest_slot.acquire(blocking=False)
     try:
         assert client.get("/api/research/backtest", headers=AUTH).status_code == 429
@@ -435,13 +435,13 @@ def test_backtest_busy_returns_429(client):
         bt._backtest_slot.release()
 
 def test_backtest_resolve_nifty_does_not_mutate_settings():
-    import backend.backtest_routes as bt
+    import backend.routes.backtest as bt
     inst, tok = bt._resolve_instrument("NIFTY", None)
     assert tok == 256265 and inst.instrument_token == 256265
-    assert sys.modules["config.settings"].settings.instruments[0].instrument_token is None
+    assert sys.modules["backend.config.settings"].settings.instruments[0].instrument_token is None
 
 def test_backtest_strategy_aliases():
-    import backend.backtest_routes as bt
+    import backend.routes.backtest as bt
     assert bt._canonical_strategy("sit") == "sector_impulse"
     assert bt._canonical_strategy("ssf") == "ssf_l5_srm"
     assert bt._canonical_strategy("nope") is None

@@ -17,9 +17,9 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from config.settings import InstrumentConfig, InstrumentType, settings
-from data.market_calendar import MarketCalendar
-from strategy.prediction_service import PredictionService, SingleStrategyPrediction
+from backend.config.settings import InstrumentConfig, InstrumentType, settings
+from backend.data.time_utils import MarketCalendar
+from backend.strategy.prediction_service import PredictionService, SingleStrategyPrediction
 
 
 def _create_sample_instrument(symbol: str = "RELIANCE") -> InstrumentConfig:
@@ -96,7 +96,7 @@ def test_aou_live_runtime_single_replay_and_incremental_processing():
     df_initial = _generate_synthetic_15m_history(days=15, today_candles=6, reference_date=test_date)
     ltp = float(df_initial["close"].iloc[-1])
 
-    with patch("strategy.prediction_service.now_ist_naive", return_value=datetime.combine(test_date, datetime.min.time()) + timedelta(hours=11, minutes=0)):
+    with patch("backend.strategy.prediction_service.now_ist_naive", return_value=datetime.combine(test_date, datetime.min.time()) + timedelta(hours=11, minutes=0)):
         # First evaluation
         pred1 = service._evaluate_aou_oss(inst, df_initial, ltp=ltp)
         assert pred1.status in ("WAITING", "NO_TRADE", "AOU_LONG", "AOU_SHORT")
@@ -148,7 +148,7 @@ def test_aou_live_runtime_creates_new_instance_on_new_trading_date():
     day1 = date(2026, 10, 5)  # Monday
     df1 = _generate_synthetic_15m_history(days=15, today_candles=4, reference_date=day1)
 
-    with patch("strategy.prediction_service.now_ist_naive", return_value=datetime.combine(day1, datetime.min.time()) + timedelta(hours=10, minutes=30)):
+    with patch("backend.strategy.prediction_service.now_ist_naive", return_value=datetime.combine(day1, datetime.min.time()) + timedelta(hours=10, minutes=30)):
         service._evaluate_aou_oss(inst, df1, ltp=3500.0)
         runtime1 = service._aou_runtimes.get("TCS")
         assert runtime1 is not None
@@ -157,7 +157,7 @@ def test_aou_live_runtime_creates_new_instance_on_new_trading_date():
     day2 = date(2026, 10, 6)  # Tuesday
     df2 = _generate_synthetic_15m_history(days=15, today_candles=3, reference_date=day2)
 
-    with patch("strategy.prediction_service.now_ist_naive", return_value=datetime.combine(day2, datetime.min.time()) + timedelta(hours=10, minutes=15)):
+    with patch("backend.strategy.prediction_service.now_ist_naive", return_value=datetime.combine(day2, datetime.min.time()) + timedelta(hours=10, minutes=15)):
         service._evaluate_aou_oss(inst, df2, ltp=3520.0)
         runtime2 = service._aou_runtimes.get("TCS")
         assert runtime2 is not None
@@ -174,7 +174,7 @@ def test_aou_stale_previous_session_returns_unavailable():
     friday = date(2026, 10, 2)  # Friday (stale)
     df_stale = _generate_synthetic_15m_history(days=15, today_candles=10, reference_date=friday)
 
-    with patch("strategy.prediction_service.now_ist_naive", return_value=datetime.combine(today, datetime.min.time()) + timedelta(hours=11, minutes=0)):
+    with patch("backend.strategy.prediction_service.now_ist_naive", return_value=datetime.combine(today, datetime.min.time()) + timedelta(hours=11, minutes=0)):
         pred = service._evaluate_aou_oss(inst, df_stale, ltp=1500.0)
         assert pred.status == "UNAVAILABLE"
         assert "stale" in (pred.reason or "").lower()
@@ -189,7 +189,7 @@ def test_aou_non_trading_day_returns_unavailable():
     friday = date(2026, 10, 2)
     df = _generate_synthetic_15m_history(days=15, today_candles=10, reference_date=friday)
 
-    with patch("strategy.prediction_service.now_ist_naive", return_value=datetime.combine(sunday, datetime.min.time()) + timedelta(hours=11, minutes=0)):
+    with patch("backend.strategy.prediction_service.now_ist_naive", return_value=datetime.combine(sunday, datetime.min.time()) + timedelta(hours=11, minutes=0)):
         pred = service._evaluate_aou_oss(inst, df, ltp=1600.0)
         assert pred.status == "UNAVAILABLE"
         assert "not a trading session" in (pred.reason or "").lower()
@@ -206,7 +206,7 @@ def test_aou_independent_runtimes_per_symbol():
     df_rel = _generate_synthetic_15m_history(days=15, today_candles=5, reference_date=today)
     df_tcs = _generate_synthetic_15m_history(days=15, today_candles=4, reference_date=today)
 
-    with patch("strategy.prediction_service.now_ist_naive", return_value=datetime.combine(today, datetime.min.time()) + timedelta(hours=11, minutes=0)):
+    with patch("backend.strategy.prediction_service.now_ist_naive", return_value=datetime.combine(today, datetime.min.time()) + timedelta(hours=11, minutes=0)):
         service._evaluate_aou_oss(inst_rel, df_rel, ltp=2500.0)
         service._evaluate_aou_oss(inst_tcs, df_tcs, ltp=3500.0)
 

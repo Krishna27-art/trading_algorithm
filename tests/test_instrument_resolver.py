@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta
 
-from data.instrument_resolver import (
+from backend.data.instrument_resolver import (
     InstrumentResolver,
     UNIVERSE_TOKEN_CACHE_VERSION,
 )

@@ -4,6 +4,7 @@ import Card from '../components/common/Card'
 import StatusPill from '../components/common/StatusPill'
 import Timestamp from '../components/common/Timestamp'
 import { Loading, ErrorState, EmptyState } from '../components/common/DataStates'
+import StrategyPerformanceSection from '../components/StrategyPerformanceSection'
 import { usePolling } from '../hooks/usePolling'
 import { apiGet, apiPost, hasSharedSecret } from '../api/client'
 
@@ -463,6 +464,9 @@ export default function LiveSignalsPage({ isAuthenticated }) {
           )}
         </>
       )}
+
+      {/* Dynamic Strategy Performance & Signal Journal */}
+      <StrategyPerformanceSection />
     </div>
   )
 }

@@ -1,0 +1,11 @@
+{
+  "symbol": "ICICIBANK",
+  "instrument_token": 1270529,
+  "interval": "day",
+  "start_date": "2025-09-04",
+  "end_date": "2026-09-24",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-09-24T09:56:54.411235",
+  "candle_count": 262,
+  "trading_days": 262
+}

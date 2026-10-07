@@ -5,9 +5,9 @@ Unit Tests for Intraday ORB Strategy Rules and Exits.
 from datetime import date, datetime, time
 import pytest
 
-from config.settings import InstrumentConfig, InstrumentType, StrategyConfig
-from strategy.base_strategy import SignalAction
-from strategy.orb_strategy import IntradayORBStrategy
+from backend.config.settings import InstrumentConfig, InstrumentType, StrategyConfig
+from backend.strategy.base_strategy import SignalAction
+from backend.strategy.orb_strategy import IntradayORBStrategy
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ def test_equity_orb_rejects_trade_when_actual_stop_risk_exceeds_cap():
 
 
 def test_equity_orb_target_uses_actual_accepted_risk():
-    from indicators.orb import OpeningRange
+    from backend.strategy.orb_strategy import OpeningRange
 
     inst = InstrumentConfig(
         symbol="TESTEQ",

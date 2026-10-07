@@ -46,6 +46,20 @@ S = State
 
 
 def _install_stubs():
+    from backend.config.settings import (
+        AppSettings,
+        InstrumentConfig,
+        InstrumentType,
+        RiskConfig,
+        StrategyConfig,
+        TransactionCostConfig,
+    )
+    import backend.streaming.live_market_state as real_lms
+    import backend.data.time_utils as real_tu
+    import backend.backtest.pair_backtester as real_pb
+    import backend.backtest.event_engine as real_ee
+    import backend.backtest.strategy_backtester as real_sb
+
     settings = SimpleNamespace(
         app_shared_secret="s3cret",
         kite_api_key="k", kite_api_secret="x",
@@ -58,7 +72,15 @@ def _install_stubs():
         risk=SimpleNamespace(initial_capital=100000.0),
     )
     _mod("config")
-    _mod("config.settings", settings=settings)
+    _mod("backend.config.settings",
+         settings=settings,
+         InstrumentConfig=InstrumentConfig,
+         StrategyConfig=StrategyConfig,
+         RiskConfig=RiskConfig,
+         InstrumentType=InstrumentType,
+         TransactionCostConfig=TransactionCostConfig,
+         AppSettings=AppSettings)
+
 
     class Rec(SimpleNamespace):
         pass
@@ -68,14 +90,14 @@ def _install_stubs():
         def all_stocks(self):
             return S.universe
 
-    _mod("config.universe",
+    _mod("backend.config.universe",
          StockUniverse=StockUniverse,
          resolve_universe_tokens=lambda kite_client=None: dict(S.token_map),
          create_instrument_config_for_equity=lambda sym, tok: SimpleNamespace(
              symbol=sym, instrument_token=tok, max_risk_cap=None, lot_size=1))
 
     _mod("broker")
-    _mod("broker.kite_adapter",
+    _mod("backend.broker.kite_adapter",
          get_active_kite=lambda: S.kite,
          get_active_kite_with_diagnostics=lambda force_validate=False: (S.kite, S.auth_err),
          get_saved_session=lambda: None,
@@ -85,15 +107,15 @@ def _install_stubs():
              get_latest_book_snapshot=lambda s: None,
              make_book_snapshot_from_quote=lambda q, s: None))
 
-    _mod("data")
-    _mod("data.time_utils",
+    _mod("backend.data.time_utils",
+         IST=getattr(real_tu, "IST", None),
          now_ist_iso=lambda: S.now.isoformat(),
          now_ist_naive=lambda: S.now,
-         today_ist=lambda: S.now.date())
-    _mod("data.market_calendar", MarketCalendar=SimpleNamespace(
-        is_trading_day=lambda d: S.trading_day,
-        get_session_phase=lambda t: SimpleNamespace(value="CONTINUOUS")))
-    _mod("data.instrument_resolver", instrument_resolver=SimpleNamespace(
+         today_ist=lambda: S.now.date(),
+         MarketCalendar=SimpleNamespace(
+             is_trading_day=lambda d: S.trading_day,
+             get_session_phase=lambda t: SimpleNamespace(value="CONTINUOUS")))
+    _mod("backend.data.instrument_resolver", instrument_resolver=SimpleNamespace(
         resolve_token=lambda sym, exchange=None, kite_client=None: S.token_map.get(sym)))
 
     class HistoricalDataLoader:
@@ -106,9 +128,14 @@ def _install_stubs():
             S.fetch_calls.append(kw)
             raise RuntimeError("no real data in test")
 
-    _mod("data.historical_loader", HistoricalDataLoader=HistoricalDataLoader)
+    _mod("backend.data.historical_loader", HistoricalDataLoader=HistoricalDataLoader)
     _mod("backtest")
-    _mod("backtest.strategy_backtester", StrategyBacktester=object)
+    _mod("backend.backtest.strategy_backtester",
+         StrategyBacktester=getattr(real_sb, "StrategyBacktester", object),
+         EventDrivenBacktester=getattr(real_sb, "EventDrivenBacktester", object),
+         ExecutionPolicy=getattr(real_sb, "ExecutionPolicy", object))
+    _mod("backend.backtest.pair_backtester", PairBacktester=getattr(real_pb, "PairBacktester", object))
+
 
     _mod("streaming")
 
@@ -117,7 +144,7 @@ def _install_stubs():
             raise RuntimeError("boom")
         return S.stream_status
 
-    _mod("streaming.market_stream_manager", market_stream_manager=SimpleNamespace(
+    _mod("backend.streaming.market_stream_manager", market_stream_manager=SimpleNamespace(
         get_status=get_status,
         start_stream=lambda token_to_symbol=None: {"subscribed_tokens": 3, "symbols_count": 3},
         stop_stream=lambda: {"status": "stopped"}))
@@ -126,10 +153,12 @@ def _install_stubs():
         S.predictions_calls += 1
         return S.predictions
 
-    _mod("streaming.live_signal_engine", live_signal_engine=SimpleNamespace(
+    _mod("backend.streaming.live_signal_engine", live_signal_engine=SimpleNamespace(
         get_all_predictions=get_all_predictions))
-    _mod("streaming.live_market_state", live_market_state=SimpleNamespace(
-        get_all_symbols_state=lambda: S.market_state))
+    _mod("backend.streaming.live_market_state",
+         LiveMarketState=getattr(real_lms, "LiveMarketState", None),
+         live_market_state=SimpleNamespace(
+             get_all_symbols_state=lambda: S.market_state))
 
     _mod("strategy")
 
@@ -139,18 +168,19 @@ def _install_stubs():
             raise ValueError("strategy exploded")
         return S.eval_result
 
-    _mod("strategy.prediction_service",
+    _mod("backend.strategy.prediction_service",
          prediction_service=SimpleNamespace(evaluate_symbol=evaluate_symbol))
 
     _mod("scanner")
-    _mod("scanner.history_context_warmer",
+    _mod("backend.scanner.history_context_warmer",
          start_daily_history_warmer=lambda: setattr(S, "warmer_calls", S.warmer_calls + 1))
-    _mod("scanner.stock_ranker", StockUniverseScanner=object)
+    _mod("backend.scanner.stock_ranker", StockUniverseScanner=object)
 
     class KiteConnect:
         def __init__(self, api_key=None): pass
         def login_url(self): return "https://kite.example/login"
     _mod("kiteconnect", KiteConnect=KiteConnect)
+
 
 
 _install_stubs()
@@ -174,12 +204,16 @@ def reset_state():
     S.token_map = {}
     S.market_state = {}
     S.fetch_calls = []
-    sys.modules["config.settings"].settings.app_shared_secret = "s3cret"
-    sys.modules["config.settings"].settings.instruments[0].instrument_token = None
-    sys.modules["config.settings"].settings.instruments[0].max_risk_cap = None
-    import backend.signals as sg
-    sg._bars_cache.clear()
+    sys.modules["backend.config.settings"].settings.app_shared_secret = "s3cret"
+    sys.modules["backend.config.settings"].settings.instruments[0].instrument_token = None
+    sys.modules["backend.config.settings"].settings.instruments[0].max_risk_cap = None
+    import backend.routes.signals as sg
+    if hasattr(sg, "_bars_cache"):
+        sg._bars_cache.clear()
     yield
+
+
+
 
 
 @pytest.fixture

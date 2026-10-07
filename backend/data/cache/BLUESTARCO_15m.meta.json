@@ -1,0 +1,12 @@
+{
+  "symbol": "BLUESTARCO",
+  "instrument_token": 2127617,
+  "interval": "15minute",
+  "start_date": "2026-08-17",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T20:54:35.820948+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 768,
+  "trading_days": 32
+}

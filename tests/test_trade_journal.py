@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from backtest.strategy_backtester import StrategyBacktester
-from config.settings import settings
-from database.db import DatabaseManager
-from database.models import OrderDirection, TradeRecord
+from backend.backtest.strategy_backtester import StrategyBacktester
+from backend.config.settings import settings
+from backend.database.db import DatabaseManager
+from backend.database.db import OrderDirection, TradeRecord
 
 
 def _trade(trade_id: str, is_paper: bool) -> TradeRecord:
@@ -45,7 +45,7 @@ def test_open_live_trade_query_excludes_backtest_rows(tmp_path):
 
 
 def test_strategy_backtester_persistence_is_opt_in():
-    from strategy.orb_strategy import IntradayORBStrategy
+    from backend.strategy.orb_strategy import IntradayORBStrategy
 
     backtester = StrategyBacktester(
         strategy_factory=lambda: IntradayORBStrategy(

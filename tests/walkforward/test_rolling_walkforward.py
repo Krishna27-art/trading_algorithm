@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.rolling_walk_forward import RollingWalkForwardValidator
-from config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
-from indicators.vwap import calculate_session_vwap
+from backend.backtest.rolling_walk_forward import RollingWalkForwardValidator
+from backend.config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
+from backend.indicators.vwap import calculate_session_vwap
 
 
 def _generate_multi_day_data(num_days: int = 40) -> pd.DataFrame:

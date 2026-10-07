@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from data.time_utils import (
+from backend.data.time_utils import (
     IST,
     now_ist,
     now_ist_iso,
@@ -40,7 +40,7 @@ def test_now_ist_iso_contains_explicit_offset():
 
 
 def test_strategy_state_uses_ist_wall_clock(monkeypatch):
-    from backend import signals
+    from backend.routes import signals
 
     fixed_ist = datetime(2026, 10, 1, 10, 0, 0)
 
@@ -56,7 +56,7 @@ def test_strategy_state_uses_ist_wall_clock(monkeypatch):
 
 
 def test_strategy_state_does_not_depend_on_server_timezone(monkeypatch):
-    from backend import signals
+    from backend.routes import signals
 
     monkeypatch.setattr(
         signals,

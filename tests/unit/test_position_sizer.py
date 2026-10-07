@@ -3,8 +3,8 @@ Unit tests for Position Sizer: Verifying true economic stop risk enforcement.
 """
 
 import pytest
-from config.settings import InstrumentConfig, InstrumentType, RiskConfig
-from risk.position_sizer import PositionSizer
+from backend.config.settings import InstrumentConfig, InstrumentType, RiskConfig
+from backend.backtest import PositionSizer
 
 
 def test_position_sizer_true_economic_risk_invariant():

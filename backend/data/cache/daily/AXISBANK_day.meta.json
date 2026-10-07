@@ -1,0 +1,11 @@
+{
+  "symbol": "AXISBANK",
+  "instrument_token": 1510401,
+  "interval": "day",
+  "start_date": "2025-09-04",
+  "end_date": "2026-09-24",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-09-24T09:56:58.612403",
+  "candle_count": 262,
+  "trading_days": 262
+}

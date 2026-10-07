@@ -1,0 +1,12 @@
+{
+  "symbol": "IPCALAB",
+  "instrument_token": 418049,
+  "interval": "15minute",
+  "start_date": "2026-08-13",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T15:40:52.188267+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 825,
+  "trading_days": 33
+}

@@ -1,0 +1,12 @@
+{
+  "symbol": "TNTELE",
+  "instrument_token": 2530305,
+  "interval": "15minute",
+  "start_date": "2026-08-21",
+  "end_date": "2026-10-05",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-05T13:50:37.150758+05:30",
+  "latest_completed_candle": "2026-10-05T13:30:00",
+  "candle_count": 735,
+  "trading_days": 30
+}

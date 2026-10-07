@@ -2,8 +2,8 @@
 Unit Tests for October 2024 Revised SEBI Indian Market Transaction Costs.
 """
 
-from config.settings import InstrumentType, TransactionCostConfig
-from risk.transaction_costs import TransactionCostCalculator
+from backend.config.settings import InstrumentType, TransactionCostConfig
+from backend.backtest import TransactionCostCalculator
 
 
 def test_futures_transaction_costs():

@@ -5,9 +5,9 @@ Unit Tests for Risk Management, Position Sizing, and Circuit Breaker.
 from datetime import date, time
 import pytest
 
-from config.settings import InstrumentConfig, InstrumentType, RiskConfig
-from risk.position_sizer import PositionSizer
-from risk.risk_manager import RiskManager
+from backend.config.settings import InstrumentConfig, InstrumentType, RiskConfig
+from backend.backtest import PositionSizer
+from backend.backtest import RiskManager
 
 
 def test_position_sizing_futures_lot_rounding():

@@ -1,0 +1,11 @@
+{
+  "symbol": "RELIANCE",
+  "instrument_token": 738561,
+  "interval": "day",
+  "start_date": "2025-09-05",
+  "end_date": "2026-09-25",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-09-25T14:22:00.694819",
+  "candle_count": 262,
+  "trading_days": 262
+}

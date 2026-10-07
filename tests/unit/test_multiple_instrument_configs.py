@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
-from backtest.event_engine import EventDrivenBacktester
-from config.settings import AppSettings, InstrumentConfig, InstrumentType
+from backend.backtest.strategy_backtester import EventDrivenBacktester
+from backend.config.settings import AppSettings, InstrumentConfig, InstrumentType
 
 
 def _generate_test_candles(base_price: float, days: int = 5) -> pd.DataFrame:

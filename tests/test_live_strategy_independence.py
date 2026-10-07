@@ -26,12 +26,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from config.settings import settings
-from config.universe import create_instrument_config_for_equity
-from strategy.prediction_service import PredictionService
-from strategy.ssf_l5_srm_strategy import BookSnapshot, SsfL5SrmStrategy
-from streaming.ssf_live_runtime import SSFLiveRuntime
-from streaming.ssf_market_context import SSFContextStore, SSFMarketContext
+from backend.config.settings import settings
+from backend.config.universe import create_instrument_config_for_equity
+from backend.strategy.prediction_service import PredictionService
+from backend.strategy.ssf_l5_srm_strategy import BookSnapshot, SsfL5SrmStrategy
+from backend.streaming.ssf_runtime import SSFLiveRuntime
+from backend.streaming.ssf_runtime import SSFContextStore, SSFMarketContext
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +189,10 @@ def test_cpr_evaluates_with_prior_sessions(monkeypatch):
 
     today = date.today()
     monkeypatch.setattr(
-        "strategy.prediction_service.now_ist_naive",
+        "backend.strategy.prediction_service.now_ist_naive",
         lambda: datetime.combine(today, time(10, 30)),
     )
-    from data.instrument_resolver import instrument_resolver
+    from backend.data.instrument_resolver import instrument_resolver
     monkeypatch.setattr(instrument_resolver, "resolve_lot_size", lambda *args, **kwargs: 1)
     # Find the most recent weekday before today
     yesterday = today - timedelta(days=1)
@@ -243,7 +243,7 @@ def test_dual_ema_requires_prior_session():
 
 def test_dual_ema_sma200_not_nan_when_warmup_satisfied():
     """When enough history is provided SMA200 must be a valid finite number."""
-    from strategy.dual_ema_strategy import BufferedDualEMAStrategy
+    from backend.strategy.dual_ema_strategy import BufferedDualEMAStrategy
 
     # Build ~640 bars (26 sessions × 25 bars) so the SMA200 window is satisfied.
     df = _make_multi_day_df(n_days=26, bars_per_day=25)
@@ -296,7 +296,7 @@ def test_apex_requires_prior_session():
 
 def test_apex_lookback_built_from_explicit_day_concat():
     """The APEX evaluator must build lookback_df from explicit prior days, not positional slicing."""
-    from strategy.apex_engine import ApexStrategy
+    from backend.strategy.apex_engine import ApexStrategy
 
     today = date.today()
     yesterday = today - timedelta(days=1)
@@ -344,7 +344,7 @@ def test_sit_no_peer_context_returns_unavailable():
     # SectorPeerManager is imported locally inside _evaluate_sector_impulse.
     # Patch at the data module level.
     with patch(
-        "data.sector_peer_manager.SectorPeerManager.build_peer_context",
+        "backend.data.sector_peer_manager.SectorPeerManager.build_peer_context",
         return_value=None,
     ):
         preds, _ = svc.evaluate_symbol(
@@ -365,7 +365,7 @@ def test_sit_no_fake_volume_in_peer_manager():
     Verified by inspecting the source code directly.
     """
     import inspect
-    from data import sector_peer_manager
+    from backend.data import sector_peer_manager
 
     source = inspect.getsource(sector_peer_manager)
     assert 'df_leader["volume"] = 1000' not in source, (
@@ -589,7 +589,7 @@ def test_no_synthetic_candles_in_live_candles():
 def test_no_hardcoded_volume_in_sector_peer_manager():
     """SectorPeerManager source must not contain the literal fake volume assignment."""
     import inspect
-    from data import sector_peer_manager
+    from backend.data import sector_peer_manager
     source = inspect.getsource(sector_peer_manager)
     # The old code had: df_leader["volume"] = 1000
     # This must not exist any more

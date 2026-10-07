@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import Header, HTTPException, status
 
-from config.settings import settings
+from backend.config.settings import settings
 
 
 def verify_shared_secret(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):

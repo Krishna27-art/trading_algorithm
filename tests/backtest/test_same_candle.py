@@ -6,8 +6,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from backtest.event_engine import EventDrivenBacktester, ExecutionPolicy
-from config.settings import AppSettings, InstrumentConfig, InstrumentType
+from backend.backtest.strategy_backtester import EventDrivenBacktester, ExecutionPolicy
+from backend.config.settings import AppSettings, InstrumentConfig, InstrumentType
 
 
 def _make_day_candles(bars_data):

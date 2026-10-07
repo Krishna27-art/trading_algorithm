@@ -20,13 +20,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backend.signals import get_universe_scan
-from config.settings import InstrumentConfig, InstrumentType, settings
-from strategy.apex_engine import ApexAivemStrategy, EngineConfig
-from strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
-from strategy.dual_ema_strategy import BufferedDualEMAStrategy
-from strategy.orb_strategy import IntradayORBStrategy
-from strategy.prediction_service import PredictionService, SingleStrategyPrediction
+from backend.routes.signals import get_universe_scan
+from backend.config.settings import InstrumentConfig, InstrumentType, settings
+from backend.strategy.apex_engine import ApexAivemStrategy, EngineConfig
+from backend.strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
+from backend.strategy.dual_ema_strategy import BufferedDualEMAStrategy
+from backend.strategy.orb_strategy import IntradayORBStrategy
+from backend.strategy.prediction_service import PredictionService, SingleStrategyPrediction
 
 
 def _create_sample_instrument():
@@ -187,7 +187,7 @@ def test_apex_dynamic_reweighting_without_fabricated_zeros():
 
 def test_backend_scanner_unauthenticated_gating():
     """Assertion 8, 9, 10: When Kite is unauthenticated, scanner returns AUTH_REQUIRED with zero synthetic candidates."""
-    with patch("backend.signals.get_active_kite", return_value=None):
+    with patch("backend.routes.signals.get_active_kite", return_value=None):
         res = get_universe_scan(top_n=5)
         assert res["status"] == "AUTH_REQUIRED"
         assert res["data_source"] == "NONE"
@@ -198,11 +198,11 @@ def test_backend_scanner_unauthenticated_gating():
 def test_no_automatic_order_execution_in_system():
     """Assertion 14: Confirms no auto-trading / paper-broker modules exist or place orders."""
     import importlib.util
-    paper_broker_spec = importlib.util.find_spec("broker.paper_broker")
-    assert paper_broker_spec is None, "broker.paper_broker must remain deleted!"
+    paper_broker_spec = importlib.util.find_spec("backend.broker.paper_broker")
+    assert paper_broker_spec is None, "backend.broker.paper_broker must remain deleted!"
 
     # Ensure backend endpoints are read-only
-    from backend.kite import router as kite_router
+    from backend.routes.kite import router as kite_router
     route_paths = [r.path for r in kite_router.routes]
     assert "/api/orders/place" not in route_paths
     assert "/api/orders/cancel" not in route_paths

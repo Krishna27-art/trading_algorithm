@@ -1,0 +1,12 @@
+{
+  "symbol": "HAWKINCOOK",
+  "instrument_token": 1137665,
+  "interval": "15minute",
+  "start_date": "2026-08-21",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T20:20:27.412868+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 774,
+  "trading_days": 31
+}

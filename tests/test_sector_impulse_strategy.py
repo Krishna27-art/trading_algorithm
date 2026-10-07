@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from config.settings import InstrumentConfig, StrategyConfig
-from strategy.base_strategy import BaseStrategy, StrategySignal
-from strategy.sector_impulse_strategy import PeerContext, SectorImpulseStrategy, SITConfig
+from backend.config.settings import InstrumentConfig, StrategyConfig
+from backend.strategy.base_strategy import BaseStrategy, StrategySignal
+from backend.strategy.sector_impulse_strategy import PeerContext, SectorImpulseStrategy, SITConfig
 
 
 def _synth(days=15, seed=1, base=1000.0, bars_per_day=25):
@@ -103,7 +103,7 @@ def test_on_tick_exits_at_time_square_off(strategy):
 
 
 def test_disabled_on_expiry_day(strategy):
-    from strategy.sector_impulse_strategy import _last_monthly_weekday
+    from backend.strategy.sector_impulse_strategy import _last_monthly_weekday
     expiry = _last_monthly_weekday(date(2025, 1, 15), SITConfig().expiry_weekday)
     strategy.reset_session(expiry)
     assert strategy.model is None
@@ -112,7 +112,7 @@ def test_disabled_on_expiry_day(strategy):
 
 def test_sector_peer_manager_classification_and_context():
     """Verifies SectorPeerManager correctly identifies sectors and builds context."""
-    from data.sector_peer_manager import SectorPeerManager
+    from backend.data.sector_peer_manager import SectorPeerManager
 
     # 1. Classification
     it_sec = SectorPeerManager.get_sector_for_symbol("INFY")

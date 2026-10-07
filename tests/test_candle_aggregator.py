@@ -4,7 +4,7 @@ Unit tests for data.candle_aggregator (Candle and CandleAggregator).
 
 from datetime import datetime, timedelta
 import pytest
-from data.candle_aggregator import Candle, CandleAggregator
+from backend.data.candle_aggregator import Candle, CandleAggregator
 
 
 def test_candle_update_and_dict():

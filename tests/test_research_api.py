@@ -10,8 +10,8 @@ import os
 import pytest
 from datetime import datetime, time
 
-from backend.backtest_routes import get_research_backtest, post_research_backtest
-from strategy.prediction_service import (
+from backend.routes.backtest import get_research_backtest, post_research_backtest
+from backend.strategy.prediction_service import (
     CandidatePrediction,
     PredictionService,
     SingleStrategyPrediction,
@@ -149,7 +149,7 @@ def test_prediction_service_extract_key_insights():
 
 def test_research_backtest_endpoints(monkeypatch):
     """Tests GET and POST /api/research/backtest return all 6 strategies and comparison table."""
-    from data.historical_loader import HistoricalDataLoader
+    from backend.data.historical_loader import HistoricalDataLoader
 
     df_fixture = HistoricalDataLoader.generate_synthetic_nifty_data(days=20, base_price=24000.0)
     monkeypatch.setattr(
@@ -202,13 +202,13 @@ def test_research_backtest_endpoints(monkeypatch):
 
 def test_prediction_service_all_strategies(monkeypatch):
     """Tests PredictionService.evaluate_symbol produces predictions for all 7 strategies."""
-    from data.historical_loader import HistoricalDataLoader
-    from data.instrument_resolver import instrument_resolver
+    from backend.data.historical_loader import HistoricalDataLoader
+    from backend.data.instrument_resolver import instrument_resolver
 
     df = HistoricalDataLoader.generate_synthetic_nifty_data(days=15, seed=42)
     last_date = df["datetime"].iloc[-1].date()
     monkeypatch.setattr(
-        "strategy.prediction_service.now_ist_naive",
+        "backend.strategy.prediction_service.now_ist_naive",
         lambda: datetime.combine(last_date, time(15, 30)),
     )
     monkeypatch.setattr(instrument_resolver, "resolve_lot_size", lambda *args, **kwargs: 25)
@@ -260,9 +260,9 @@ def test_consensus_with_unavailable_and_no_trade_strategies():
 
 def test_prediction_service_with_real_book_snapshot_and_peer_context(monkeypatch):
     """Verifies evaluate_symbol successfully incorporates BookSnapshot and PeerContext."""
-    from data.historical_loader import HistoricalDataLoader
-    from strategy.ssf_l5_srm_strategy import BookSnapshot
-    from strategy.sector_impulse_strategy import PeerContext
+    from backend.data.historical_loader import HistoricalDataLoader
+    from backend.strategy.ssf_l5_srm_strategy import BookSnapshot
+    from backend.strategy.sector_impulse_strategy import PeerContext
 
     df_own = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=50, base_price=1000.0)
     df_l = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=51, base_price=2500.0)
@@ -271,7 +271,7 @@ def test_prediction_service_with_real_book_snapshot_and_peer_context(monkeypatch
 
     last_date = df_own["datetime"].iloc[-1].date()
     monkeypatch.setattr(
-        "strategy.prediction_service.now_ist_naive",
+        "backend.strategy.prediction_service.now_ist_naive",
         lambda: datetime.combine(last_date, time(15, 30)),
     )
 

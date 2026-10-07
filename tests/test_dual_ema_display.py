@@ -2,9 +2,9 @@ from datetime import datetime, date
 
 import pandas as pd
 
-from config.settings import InstrumentConfig, InstrumentType, StrategyConfig
-from strategy.dual_ema_strategy import BufferedDualEMAStrategy
-from strategy.prediction_service import PredictionService
+from backend.config.settings import InstrumentConfig, InstrumentType, StrategyConfig
+from backend.strategy.dual_ema_strategy import BufferedDualEMAStrategy
+from backend.strategy.prediction_service import PredictionService
 
 
 def _instrument():

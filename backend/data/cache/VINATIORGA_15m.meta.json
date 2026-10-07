@@ -1,0 +1,11 @@
+{
+  "symbol": "VINATIORGA",
+  "instrument_token": 4445185,
+  "interval": "15minute",
+  "start_date": "2026-08-21",
+  "end_date": "2026-10-05",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-05T10:18:28.947967+05:30",
+  "candle_count": 730,
+  "trading_days": 30
+}

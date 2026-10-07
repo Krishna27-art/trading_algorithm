@@ -1,0 +1,12 @@
+{
+  "symbol": "UNIONBANK",
+  "instrument_token": 2752769,
+  "interval": "15minute",
+  "start_date": "2026-08-14",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T20:53:17.552520+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 784,
+  "trading_days": 33
+}

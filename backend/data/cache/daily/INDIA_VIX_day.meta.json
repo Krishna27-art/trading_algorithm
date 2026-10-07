@@ -1,0 +1,11 @@
+{
+  "symbol": "INDIA",
+  "instrument_token": 264969,
+  "interval": "day",
+  "start_date": "2026-04-28",
+  "end_date": "2026-09-25",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-09-25T14:22:01.501051",
+  "candle_count": 105,
+  "trading_days": 105
+}

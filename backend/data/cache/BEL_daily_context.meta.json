@@ -1,0 +1,11 @@
+{
+  "symbol": "BEL",
+  "instrument_token": 98049,
+  "interval": "day",
+  "start_date": "2026-08-21",
+  "end_date": "2026-09-30",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-01T21:43:25.162192+05:30",
+  "candle_count": 28,
+  "trading_days": 28
+}

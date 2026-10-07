@@ -7,8 +7,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from config.settings import InstrumentConfig, InstrumentType
-from data.historical_loader import HistoricalDataLoader
+from backend.config.settings import InstrumentConfig, InstrumentType
+from backend.data.historical_loader import HistoricalDataLoader
 
 
 def test_real_data_required_fails_when_unavailable(tmp_path, monkeypatch):

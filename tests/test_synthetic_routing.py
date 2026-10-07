@@ -1,7 +1,7 @@
 import os
 import pytest
 
-from scanner.stock_ranker import StockUniverseScanner
+from backend.scanner.stock_ranker import StockUniverseScanner
 
 
 def test_scanner_is_real_only_by_default(monkeypatch):

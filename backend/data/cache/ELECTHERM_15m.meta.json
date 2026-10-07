@@ -1,0 +1,12 @@
+{
+  "symbol": "ELECTHERM",
+  "instrument_token": 1144065,
+  "interval": "15minute",
+  "start_date": "2026-08-21",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T15:38:09.346485+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 772,
+  "trading_days": 31
+}

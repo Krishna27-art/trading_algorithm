@@ -5,10 +5,10 @@ Integration Tests for Event-Driven Backtesting and Walk-Forward Engine.
 from datetime import datetime
 import pytest
 
-from backtest.event_engine import EventDrivenBacktester
-from backtest.walk_forward import WalkForwardValidator
-from config.settings import InstrumentConfig, InstrumentType, settings
-from data.historical_loader import HistoricalDataLoader
+from backend.backtest.strategy_backtester import EventDrivenBacktester
+from backend.backtest.walk_forward import WalkForwardValidator
+from backend.config.settings import InstrumentConfig, InstrumentType, settings
+from backend.data.historical_loader import HistoricalDataLoader
 
 
 def test_event_driven_backtester_end_to_end():
@@ -49,7 +49,7 @@ def test_walk_forward_validation():
 
 
 def test_rolling_walk_forward_validation():
-    from backtest.rolling_walk_forward import RollingWalkForwardValidator
+    from backend.backtest.rolling_walk_forward import RollingWalkForwardValidator
 
     df = HistoricalDataLoader.generate_synthetic_nifty_data(
         start_date=datetime(2025, 1, 1),

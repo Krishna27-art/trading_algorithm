@@ -2,8 +2,8 @@ from datetime import date, datetime, time
 
 import pandas as pd
 
-from config.settings import InstrumentConfig, StrategyConfig
-from strategy.apex_engine import ApexStrategy, EngineConfig
+from backend.config.settings import InstrumentConfig, StrategyConfig
+from backend.strategy.apex_engine import ApexStrategy, EngineConfig
 
 
 def _history():

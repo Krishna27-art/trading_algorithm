@@ -2,12 +2,12 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 import pytest
 
-from backend.market import get_market_prices
+from backend.routes.market import get_market_prices
 
 
 def test_market_prices_unauthenticated():
     """When Kite is disconnected, return AUTH_REQUIRED and empty stocks array."""
-    with patch("backend.market.get_active_kite_with_diagnostics", return_value=(None, "Not logged in")):
+    with patch("backend.routes.market.get_active_kite_with_diagnostics", return_value=(None, "Not logged in")):
         res = get_market_prices()
         assert res["status"] == "AUTH_REQUIRED"
         assert res["data_source"] == "NONE"
@@ -42,7 +42,7 @@ def test_market_prices_authenticated_700_stocks():
 
     mock_kite.quote.side_effect = mock_quote
 
-    with patch("backend.market.get_active_kite_with_diagnostics", return_value=(mock_kite, None)):
+    with patch("backend.routes.market.get_active_kite_with_diagnostics", return_value=(mock_kite, None)):
         res = get_market_prices()
         assert res["status"] == "success"
         assert res["data_source"] == "REAL_KITE"
@@ -83,7 +83,7 @@ def test_market_prices_partial_data_unavailable():
         }
     }
 
-    with patch("backend.market.get_active_kite_with_diagnostics", return_value=(mock_kite, None)):
+    with patch("backend.routes.market.get_active_kite_with_diagnostics", return_value=(mock_kite, None)):
         res = get_market_prices()
         assert res["status"] in ("success", "PARTIAL")
         assert res["count"] == 700

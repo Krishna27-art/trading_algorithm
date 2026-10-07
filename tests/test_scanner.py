@@ -6,14 +6,14 @@ from datetime import date
 from pathlib import Path
 import pytest
 
-from config.universe import (
+from backend.config.universe import (
     StockUniverse,
     create_instrument_config_for_equity,
     resolve_universe_tokens,
 )
-from config.settings import InstrumentType
-from data.historical_loader import HistoricalDataLoader
-from scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
+from backend.config.settings import InstrumentType
+from backend.data.historical_loader import HistoricalDataLoader
+from backend.scanner.stock_ranker import NiftyUniverseScanner, StockRankingMetrics
 
 
 def test_universe_constituent_count_and_resolution():
@@ -28,7 +28,7 @@ def test_universe_constituent_count_and_resolution():
 
 
 def test_universe_token_resolution_uses_kite_master(tmp_path):
-    from data.instrument_resolver import InstrumentResolver
+    from backend.data.instrument_resolver import InstrumentResolver
 
     class FakeKite:
         def instruments(self, exchange):
@@ -150,9 +150,9 @@ def test_create_instrument_config_for_equity():
 
 
 def test_fastapi_scanner_and_multi_symbol_endpoints(monkeypatch):
-    from backend.signals import get_universe_scan
-    from backend.backtest_routes import trigger_backtest
-    from data.historical_loader import HistoricalDataLoader
+    from backend.routes.signals import get_universe_scan
+    from backend.routes.backtest import trigger_backtest
+    from backend.data.historical_loader import HistoricalDataLoader
 
     # Unauthenticated scanner returns AUTH_REQUIRED
     scan_res = get_universe_scan(top_n=5)
@@ -184,7 +184,7 @@ def test_scanner_fails_closed_without_kite():
 
 
 def test_700_stock_universe_abstraction():
-    from config.universe import StockUniverse
+    from backend.config.universe import StockUniverse
 
     universe = StockUniverse()
     assert len(universe.large_cap_stocks) == 100
@@ -201,7 +201,7 @@ def test_700_stock_universe_abstraction():
 
 
 def test_liquidity_filter_layer():
-    from scanner.liquidity_filter import LiquidityFilter, LiquidityStatus
+    from backend.scanner.liquidity_filter import LiquidityFilter, LiquidityStatus
 
     lfilter = LiquidityFilter()
 
@@ -247,7 +247,7 @@ def test_scanning_pipeline_summary_counters():
 
 
 def test_700_stock_universe_exact_counts_and_zero_duplicates():
-    from config.universe import StockUniverse
+    from backend.config.universe import StockUniverse
 
     universe = StockUniverse()
     all_stocks = universe.all_stocks
@@ -282,7 +282,7 @@ def test_700_stock_universe_exact_counts_and_zero_duplicates():
 
 def test_stock_universe_validation_failure_raises_error(tmp_path):
     import json
-    from config.universe import StockUniverse
+    from backend.config.universe import StockUniverse
 
     # Case 1: Less than 300 stocks (299) — soft-degrade: no ValueError, but a warning is logged
     # (Fix 3.4: universe no longer hard-crashes on count mismatch)
@@ -317,7 +317,7 @@ def test_stock_universe_validation_failure_raises_error(tmp_path):
 
 
 def test_instrument_resolver_300_universe_and_unresolved_reporting():
-    from data.instrument_resolver import instrument_resolver
+    from backend.data.instrument_resolver import instrument_resolver
 
     test_syms = ["RELIANCE", "TCS", "UNKNOWN_XYZ_999"]
     resolved_map, unresolved = instrument_resolver.resolve_universe(
@@ -330,7 +330,7 @@ def test_instrument_resolver_300_universe_and_unresolved_reporting():
 
 
 def test_scanner_uses_700_stocks_without_nifty50_fallback():
-    from scanner.stock_ranker import StockUniverseScanner
+    from backend.scanner.stock_ranker import StockUniverseScanner
 
     scanner = StockUniverseScanner()
     assert len(scanner.universe.all_stocks) == 700
@@ -474,7 +474,7 @@ def test_missing_historical_context_is_not_ranked():
 
 
 def test_liquidity_filter_rejects_missing_average_volume():
-    from scanner.liquidity_filter import (
+    from backend.scanner.liquidity_filter import (
         LiquidityFilter,
         LiquidityStatus,
     )
@@ -497,7 +497,7 @@ def test_liquidity_filter_rejects_missing_average_volume():
 
 
 def test_liquidity_filter_does_not_use_current_volume_as_history():
-    from scanner.liquidity_filter import (
+    from backend.scanner.liquidity_filter import (
         LiquidityFilter,
         LiquidityStatus,
     )

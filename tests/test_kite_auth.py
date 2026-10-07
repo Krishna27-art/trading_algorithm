@@ -2,7 +2,7 @@ import logging
 from unittest.mock import MagicMock
 import pytest
 
-from backend.kite import kite_callback
+from backend.routes.kite import kite_callback
 
 
 def test_kite_callback_never_logs_request_token(caplog):
@@ -33,15 +33,15 @@ def test_kite_callback_exception_sanitizes_redirect_url(monkeypatch):
     mock_kite_instance.generate_session = mock_generate_session
 
     monkeypatch.setattr(
-        "backend.kite.KiteConnect",
+        "backend.routes.kite.KiteConnect",
         lambda *args, **kwargs: mock_kite_instance,
     )
     monkeypatch.setattr(
-        "backend.kite.settings.kite_api_key",
+        "backend.routes.kite.settings.kite_api_key",
         "mock_api_key",
     )
     monkeypatch.setattr(
-        "backend.kite.settings.kite_api_secret",
+        "backend.routes.kite.settings.kite_api_secret",
         "mock_api_secret",
     )
 

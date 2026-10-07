@@ -1,7 +1,7 @@
 import pandas as pd
 
-from scanner.liquidity_filter import LiquidityFilter, LiquidityStatus
-from scanner.stock_ranker import StockUniverseScanner
+from backend.scanner.liquidity_filter import LiquidityFilter, LiquidityStatus
+from backend.scanner.stock_ranker import StockUniverseScanner
 
 
 def test_rvol_definition_is_cumulative_day_volume_divided_by_full_day_average():
@@ -71,7 +71,7 @@ def test_historical_context_requires_20_full_session_days(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "scanner.stock_ranker.HistoricalDataLoader.fetch_real_data",
+        "backend.scanner.stock_ranker.HistoricalDataLoader.fetch_real_data",
         lambda **kwargs: df,
     )
 
@@ -105,7 +105,7 @@ def test_historical_context_uses_exact_previous_20_full_day_average(monkeypatch)
     )
 
     monkeypatch.setattr(
-        "scanner.stock_ranker.HistoricalDataLoader.fetch_real_data",
+        "backend.scanner.stock_ranker.HistoricalDataLoader.fetch_real_data",
         lambda **kwargs: df,
     )
 

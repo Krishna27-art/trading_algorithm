@@ -1,0 +1,12 @@
+{
+  "symbol": "NIFTY",
+  "instrument_token": 256265,
+  "interval": "15minute",
+  "start_date": "2026-08-24",
+  "end_date": "2026-10-06",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-10-06T20:20:53.889456+05:30",
+  "latest_completed_candle": "2026-10-06T15:15:00",
+  "candle_count": 750,
+  "trading_days": 30
+}

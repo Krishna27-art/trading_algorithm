@@ -1,0 +1,11 @@
+{
+  "symbol": "INDUSINDBK",
+  "instrument_token": 1346049,
+  "interval": "15minute",
+  "start_date": "2026-09-14",
+  "end_date": "2026-09-24",
+  "source": "Zerodha Kite Connect Historical API",
+  "downloaded_timestamp": "2026-09-24T09:56:45.811113",
+  "candle_count": 171,
+  "trading_days": 8
+}

@@ -14,10 +14,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.event_engine import EventDrivenBacktester, ExecutionPolicy
-from config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
-from indicators.orb import ORBCalculator
-from indicators.vwap import calculate_session_vwap
+from backend.backtest.strategy_backtester import EventDrivenBacktester, ExecutionPolicy
+from backend.config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
+from backend.strategy.orb_strategy import ORBCalculator
+from backend.indicators.vwap import calculate_session_vwap
 
 
 def _generate_synthetic_candles(start_dt: datetime, num_days: int = 3) -> pd.DataFrame:

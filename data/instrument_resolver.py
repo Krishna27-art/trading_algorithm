@@ -607,9 +607,8 @@ class InstrumentResolver:
                 continue
 
             name = str(inst.get("name", "")).strip().upper()
-            tradingsymbol = str(inst.get("tradingsymbol", "")).strip().upper()
 
-            if name != clean and not tradingsymbol.startswith(clean):
+            if name != clean:
                 continue
 
             expiry_raw = str(inst.get("expiry", ""))[:10]

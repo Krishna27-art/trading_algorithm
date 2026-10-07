@@ -497,6 +497,39 @@ class CandleAggregator:
                 candle_dict.get("datetime"),
             )
 
+    def flush_if_due(
+        self,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """
+        Finalize in-progress candle if current time is at or beyond its end_time.
+
+        This handles thin stocks that have received no new ticks after the candle
+        boundary without generating synthetic candles.
+        """
+        normalized_now = _normalize_ist_naive(
+            now or now_ist_naive()
+        )
+        if normalized_now is None:
+            return
+
+        callback_payload = None
+        with self._lock:
+            candle = self.current_candle
+            if candle is None:
+                return
+
+            if normalized_now < candle.end_time:
+                return
+
+            callback_payload = (
+                self._finalize_current_candle_locked()
+            )
+
+        self._emit_callback(
+            callback_payload
+        )
+
     # ================================================================
     # SINGLE TICK
     # ================================================================
@@ -1611,3 +1644,22 @@ class MultiSymbolCandleAggregator:
 
         for aggregator in aggregators:
             aggregator.discard_in_progress_candle()
+
+    def flush_due_candles(
+        self,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """
+        Flush due candles across all symbol aggregators.
+        """
+        with self._lock:
+            aggregators = list(self.aggregators.values())
+
+        for agg in aggregators:
+            try:
+                agg.flush_if_due(now=now)
+            except Exception:
+                logger.exception(
+                    "[MultiSymbolCandleAggregator] Error flushing due candle for %s",
+                    agg.symbol,
+                )

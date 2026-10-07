@@ -190,10 +190,9 @@ class SSFOneMinuteRuntime:
             require_vwap_for_callback=False,
         )
 
+        self._running = True
         if seed_history and kite_client is not None:
             self._seed_historical_data(kite_client)
-
-        self._running = True
         logger.info(
             "[SSFOneMinuteRuntime] Real token resolution: "
             "%d/%d stocks, %d/%d sector indices.",
@@ -230,9 +229,30 @@ class SSFOneMinuteRuntime:
                     end_date=today,
                     interval="minute",
                 )
-                if df is not None and not df.empty:
-                    ssf_live_runtime.seed_regime_history(sym, int(token), df)
-                    ssf_return_tracker.seed(sym, df)
+                if df is None or df.empty:
+                    return
+                latest_completed_minute = (
+                    now_ist_naive()
+                    .replace(
+                        second=0,
+                        microsecond=0,
+                    )
+                    - timedelta(minutes=1)
+                )
+                df["datetime"] = pd.to_datetime(
+                    df["datetime"],
+                    errors="coerce",
+                )
+                df = df.dropna(
+                    subset=["datetime"]
+                )
+                df = df[
+                    df["datetime"] <= latest_completed_minute
+                ].copy()
+                if df.empty:
+                    return
+                ssf_live_runtime.seed_regime_history(sym, int(token), df)
+                ssf_return_tracker.seed(sym, df)
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for stock %s: %s", sym, exc)
 
@@ -250,8 +270,29 @@ class SSFOneMinuteRuntime:
                     end_date=today,
                     interval="minute",
                 )
-                if df is not None and not df.empty:
-                    ssf_return_tracker.seed(idx, df)
+                if df is None or df.empty:
+                    return
+                latest_completed_minute = (
+                    now_ist_naive()
+                    .replace(
+                        second=0,
+                        microsecond=0,
+                    )
+                    - timedelta(minutes=1)
+                )
+                df["datetime"] = pd.to_datetime(
+                    df["datetime"],
+                    errors="coerce",
+                )
+                df = df.dropna(
+                    subset=["datetime"]
+                )
+                df = df[
+                    df["datetime"] <= latest_completed_minute
+                ].copy()
+                if df.empty:
+                    return
+                ssf_return_tracker.seed(idx, df)
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for index %s: %s", idx, exc)
 

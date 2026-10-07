@@ -183,11 +183,17 @@ def test_cpr_requires_prior_session():
     )
 
 
-def test_cpr_evaluates_with_prior_sessions():
+def test_cpr_evaluates_with_prior_sessions(monkeypatch):
     """With multiple historical sessions CPR must not be UNAVAILABLE (it can trade or monitor)."""
     svc = PredictionService()
 
     today = date.today()
+    monkeypatch.setattr(
+        "strategy.prediction_service.now_ist_naive",
+        lambda: datetime.combine(today, time(10, 30)),
+    )
+    from data.instrument_resolver import instrument_resolver
+    monkeypatch.setattr(instrument_resolver, "resolve_lot_size", lambda *args, **kwargs: 1)
     # Find the most recent weekday before today
     yesterday = today - timedelta(days=1)
     while yesterday.weekday() >= 5:  # skip Saturday(5) and Sunday(6)

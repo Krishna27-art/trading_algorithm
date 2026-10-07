@@ -71,30 +71,10 @@ def _fresh_prediction_timestamp(
 
 def _risk_engine_status() -> str:
     """
-    Verify the pre-trade risk gate is actually present/loadable instead
-    of hardcoding an "ACTIVE" claim with no runtime check behind it.
-
-    There is currently no long-lived RiskManager instance anywhere in
-    the live process for this endpoint to inspect — RiskManager is only
-    constructed ad hoc (e.g. by the backtester). The most honest signal
-    this endpoint can verify is therefore whether the risk module itself
-    is importable and constructible, and whether a freshly constructed
-    instance reports its kill switch engaged. This can never silently
-    claim "ACTIVE": a broken/missing module now reports "ERROR" instead
-    of being papered over.
+    The current signal-only live runtime has no long-lived RiskManager instance.
+    Never claim the risk engine is active merely because the class can be imported.
     """
-    try:
-        from risk.risk_manager import RiskManager
-
-        probe = RiskManager()
-
-        if getattr(probe, "kill_switch_active", False):
-            return "KILL_SWITCH"
-
-        return "AVAILABLE"
-    except Exception:
-        logger.exception("component=system.health check=risk_engine")
-        return "ERROR"
+    return "NOT_WIRED"
 
 
 def _classify(stream_state: str) -> str:

@@ -26,5 +26,9 @@ def calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
     cum_pv = pv.groupby(dates).cumsum()
     cum_vol = data["volume"].groupby(dates).cumsum()
 
-    vwap = cum_pv / np.where(cum_vol == 0, 1.0, cum_vol)
+    safe_cum_vol = cum_vol.replace(
+        0,
+        np.nan,
+    )
+    vwap = cum_pv / safe_cum_vol
     return pd.Series(vwap, index=data.index, name="vwap")

@@ -157,7 +157,12 @@ def get_market_prices() -> Dict[str, Any]:
         avg_price = _opt_float(q_data.get("average_price"))
         vwap = avg_price if avg_price and avg_price > 0 else None  # never fall back to LTP
         raw_volume = q_data.get("volume")
-        volume = int(raw_volume) if raw_volume is not None else None
+        try:
+            volume = (
+                int(raw_volume) if raw_volume is not None else None
+            )
+        except (TypeError, ValueError):
+            volume = None
 
         change = round(ltp - prev_close, 2) if prev_close is not None else None
         change_pct = (

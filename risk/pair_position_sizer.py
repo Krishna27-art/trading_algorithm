@@ -51,7 +51,7 @@ class PairPositionSizer:
         hedge_prices: Dict[str, float],
         risk_scale: float = 1.0,
         available_margin: Optional[float] = None,
-        margin_requirement_pct: float = 0.20,  # 20% standard intraday MIS equity margin
+        margin_requirement_pct: Optional[float] = None,
     ) -> PairPositionSize:
         """
         Compute coordinated quantities for target leg and all basket hedge legs.
@@ -114,6 +114,17 @@ class PairPositionSizer:
 
         # Margin constraint check
         if available_margin is not None and self.risk_config.enforce_margin_check:
+            if margin_requirement_pct is None or margin_requirement_pct <= 0:
+                logger.warning(
+                    "[PairPositionSizer] Margin check requested but authoritative "
+                    "margin_requirement_pct is missing; failing closed to 0."
+                )
+                return PairPositionSize(
+                    target_symbol=clean_target,
+                    target_quantity=0,
+                    target_action=target_action,
+                    risk_scale=scale,
+                )
             total_notional = target_notional + sum(hedge_notionals.values())
             required_margin = total_notional * margin_requirement_pct
             if required_margin > available_margin and total_notional > 0:

@@ -219,6 +219,7 @@ class SectorPeerManager:
         symbol: str,
         cache_dir: Optional[Path] = None,
         kite_client: Optional[Any] = None,
+        allow_network_fetch: bool = False,
     ) -> Optional[PeerContext]:
         """
         Constructs a real PeerContext for SectorImpulseStrategy using cached
@@ -270,8 +271,8 @@ class SectorPeerManager:
                         except Exception as exc:
                             logger.debug("Failed to load NIFTY cache %s: %s", alt_file, exc)
 
-            # If Kite client is available, fetch real historical data
-            if kite_client is not None:
+            # If Kite client is available and network fetch is allowed, fetch real historical data
+            if allow_network_fetch and kite_client is not None:
                 try:
                     from data.instrument_resolver import instrument_resolver
                     tok = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)

@@ -27,11 +27,9 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
 
   // Canonical active streaming signal extraction
   const activeSignal = useMemo(() => {
-    const liveFeedFresh =
-      streamSignals.data?.data_fresh === true &&
-      streamSignals.data?.stream_connected === true
+    const streamConnected = streamSignals.data?.stream_connected === true
 
-    const rawSignals = liveFeedFresh
+    const rawSignals = streamConnected
       ? (streamSignals.data?.signals || {})
       : {}
 
@@ -50,6 +48,20 @@ export default function DashboardPage({ onNavigate, isAuthenticated }) {
         ['LONG', 'SHORT'].includes(pred.direction) &&
         !['UNAVAILABLE', 'ERROR', 'NO_TRADE', 'WAITING'].includes(pred.status)
       ) {
+        const ltpTimestamp =
+          pred?.ltp_timestamp || payload?.ltp_timestamp || null
+        if (!ltpTimestamp) {
+          continue
+        }
+        const ageSeconds = (Date.now() - Date.parse(ltpTimestamp)) / 1000
+        if (
+          !Number.isFinite(ageSeconds) ||
+          ageSeconds < 0 ||
+          ageSeconds > 120
+        ) {
+          continue
+        }
+
         activeCandidates.push({
           symbol: sym,
           strategy,

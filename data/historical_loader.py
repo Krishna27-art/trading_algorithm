@@ -318,22 +318,30 @@ class HistoricalDataLoader:
         # (which would make validate_candles() always see zero
         # duplicates and never actually detect this).
         # --------------------------------------------------------------
-        raw_dup_count = int(df["datetime"].duplicated().sum())
+        raw_dup_count = int(
+            df["datetime"].duplicated().sum()
+        )
         if raw_dup_count > 0:
             duplicated_timestamps = (
-                df.loc[df["datetime"].duplicated(keep=False), "datetime"]
+                df.loc[
+                    df["datetime"].duplicated(
+                        keep=False
+                    ),
+                    "datetime",
+                ]
                 .drop_duplicates()
                 .tolist()
             )
-            logger.warning(
-                f"Historical data for token {instrument_token} contains "
-                f"{raw_dup_count} duplicate timestamp(s) from the Kite "
-                f"Historical API: {duplicated_timestamps}. Keeping the "
-                f"last observation for each and continuing validation."
+            logger.error(
+                "Historical data for token %s contains "
+                "duplicate timestamp(s): %s",
+                instrument_token,
+                duplicated_timestamps,
             )
-            df = (
-                df.drop_duplicates(subset="datetime", keep="last")
-                .reset_index(drop=True)
+            raise ValueError(
+                "Historical data contains "
+                f"{raw_dup_count} duplicate timestamp(s): "
+                f"{duplicated_timestamps}"
             )
 
         # Strict validation runs on data whose duplicate state has
@@ -659,7 +667,7 @@ class HistoricalDataLoader:
             )
         else:
             cached_max_date = cached["datetime"].max().date()
-            start_date = max(cached_max_date, today - timedelta(days=7))
+            start_date = cached_max_date
 
         logger.info(
             f"Refreshing intraday cache for token "
@@ -680,23 +688,20 @@ class HistoricalDataLoader:
             )
         except Exception as exc:
             logger.error(
-                f"Incremental Kite fetch failed for token {instrument_token}: {exc}"
+                f"Incremental Kite fetch failed for token "
+                f"{instrument_token}: {exc}"
             )
-            if cached is not None and not cached.empty:
-                logger.warning(
-                    f"Falling back to existing valid intraday cache for token {instrument_token}."
-                )
-                return cached
-            raise
+            raise RuntimeError(
+                "Live intraday refresh failed and the existing "
+                "cache is behind the latest completed candle for "
+                f"token {instrument_token}."
+            ) from exc
 
         if fresh.empty:
-            if cached is not None and not cached.empty:
-                logger.warning(
-                    f"Kite returned no fresh completed candles for token {instrument_token}; falling back to existing cache."
-                )
-                return cached
             raise RuntimeError(
-                f"Kite returned no fresh completed candles for token {instrument_token}."
+                "Kite returned no fresh completed candles for "
+                f"token {instrument_token}; stale cache will not "
+                "be used as a live substitute."
             )
 
         fresh["datetime"] = (

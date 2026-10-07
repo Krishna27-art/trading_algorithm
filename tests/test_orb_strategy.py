@@ -21,7 +21,7 @@ def strategy():
         max_orb_range=120.0,
         max_risk_cap=150.0,
     )
-    strat = IntradayORBStrategy(instrument=inst)
+    strat = IntradayORBStrategy(instrument=inst, candle_timestamps_are_open=False)
     strat.reset_session(date(2026, 3, 2))
     return strat
 

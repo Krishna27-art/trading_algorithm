@@ -98,27 +98,10 @@ class LiveSignalEngine:
         self._ssf_runtime = ssf_live_runtime
         self._crsd_runtime = crsd_live_runtime
         self._scanner_snapshot: Optional[Any] = None
-        self._candidate_symbols: Optional[set[str]] = None
-
-    def set_candidate_symbols(self, candidate_symbols: Optional[Any]) -> None:
-        with self._lock:
-            self._candidate_symbols = (
-                {str(s).strip().upper() for s in candidate_symbols}
-                if candidate_symbols is not None
-                else None
-            )
 
     def set_scanner_snapshot(self, snapshot: Optional[Any]) -> None:
         with self._lock:
             self._scanner_snapshot = snapshot
-            if snapshot is not None and hasattr(snapshot, "candidates") and snapshot.candidates:
-                self._candidate_symbols = {
-                    metric.symbol.strip().upper()
-                    for metric in snapshot.candidates
-                    if hasattr(metric, "symbol") and metric.symbol
-                }
-            elif snapshot is None:
-                self._candidate_symbols = None
 
     def get_scanner_snapshot(self) -> Optional[Any]:
         with self._lock:
@@ -262,21 +245,20 @@ class LiveSignalEngine:
     def _read_live_ltp(
         self,
         symbol: str,
-        fallback_price: Optional[float] = None,
-        fallback_ts: Optional[datetime] = None,
     ) -> Tuple[
         Optional[float],
         str,
         Optional[datetime],
     ]:
         """
-        Resolve a verified real market LTP.
+        Resolve only a verified real current market LTP.
 
         Resolution hierarchy:
-            1. Fresh Level-5 snapshot LTP (L5_STREAM).
-            2. Fresh engine-captured tick LTP (ENGINE_LIVE_CACHE).
-            3. Fresh LiveMarketState tick LTP (MARKET_STATE_LTP).
-            4. Completed candle close price (CANDLE_CLOSE).
+            1. Fresh Level-5 snapshot LTP.
+            2. Fresh engine-captured tick LTP.
+            3. Fresh LiveMarketState tick LTP.
+
+        A completed candle close is NEVER a current-LTP fallback.
         """
         state = live_market_state.get_symbol_state(
             symbol
@@ -369,17 +351,6 @@ class LiveSignalEngine:
                         st_ts,
                     )
 
-        # --------------------------------------------------------------
-        # 4. Completed candle close price fallback
-        # --------------------------------------------------------------
-        if self._valid_price(fallback_price):
-            norm_fallback_ts = self._normalize_timestamp(fallback_ts) if fallback_ts else now
-            return (
-                float(fallback_price),
-                "CANDLE_CLOSE",
-                norm_fallback_ts,
-            )
-
         return (
             None,
             "LIVE_LTP_UNAVAILABLE",
@@ -412,6 +383,19 @@ class LiveSignalEngine:
             return False
 
         with self._lock:
+            prior = self._latest_ltp.get(normalized_symbol)
+            if (
+                prior is not None
+                and normalized_ts <= prior[1]
+            ):
+                logger.warning(
+                    "[LiveSignalEngine] Ignoring out-of-order/duplicate "
+                    "LTP for %s: %s <= %s",
+                    normalized_symbol,
+                    normalized_ts,
+                    prior[1],
+                )
+                return False
             self._latest_ltp[normalized_symbol] = (
                 float(price),
                 normalized_ts,
@@ -478,12 +462,6 @@ class LiveSignalEngine:
                 "[LiveSignalEngine] Rejected malformed completed candle: %r",
                 candle_dict,
             )
-            return None
-
-        with self._lock:
-            candidates = self._candidate_symbols
-
-        if candidates is not None and symbol not in candidates:
             return None
 
         if not self._mark_processed_candle(
@@ -560,8 +538,6 @@ class LiveSignalEngine:
             live_ltp, ltp_source, ltp_timestamp = (
                 self._read_live_ltp(
                     symbol=symbol,
-                    fallback_price=candle_close,
-                    fallback_ts=candle_timestamp,
                 )
             )
 
@@ -687,6 +663,7 @@ class LiveSignalEngine:
                 peer_ctx = SectorPeerManager.build_peer_context(
                     symbol,
                     kite_client=kite_client,
+                    allow_network_fetch=False,
                 )
             except Exception as peer_exc:
                 logger.debug(
@@ -696,7 +673,7 @@ class LiveSignalEngine:
                 )
 
             # current_ltp is explicitly the freshest verified market price,
-            # not the completed candle's close unless no fresher price exists.
+            # never a completed candle's close.
             stock_metric = (
                 self._scanner_snapshot.rankings.get(symbol)
                 if self._scanner_snapshot is not None
@@ -841,12 +818,6 @@ class LiveSignalEngine:
         """
         clean = self._normalize_symbol(symbol)
         if clean is None:
-            return
-
-        with self._lock:
-            candidates = self._candidate_symbols
-
-        if candidates is not None and clean not in candidates:
             return
 
         if not isinstance(snapshot, BookSnapshot):

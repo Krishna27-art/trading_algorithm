@@ -66,8 +66,11 @@ class PositionSizer:
             if final_quantity < 1:
                 return 0
 
-        # Margin sanity check (assuming ~12% MIS intraday margin for index futures or 20% for equities)
+        # Margin sanity check
         if available_margin is not None and self.risk_config.enforce_margin_check:
+            if estimated_price is None or estimated_price <= 0:
+                logger.warning("Margin check enforced but estimated_price is unavailable; failing closed to 0.")
+                return 0
             margin_per_unit = estimated_price * (0.12 if instrument.instrument_type == InstrumentType.FUTURES else 0.20)
             required_margin = final_quantity * margin_per_unit
             if required_margin > available_margin:

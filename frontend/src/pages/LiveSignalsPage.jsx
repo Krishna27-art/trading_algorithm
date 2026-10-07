@@ -175,7 +175,8 @@ export default function LiveSignalsPage({ isAuthenticated }) {
 
         // Only a finite, positive price is real market data. Never fabricate
         // a fallback (e.g. 0): missing/invalid LTP stays null and renders as "—".
-        const isFresh = marketState?.data_fresh ?? marketFeedFresh
+        const isFresh =
+          marketState?.data_fresh === true && Boolean(marketState?.last_tick_time)
         const liveLtp = isFresh
           ? firstValidPrice(marketState?.ltp)
           : null

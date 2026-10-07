@@ -178,17 +178,20 @@ def get_universe_scan(top_n: int = 5, refresh: bool = False):
         from streaming.market_stream_manager import market_stream_manager
 
         scanner = StockUniverseScanner()
-        ranked, data_source = scanner.scan_universe(
+        ranked_all, data_source = scanner.scan_universe(
             kite_client=kite,
-            top_n=top_n,
+            top_n=0,
             force_refresh_history=refresh,
             allow_synthetic=False,
         )
         snapshot = ScannerSnapshot(
             generated_at=now_ist_naive(),
-            candidates=ranked,
+            candidates=ranked_all,
         )
         market_stream_manager.set_scanner_snapshot(snapshot)
+        ranked = (
+            ranked_all[:top_n] if top_n > 0 else ranked_all
+        )
 
         summary = getattr(scanner, "last_pipeline_summary", {}) or {}
         return {

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import logging
 import threading
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 
@@ -256,6 +259,10 @@ class LiveMarketState:
         volume: int = 0,
         timestamp: Optional[datetime] = None,
         token: Optional[int] = None,
+        day_open: Optional[float] = None,
+        day_high: Optional[float] = None,
+        day_low: Optional[float] = None,
+        session_volume: Optional[int] = None,
     ) -> None:
         ts = timestamp or now_ist_naive()
         with self._lock:
@@ -264,20 +271,52 @@ class LiveMarketState:
                 state = LiveSymbolState(symbol=symbol, token=token)
                 self._symbols[symbol] = state
 
-            state.ltp = price
-            state.close = price
-            if state.open is None:
-                state.open = price
-                state.high = price
-                state.low = price
-            else:
-                state.high = max(state.high, price) if state.high is not None else price
-                state.low = min(state.low, price) if state.low is not None else price
+            # Reject stale/out-of-order ticks before mutating state.
+            if (
+                state.last_tick_time is not None
+                and ts <= state.last_tick_time
+            ):
+                logger.warning(
+                    "[LiveMarketState] Ignoring out-of-order/duplicate "
+                    "tick for %s: %s <= %s",
+                    symbol,
+                    ts,
+                    state.last_tick_time,
+                )
+                return
 
-            # `volume` must be an incremental quantity.
-            # Do not pass Kite's cumulative `volume_traded` here.
-            if volume > 0:
-                state.volume = (state.volume or 0) + int(volume)
+            # Detect session rollover defensively.
+            if (
+                state.last_tick_time is not None
+                and state.last_tick_time.date() != ts.date()
+            ):
+                state.open = None
+                state.high = None
+                state.low = None
+                state.volume = None
+                state.vwap = None
+
+            state.ltp = float(price)
+            state.close = float(price)
+
+            # Prefer authoritative Kite day OHLC.
+            if day_open is not None and day_open > 0:
+                state.open = float(day_open)
+            if day_high is not None and day_high > 0:
+                state.high = float(day_high)
+            if day_low is not None and day_low > 0:
+                state.low = float(day_low)
+
+            # Prefer authoritative Kite session volume.
+            if (
+                session_volume is not None
+                and session_volume >= 0
+            ):
+                state.volume = int(session_volume)
+            elif volume > 0:
+                state.volume = (
+                    (state.volume or 0) + int(volume)
+                )
 
             state.last_tick_time = ts
             state.updated_at = ts

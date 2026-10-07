@@ -21,7 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta
 import math
-import os
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -826,7 +825,7 @@ class PredictionService:
 
         today = now_ist_naive().date()
         latest_date, current_session_df = days[-1]
-        if latest_date != today and not os.environ.get("PYTEST_CURRENT_TEST"):
+        if latest_date != today:
             predictions = {
                 key: SingleStrategyPrediction(
                     status="UNAVAILABLE",
@@ -865,29 +864,40 @@ class PredictionService:
 
         try:
             from data.instrument_resolver import instrument_resolver
-            lot_size = instrument_resolver.resolve_lot_size(
-                clean_symbol,
-                exchange="NSE",
-                instrument_type="EQ",
-                kite_client=kite_client,
-                fallback=1,
+            lot_size = (
+                instrument_resolver.resolve_lot_size(
+                    clean_symbol,
+                    exchange="NSE",
+                    instrument_type="EQ",
+                    kite_client=kite_client,
+                    fallback=None,
+                )
             )
-            if lot_size is None or lot_size <= 0:
-                lot_size = 1
-        except Exception:
-            lot_size = 1
+        except Exception as exc:
+            logger.warning(
+                "Live instrument lot-size resolution "
+                "failed for %s: %s",
+                clean_symbol,
+                exc,
+            )
+            lot_size = None
 
         if lot_size is None or lot_size <= 0:
             predictions = {
                 key: SingleStrategyPrediction(
                     status="UNAVAILABLE",
-                    reason="Live instrument lot size is unavailable.",
+                    reason=(
+                        "Live instrument lot size is unavailable."
+                    ),
                     levels={},
                     metrics={},
                 )
                 for key in STRATEGY_KEYS
             }
-            return predictions, self.calculate_consensus(predictions)
+            return (
+                predictions,
+                self.calculate_consensus(predictions),
+            )
 
         try:
             inst = create_instrument_config_for_equity(
@@ -948,7 +958,7 @@ class PredictionService:
                     live_df,
                     ltp,
                     book_snapshot=book_snapshot,
-                    allow_historical_session=bool(os.environ.get("PYTEST_CURRENT_TEST")),
+                    allow_historical_session=False,
                 ),
             ),
             (

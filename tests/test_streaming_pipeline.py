@@ -41,6 +41,10 @@ def test_live_market_state_tick_processing():
         volume=100,
         timestamp=dt1,
         token=738561,
+        day_open=2500.0,
+        day_high=2500.0,
+        day_low=2500.0,
+        session_volume=100,
     )
 
     state = live_market_state.get_symbol_state("RELIANCE")
@@ -58,6 +62,10 @@ def test_live_market_state_tick_processing():
         volume=50,
         timestamp=dt2,
         token=738561,
+        day_open=2500.0,
+        day_high=2510.0,
+        day_low=2500.0,
+        session_volume=150,
     )
 
     assert state.ltp == 2510.0
@@ -132,8 +140,10 @@ def test_live_signal_engine_with_level_5_depth():
     assert state.book_snapshot.ltp == 2500.0
 
 
-def test_fastapi_stream_endpoints():
+def test_fastapi_stream_endpoints(monkeypatch):
     from backend.stream_routes import stream_market, stream_signals, stream_status
+    import backend.stream_routes as sr_mod
+    from data.time_utils import now_ist_naive
 
     # Status returns health dictionary
     st = stream_status()
@@ -141,11 +151,25 @@ def test_fastapi_stream_endpoints():
     assert "connected" in st
     assert "subscribed_token_count" in st
 
+    monkeypatch.setattr(sr_mod, "_stream_status", lambda: {"state": "STREAMING", "connected": True, "subscribed_token_count": 1})
+
+    now_ts = now_ist_naive()
     # Seed state for signals and market
-    live_market_state.update_tick("TCS", 3500.0, 50, datetime(2026, 10, 1, 10, 0), token=2953217)
+    live_market_state.update_tick(
+        "TCS",
+        3500.0,
+        50,
+        now_ts,
+        token=2953217,
+        day_open=3500.0,
+        day_high=3500.0,
+        day_low=3500.0,
+        session_volume=50,
+    )
     live_signal_engine._predictions["TCS"] = {
         "symbol": "TCS",
         "ltp": 3500.0,
+        "ltp_timestamp": now_ts.isoformat(),
         "consensus": {"direction": "LONG", "label": "STRONG LONG (4/4)"},
     }
 

@@ -8,7 +8,7 @@ Tests:
 
 import os
 import pytest
-from datetime import datetime
+from datetime import datetime, time
 
 from backend.backtest_routes import get_research_backtest, post_research_backtest
 from strategy.prediction_service import (
@@ -200,11 +200,19 @@ def test_research_backtest_endpoints(monkeypatch):
     assert len(data_post["strategies"]) == 7
 
 
-def test_prediction_service_all_strategies():
+def test_prediction_service_all_strategies(monkeypatch):
     """Tests PredictionService.evaluate_symbol produces predictions for all 7 strategies."""
     from data.historical_loader import HistoricalDataLoader
+    from data.instrument_resolver import instrument_resolver
 
     df = HistoricalDataLoader.generate_synthetic_nifty_data(days=15, seed=42)
+    last_date = df["datetime"].iloc[-1].date()
+    monkeypatch.setattr(
+        "strategy.prediction_service.now_ist_naive",
+        lambda: datetime.combine(last_date, time(15, 30)),
+    )
+    monkeypatch.setattr(instrument_resolver, "resolve_lot_size", lambda *args, **kwargs: 25)
+
     preds, consensus = prediction_service.evaluate_symbol(symbol="NIFTY", df_15m=df, current_ltp=24000.0)
 
     expected_keys = ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss", "crsd"]
@@ -250,7 +258,7 @@ def test_consensus_with_unavailable_and_no_trade_strategies():
     assert c_unavail["evaluable_strategies"] == 0
 
 
-def test_prediction_service_with_real_book_snapshot_and_peer_context():
+def test_prediction_service_with_real_book_snapshot_and_peer_context(monkeypatch):
     """Verifies evaluate_symbol successfully incorporates BookSnapshot and PeerContext."""
     from data.historical_loader import HistoricalDataLoader
     from strategy.ssf_l5_srm_strategy import BookSnapshot
@@ -260,6 +268,12 @@ def test_prediction_service_with_real_book_snapshot_and_peer_context():
     df_l = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=51, base_price=2500.0)
     df_m = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=52, base_price=24000.0)
     df_sec = HistoricalDataLoader.generate_synthetic_nifty_data(days=5, seed=53, base_price=5000.0)
+
+    last_date = df_own["datetime"].iloc[-1].date()
+    monkeypatch.setattr(
+        "strategy.prediction_service.now_ist_naive",
+        lambda: datetime.combine(last_date, time(15, 30)),
+    )
 
     ctx = PeerContext(leader=df_l, market=df_m, sector=df_sec)
     snap = BookSnapshot(
@@ -278,6 +292,7 @@ def test_prediction_service_with_real_book_snapshot_and_peer_context():
     )
 
     assert preds["sector_impulse"].status in ("IMPULSE_LONG", "IMPULSE_SHORT", "MONITORING", "NO_TRADE")
+    assert preds["ssf_l5_srm"].status in ("SSF_LONG", "SSF_SHORT", "WAITING", "NO_TRADE")
     assert preds["ssf_l5_srm"].status in ("SSF_LONG", "SSF_SHORT", "WAITING", "NO_TRADE")
 
 

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend.security import verify_shared_secret
 from config.universe import StockUniverse
+from data.time_utils import now_ist_naive
 from streaming.live_market_state import live_market_state
 from streaming.live_signal_engine import live_signal_engine
 from streaming.market_stream_manager import market_stream_manager
@@ -78,6 +79,22 @@ def _stream_feed_is_fresh(stream_status: Dict[str, Any]) -> bool:
     return 0 <= age <= STREAM_DATA_STALE_AFTER_SECONDS
 
 
+def _symbol_feed_is_fresh(
+    state: Any,
+    connected: bool,
+) -> bool:
+    if not connected:
+        return False
+    if state is None:
+        return False
+    timestamp = state.last_tick_time
+    if timestamp is None:
+        return False
+    timestamp = timestamp.replace(tzinfo=None)
+    age = (now_ist_naive() - timestamp).total_seconds()
+    return 0 <= age <= STREAM_DATA_STALE_AFTER_SECONDS
+
+
 def _stream_state() -> str:
     try:
         return str(
@@ -129,7 +146,26 @@ def stream_signals():
     stream_status = _stream_status()
     fresh = _stream_feed_is_fresh(stream_status)
 
-    signals = live_signal_engine.get_all_predictions()
+    states = live_market_state.get_all_symbols_state()
+    all_signals = (
+        live_signal_engine.get_all_predictions()
+    )
+    connected = (
+        stream_status.get("connected") is True
+    )
+    signals = {}
+    for sym, payload in all_signals.items():
+        state = states.get(sym)
+        if not _symbol_feed_is_fresh(
+            state,
+            connected,
+        ):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if not payload.get("ltp_timestamp"):
+            continue
+        signals[sym] = payload
 
     return {
         "status": "success",
@@ -173,8 +209,21 @@ def stream_market():
 
     instruments: Dict[str, Any] = {}
 
+    connected = (
+        stream_status.get("connected") is True
+    )
     for sym, state in symbols_state.items():
         payload = state.to_dict()
+        payload["data_fresh"] = _symbol_feed_is_fresh(
+            state,
+            connected,
+        )
+        if state.last_tick_time is not None:
+            payload["last_tick_age_seconds"] = (
+                now_ist_naive() - state.last_tick_time.replace(tzinfo=None)
+            ).total_seconds()
+        else:
+            payload["last_tick_age_seconds"] = None
 
         # Enrich with static universe reference metadata (rank/name/
         # category). This is real, never-changing reference data already

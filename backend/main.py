@@ -65,7 +65,15 @@ async def lifespan(app: FastAPI):
             logger.warning("Legacy history warmer enabled via ENABLE_LEGACY_HISTORY_WARMER.")
         except Exception:
             logger.exception("Legacy history warmer failed to start")
-    yield
+    try:
+        yield
+    finally:
+        try:
+            from backend.streaming.market_stream_manager import market_stream_manager
+            market_stream_manager.stop_stream()
+            logger.info("Market stream manager stopped during application shutdown.")
+        except Exception:
+            logger.exception("Error stopping market stream manager during shutdown")
 
 
 app = FastAPI(

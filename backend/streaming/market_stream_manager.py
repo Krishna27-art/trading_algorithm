@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from enum import Enum
 import logging
+import math
 import os
 import queue
 import threading
@@ -182,7 +183,7 @@ class MarketStreamManager:
 
         self._pending_evaluations: Dict[
             str,
-            Tuple[int, dict, float, Any],
+            Tuple[int, dict, float, Any, datetime],
         ] = {}
 
         self._evaluation_workers_started = False
@@ -197,6 +198,19 @@ class MarketStreamManager:
 
         self._last_evaluation_time: Optional[datetime] = None
         self._last_evaluation_error: Optional[str] = None
+
+        # Detailed stream tick metrics
+        self._ticks_received_count = 0
+        self._ticks_accepted_count = 0
+        self._ticks_rejected_count = 0
+        self._ticks_invalid_count = 0
+        self._ticks_stale_count = 0
+        self._ticks_out_of_order_count = 0
+
+        # Detailed L5 snapshot metrics
+        self._l5_received_count = 0
+        self._l5_processed_count = 0
+        self._l5_replaced_count = 0
 
         # --------------------------------------------------------------
         # HISTORY REFRESH WORKER
@@ -220,11 +234,13 @@ class MarketStreamManager:
         ] = None
 
         # --------------------------------------------------------------
-        # SSF L5 BOOK QUEUE AND WORKER
+        # SSF L5 BOOK QUEUE AND WORKER (LATEST-PER-SYMBOL BUFFERING)
         # --------------------------------------------------------------
         self._book_queue = queue.Queue(
             maxsize=L5_QUEUE_SIZE
         )
+        self._book_lock = threading.Lock()
+        self._pending_book_snapshots: Dict[str, Any] = {}
 
         self._book_worker_started = False
         self._book_worker_thread: Optional[
@@ -750,15 +766,18 @@ class MarketStreamManager:
 
     def _book_worker_loop(self) -> None:
         while True:
-            item = self._book_queue.get()
+            symbol = self._book_queue.get()
 
             try:
-                symbol, snapshot = item
+                with self._book_lock:
+                    snapshot = self._pending_book_snapshots.pop(symbol, None)
 
-                live_signal_engine.on_book_update(
-                    symbol=symbol,
-                    snapshot=snapshot,
-                )
+                if snapshot is not None:
+                    self._l5_processed_count += 1
+                    live_signal_engine.on_book_update(
+                        symbol=symbol,
+                        snapshot=snapshot,
+                    )
 
             except Exception:
                 logger.exception(
@@ -924,13 +943,9 @@ class MarketStreamManager:
         generation: int,
     ) -> bool:
         """
-        Add a completed candle to the bounded evaluation queue.
-
-        One pending evaluation is maintained per symbol. If another candle
-        arrives before the worker starts the old one, the old pending task is
-        replaced by the newest candle.
+        Add a completed candle to the ordered evaluation queue.
+        Preserves distinct candle events without silent drop or loss.
         """
-
         symbol = str(
             candle_dict.get(
                 "symbol",
@@ -947,88 +962,26 @@ class MarketStreamManager:
 
         task = (
             generation,
+            symbol,
             dict(candle_dict),
             float(vwap),
             kite_client,
+            now_ist_naive(),
         )
 
-        with self._evaluation_queue_lock:
-
-            already_pending = (
-                symbol
-                in self._pending_evaluations
+        try:
+            self._evaluation_queue.put_nowait(task)
+            self._evaluation_enqueued_count += 1
+            return True
+        except queue.Full:
+            self._evaluation_dropped_count += 1
+            logger.error(
+                "[MarketStreamManager] Evaluation queue full (%d); "
+                "dropping evaluation task for %s to fail closed.",
+                EVALUATION_QUEUE_SIZE,
+                symbol,
             )
-
-            # Always retain the newest task for the symbol.
-            self._pending_evaluations[
-                symbol
-            ] = task
-
-            if already_pending:
-                self._evaluation_coalesced_count += 1
-                return True
-
-            try:
-                self._evaluation_queue.put_nowait(
-                    symbol
-                )
-
-                self._evaluation_enqueued_count += 1
-
-                return True
-
-            except queue.Full:
-
-                # The queue is bounded. Preserve the newest symbol by
-                # evicting one older queued symbol instead of blocking the
-                # KiteTicker callback thread.
-                try:
-                    dropped_symbol = (
-                        self._evaluation_queue.get_nowait()
-                    )
-
-                    self._pending_evaluations.pop(
-                        dropped_symbol,
-                        None,
-                    )
-
-                    self._evaluation_queue.task_done()
-
-                except queue.Empty:
-                    dropped_symbol = None
-
-                try:
-                    self._evaluation_queue.put_nowait(
-                        symbol
-                    )
-
-                    self._evaluation_enqueued_count += 1
-                    self._evaluation_dropped_count += 1
-
-                    logger.error(
-                        "[MarketStreamManager] Evaluation queue full; "
-                        "dropped pending symbol=%s to preserve latest symbol=%s",
-                        dropped_symbol,
-                        symbol,
-                    )
-
-                    return True
-
-                except queue.Full:
-                    self._pending_evaluations.pop(
-                        symbol,
-                        None,
-                    )
-
-                    self._evaluation_dropped_count += 1
-
-                    logger.error(
-                        "[MarketStreamManager] Evaluation queue full; "
-                        "dropped latest candle for %s.",
-                        symbol,
-                    )
-
-                    return False
+            return False
 
     def _evaluation_worker_loop(
         self,
@@ -1039,30 +992,21 @@ class MarketStreamManager:
         IMPORTANT:
         This function is never called from KiteTicker.on_ticks().
         """
-
         while True:
-            symbol = (
-                self._evaluation_queue.get()
-            )
+            item = self._evaluation_queue.get()
 
             try:
-                with self._evaluation_queue_lock:
-                    task = (
-                        self._pending_evaluations.pop(
-                            symbol,
-                            None,
-                        )
-                    )
-
-                if task is None:
+                if item is None:
                     continue
 
                 (
                     generation,
+                    symbol,
                     candle_dict,
                     vwap,
                     kite_client,
-                ) = task
+                    queued_at,
+                ) = item
 
                 with self._lock:
                     current_generation = (
@@ -1074,6 +1018,17 @@ class MarketStreamManager:
                     generation
                     != current_generation
                 ):
+                    continue
+
+                # Freshness check: if evaluation worker was severely delayed,
+                # do not evaluate very old completed candle as if live.
+                wait_seconds = (now_ist_naive() - queued_at).total_seconds()
+                if wait_seconds > 300:
+                    logger.warning(
+                        "[MarketStreamManager] Candle evaluation for %s delayed by %.1fs > 300s; skipped.",
+                        symbol,
+                        wait_seconds,
+                    )
                     continue
 
                 try:
@@ -1126,13 +1081,16 @@ class MarketStreamManager:
     ) -> None:
         """
         Remove queued evaluation work.
-
-        In-flight evaluations cannot be interrupted safely and are protected
-        by stream generation checks before starting.
         """
-
         with self._evaluation_queue_lock:
             self._pending_evaluations.clear()
+
+        while True:
+            try:
+                self._evaluation_queue.get_nowait()
+                self._evaluation_queue.task_done()
+            except queue.Empty:
+                break
 
             while True:
                 try:
@@ -1279,16 +1237,27 @@ class MarketStreamManager:
                     self.last_error
                 )
         else:
-            token_to_symbol = {
-                int(token): (
-                    str(symbol)
-                    .strip()
-                    .upper()
-                )
-                for token, symbol
-                in token_to_symbol.items()
-                if token and symbol
+            expected_universe = {
+                str(record.symbol).strip().upper()
+                for record in StockUniverse().all_stocks
             }
+            validated_map = {}
+            for token, symbol in token_to_symbol.items():
+                try:
+                    tok_int = int(token)
+                    sym_clean = str(symbol).strip().upper()
+                except (TypeError, ValueError):
+                    continue
+                if tok_int <= 0 or not sym_clean:
+                    continue
+                if sym_clean not in expected_universe:
+                    logger.warning(
+                        "[MarketStreamManager] Rejecting non-universe symbol in caller-supplied mapping: %s",
+                        sym_clean,
+                    )
+                    continue
+                validated_map[tok_int] = sym_clean
+            token_to_symbol = validated_map
 
         if not token_to_symbol:
             with self._lock:
@@ -1442,7 +1411,7 @@ class MarketStreamManager:
                     exc,
                 )
 
-        # Explicitly resolve and subscribe real NIFTY benchmark token for CRSD market factor
+        # Explicitly resolve and subscribe real NIFTY benchmark token for CRSD market factor and index context
         try:
             nifty_tok = (
                 instrument_resolver.resolve_token(
@@ -1458,7 +1427,7 @@ class MarketStreamManager:
             )
             if nifty_tok:
                 resolved_index_token_to_symbol[int(nifty_tok)] = "NIFTY"
-                resolved_token_to_symbol[int(nifty_tok)] = "NIFTY"
+                # NIFTY is an index — NEVER add it to resolved_token_to_symbol (equity universe)
         except Exception as exc:
             logger.debug(
                 "[MarketStreamManager] Failed to resolve NIFTY token: %s",
@@ -1634,25 +1603,21 @@ class MarketStreamManager:
             symbol: str,
             snapshot: Any,
         ) -> None:
-
+            self._l5_received_count += 1
             live_market_state.update_book_snapshot(
                 symbol,
                 snapshot,
             )
 
+            with self._book_lock:
+                if symbol in self._pending_book_snapshots:
+                    self._l5_replaced_count += 1
+                self._pending_book_snapshots[symbol] = snapshot
+
             try:
-                self._book_queue.put_nowait(
-                    (
-                        symbol,
-                        snapshot,
-                    )
-                )
+                self._book_queue.put_nowait(symbol)
             except queue.Full:
-                logger.error(
-                    "[MarketStreamManager] SSF L5 queue full; "
-                    "dropping newest snapshot for %s.",
-                    symbol,
-                )
+                pass
 
         # ==========================================================
         # CANDLE AGGREGATOR
@@ -1869,8 +1834,6 @@ class MarketStreamManager:
                     tok
                     in self.index_token_to_symbol
                 ):
-                    # ssf_one_minute_runtime performs its own
-                    # validation. Do not invent a timestamp here.
                     if (
                         exchange_timestamp
                         is not None
@@ -1885,12 +1848,7 @@ class MarketStreamManager:
                         ):
                             latest_exchange_timestamp = exchange_timestamp
 
-                    # NIFTY is also intentionally part of
-                    # token_to_symbol so it must enter the
-                    # normal 15-minute aggregation pipeline.
-                    if tok in self.token_to_symbol:
-                        cash_ticks.append(tick)
-
+                    # Index ticks must NEVER be appended to cash_ticks
                     continue
 
                 # ==================================================
@@ -1914,6 +1872,7 @@ class MarketStreamManager:
                     or last_price is None
                     or exchange_timestamp is None
                 ):
+                    self._ticks_rejected_count += 1
                     continue
 
                 try:
@@ -1924,9 +1883,11 @@ class MarketStreamManager:
                     TypeError,
                     ValueError,
                 ):
+                    self._ticks_invalid_count += 1
                     continue
 
-                if price <= 0:
+                if not math.isfinite(price) or price <= 0:
+                    self._ticks_invalid_count += 1
                     continue
 
                 accepted_tick_count += 1
@@ -2031,8 +1992,12 @@ class MarketStreamManager:
             # ======================================================
             # 15:30 IST SESSION OUTCOME FINALIZATION
             # ======================================================
-            if latest_exchange_timestamp is not None and latest_exchange_timestamp.time() >= time(15, 30):
-                today_str = latest_exchange_timestamp.strftime("%Y-%m-%d")
+            if (
+                latest_equity_timestamp is not None
+                and latest_equity_timestamp.time() >= time(15, 30)
+                and not self._awaiting_gap_recovery
+            ):
+                today_str = latest_equity_timestamp.strftime("%Y-%m-%d")
                 should_finalize = False
                 with self._lock:
                     if self._session_finalized_date != today_str:
@@ -2043,13 +2008,14 @@ class MarketStreamManager:
                         latest_prices = {
                             sym: float(st.ltp)
                             for sym, st in live_market_state.get_all_symbols_state().items()
-                            if st and st.ltp and st.ltp > 0
+                            if st and st.ltp and math.isfinite(st.ltp) and st.ltp > 0
                         }
-                        db_manager.finalize_session_signals(
-                            trading_date=today_str,
-                            session_close_time=latest_exchange_timestamp,
-                            current_prices=latest_prices,
-                        )
+                        if latest_prices:
+                            db_manager.finalize_session_signals(
+                                trading_date=today_str,
+                                session_close_time=latest_equity_timestamp,
+                                current_prices=latest_prices,
+                            )
                     except Exception as fin_exc:
                         logger.debug("[MarketStreamManager] 15:30 session finalization error: %s", fin_exc)
 
@@ -2285,6 +2251,23 @@ class MarketStreamManager:
                 attempts_count,
             )
 
+        def on_noreconnect(
+            ws,
+        ):
+            with self._lock:
+                if callback_generation != self._stream_generation:
+                    return
+                self.state = (
+                    StreamState.ERROR
+                )
+                self.last_error = (
+                    "KiteTicker reconnection attempts exhausted. Stream disconnected."
+                )
+
+            logger.error(
+                "[MarketStreamManager] KiteTicker on_noreconnect: reconnection exhausted."
+            )
+
         # ==========================================================
         # REGISTER CALLBACKS
         # ==========================================================
@@ -2294,6 +2277,7 @@ class MarketStreamManager:
         kws.on_close = on_close
         kws.on_error = on_error
         kws.on_reconnect = on_reconnect
+        kws.on_noreconnect = on_noreconnect
 
         with self._lock:
             if generation != self._stream_generation:
@@ -2427,7 +2411,40 @@ class MarketStreamManager:
 
         self._drain_history_refresh_queue()
 
-        # Stop SSF runtime safely.
+        # 1. Close WebSocket first so no new ticks arrive
+        if self.kws is not None:
+            try:
+                self.kws.close()
+            except Exception as exc:
+                logger.warning(
+                    "[MarketStreamManager] Error closing KiteTicker: %s",
+                    exc,
+                )
+            self.kws = None
+
+        # 2. Capture latest valid market prices BEFORE resetting state
+        latest_prices = {}
+        try:
+            latest_prices = {
+                sym: float(st.ltp)
+                for sym, st in live_market_state.get_all_symbols_state().items()
+                if st and st.ltp and math.isfinite(st.ltp) and st.ltp > 0
+            }
+        except Exception:
+            pass
+
+        # 3. Finalize open signal outcomes in DB using captured prices
+        try:
+            today_str = now_ist().strftime("%Y-%m-%d")
+            db_manager.finalize_session_signals(
+                trading_date=today_str,
+                session_close_time=now_ist_naive(),
+                current_prices=latest_prices,
+            )
+        except Exception as fin_exc:
+            logger.debug("[MarketStreamManager] Session finalization error: %s", fin_exc)
+
+        # 4. Stop SSF runtime safely.
         try:
             ssf_one_minute_runtime.stop()
         except Exception:
@@ -2436,7 +2453,7 @@ class MarketStreamManager:
                 "SSF 1m runtime"
             )
 
-        # Reset signal engine state.
+        # 5. Reset signal engine state.
         try:
             live_signal_engine.reset()
         except Exception:
@@ -2445,13 +2462,12 @@ class MarketStreamManager:
                 "live signal engine"
             )
 
-        # Reset market state.
+        # 6. Reset live market state
         try:
             live_market_state.reset()
         except Exception:
             logger.exception(
-                "[MarketStreamManager] Error resetting "
-                ""
+                "[MarketStreamManager] Error resetting live market state"
             )
 
         self.futures_token_to_symbol.clear()
@@ -2482,22 +2498,6 @@ class MarketStreamManager:
         self.last_disconnect_time = (
             now_ist()
         )
-
-        # Finalize open signal outcomes at session termination
-        try:
-            today_str = now_ist().strftime("%Y-%m-%d")
-            latest_prices = {
-                sym: float(st.ltp)
-                for sym, st in live_market_state.get_all_symbols_state().items()
-                if st and st.ltp and st.ltp > 0
-            }
-            db_manager.finalize_session_signals(
-                trading_date=today_str,
-                session_close_time=now_ist_naive(),
-                current_prices=latest_prices,
-            )
-        except Exception as fin_exc:
-            logger.debug("[MarketStreamManager] Session finalization error: %s", fin_exc)
 
     def stop_stream(
         self,
@@ -2662,6 +2662,16 @@ class MarketStreamManager:
 
                 "history_ready_count": len(self._history_ready_symbols),
                 "history_refresh_queue_size": self._history_refresh_queue.qsize(),
+
+                "ticks_received_count": self._ticks_received_count,
+                "ticks_accepted_count": self._ticks_accepted_count,
+                "ticks_rejected_count": self._ticks_rejected_count,
+                "ticks_invalid_count": self._ticks_invalid_count,
+                "ticks_out_of_order_count": self._ticks_out_of_order_count,
+
+                "l5_received_count": self._l5_received_count,
+                "l5_processed_count": self._l5_processed_count,
+                "l5_replaced_count": self._l5_replaced_count,
             }
 
 

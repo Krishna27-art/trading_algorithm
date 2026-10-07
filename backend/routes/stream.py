@@ -154,15 +154,21 @@ def stream_signals():
         stream_status.get("connected") is True
     )
     signals = {}
-    for sym, payload in all_signals.items():
+    for sym, raw_payload in all_signals.items():
         state = states.get(sym)
         if not _symbol_feed_is_fresh(
             state,
             connected,
         ):
             continue
-        if not isinstance(payload, dict):
+        if not isinstance(raw_payload, dict):
             continue
+        payload = dict(raw_payload)
+        if state and state.ltp is not None:
+            payload["current_ltp"] = round(float(state.ltp), 2)
+            if state.last_tick_time is not None:
+                payload["ltp_timestamp"] = state.last_tick_time.isoformat()
+                payload["ltp_age_seconds"] = max(0.0, (now_ist_naive() - state.last_tick_time.replace(tzinfo=None)).total_seconds())
         if not payload.get("ltp_timestamp"):
             continue
         signals[sym] = payload

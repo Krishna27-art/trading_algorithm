@@ -485,16 +485,15 @@ class LiveSignalEngine:
             )
             return None
 
-        if not self._mark_processed_candle(
-            symbol,
-            candle_timestamp,
-        ):
-            logger.warning(
-                "[LiveSignalEngine] Duplicate candle ignored: %s %s",
-                symbol,
-                candle_timestamp,
-            )
-            return self.get_prediction(symbol)
+        key = (symbol, candle_timestamp)
+        with self._lock:
+            if key in self._processed_candle_keys:
+                logger.warning(
+                    "[LiveSignalEngine] Duplicate candle ignored: %s %s",
+                    symbol,
+                    candle_timestamp,
+                )
+                return self.get_prediction(symbol)
 
         self._crsd_runtime.on_candle(
             symbol,
@@ -753,6 +752,10 @@ class LiveSignalEngine:
             self._store_result(
                 symbol,
                 result,
+            )
+            self._mark_processed_candle(
+                symbol,
+                candle_timestamp,
             )
 
             # Update active signal outcomes with completed candle
@@ -1245,14 +1248,15 @@ class LiveSignalEngine:
                 predictions[strat_name] = updated_pred
                 updated = True
 
+        # Refresh published LTP and timestamp on every valid incoming tick
+        result = dict(payload)
+        result["ltp"] = round(float(price), 2)
+        result["ltp_timestamp"] = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
         if updated:
             consensus = prediction_service.calculate_consensus(predictions)
-            result = dict(payload)
-            result["ltp"] = round(float(price), 2)
-            result["ltp_timestamp"] = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
             result["predictions"] = predictions
             result["consensus"] = consensus
-            self._store_result(clean, result)
+        self._store_result(clean, result)
 
     def get_ssf_strategy(
         self,

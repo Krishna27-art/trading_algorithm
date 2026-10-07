@@ -141,8 +141,13 @@ def kite_status():
 
 @router.post("/kite/logout")
 def kite_logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
-    """Clears local access token and session state."""
+    """Stops active stream and clears local access token and session state."""
     verify_shared_secret(x_shared_secret)
+    try:
+        from backend.streaming.market_stream_manager import market_stream_manager
+        market_stream_manager.stop_stream()
+    except Exception as exc:
+        logger.warning("Error stopping stream on logout: %s", exc)
     clear_session()
     return {
         "success": True,

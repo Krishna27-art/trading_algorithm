@@ -230,11 +230,17 @@ class StockUniverseScanner:
             axis=1,
         ).max(axis=1)
 
-        window = min(int(period), len(df))
-        atr_series = df["tr"].rolling(
-            window=window,
-            min_periods=1,
-        ).mean()
+        if len(df) < int(period):
+            atr_series = df["tr"].rolling(
+                window=len(df),
+                min_periods=1,
+            ).mean()
+        else:
+            atr_series = df["tr"].ewm(
+                alpha=1.0 / float(period),
+                min_periods=int(period),
+                adjust=False,
+            ).mean()
 
         atr = StockUniverseScanner._safe_float(atr_series.iloc[-1])
         return max(atr, 0.0)
@@ -281,13 +287,13 @@ class StockUniverseScanner:
             2,
         )
 
-        if vwap_dist_pct > 0.15 and gap_pct > 0:
+        if vwap_dist_pct > 0.15 and gap_pct >= -0.2:
             bias = "LONG"
-        elif vwap_dist_pct < -0.15 and gap_pct < 0:
+        elif vwap_dist_pct < -0.15 and gap_pct <= 0.2:
             bias = "SHORT"
-        elif vwap_dist_pct > 0:
+        elif vwap_dist_pct > 0 and gap_pct > 0:
             bias = "LONG"
-        elif vwap_dist_pct < 0:
+        elif vwap_dist_pct < 0 and gap_pct < 0:
             bias = "SHORT"
         else:
             bias = "NEUTRAL"
@@ -593,6 +599,31 @@ class StockUniverseScanner:
 
         return candidate
 
+    @staticmethod
+    def _get_expected_volume_fraction(elapsed_minutes: int) -> float:
+        """
+        Return the expected fraction of cumulative daily volume for NSE cash equities
+        at the given elapsed session minutes (0 to 375).
+        Calibrated to the empirical NSE U-shaped intraday volume smile curve.
+        """
+        if elapsed_minutes <= 0:
+            return 0.02
+        if elapsed_minutes >= 375:
+            return 1.0
+
+        if elapsed_minutes <= 15:  # 09:15 - 09:30 (8% of daily volume)
+            return 0.08 * (elapsed_minutes / 15.0)
+        elif elapsed_minutes <= 45:  # 09:30 - 10:00 (accumulates to 22%)
+            return 0.08 + 0.14 * ((elapsed_minutes - 15) / 30.0)
+        elif elapsed_minutes <= 135:  # 10:00 - 11:30 (accumulates to 42%)
+            return 0.22 + 0.20 * ((elapsed_minutes - 45) / 90.0)
+        elif elapsed_minutes <= 255:  # 11:30 - 13:30 (accumulates to 62%)
+            return 0.42 + 0.20 * ((elapsed_minutes - 135) / 120.0)
+        elif elapsed_minutes <= 315:  # 13:30 - 14:30 (accumulates to 77%)
+            return 0.62 + 0.15 * ((elapsed_minutes - 255) / 60.0)
+        else:  # 14:30 - 15:30 (accumulates to 100%)
+            return 0.77 + 0.23 * ((elapsed_minutes - 315) / 60.0)
+
     def _scan_real_kite(
         self,
         kite: Any,
@@ -623,28 +654,40 @@ class StockUniverseScanner:
                 for symbol in chunk
             ]
 
-            try:
-                logger.info(
-                    "Fetching batched live quotes for "
-                    f"{len(quote_instruments)} instruments..."
-                )
-
-                chunk_quotes = kite.quote(
-                    quote_instruments
-                )
-
-                if isinstance(chunk_quotes, dict):
-                    quotes.update(chunk_quotes)
-                else:
-                    logger.warning(
-                        "Kite returned a non-dict quote payload "
-                        f"for batch [{i}:{i + batch_size}]."
+            batch_succeeded = False
+            for attempt in range(2):
+                try:
+                    logger.info(
+                        "Fetching batched live quotes for "
+                        f"{len(quote_instruments)} instruments (attempt {attempt + 1})..."
                     )
 
-            except Exception as exc:
-                logger.warning(
-                    "Error fetching quote batch "
-                    f"[{i}:{i + batch_size}]: {exc}"
+                    chunk_quotes = kite.quote(
+                        quote_instruments
+                    )
+
+                    if isinstance(chunk_quotes, dict):
+                        quotes.update(chunk_quotes)
+                        batch_succeeded = True
+                        break
+                    else:
+                        logger.warning(
+                            "Kite returned a non-dict quote payload "
+                            f"for batch [{i}:{i + batch_size}]."
+                        )
+
+                except Exception as exc:
+                    logger.warning(
+                        "Error fetching quote batch "
+                        f"[{i}:{i + batch_size}] attempt {attempt + 1}: {exc}"
+                    )
+                    if attempt == 0:
+                        import time as _t
+                        _t.sleep(0.5)
+
+            if not batch_succeeded:
+                logger.error(
+                    f"Failed to fetch quote batch [{i}:{i + batch_size}] after 2 attempts."
                 )
 
         today = today_ist()
@@ -902,12 +945,13 @@ class StockUniverseScanner:
                 2,
             )
 
-            # Intraday RVOL: compare cumulative session volume to expected volume through current elapsed session
+            # Intraday RVOL: compare cumulative session volume to expected volume through current elapsed session using NSE volume smile curve
             quote_time = quote_timestamp.time()
             market_open_dt = datetime.combine(quote_timestamp.date(), time(9, 15))
             quote_dt = datetime.combine(quote_timestamp.date(), quote_time)
             elapsed_minutes = max(1, min(375, int((quote_dt - market_open_dt).total_seconds() / 60)))
-            expected_cum_volume = avg_vol_20d * (elapsed_minutes / 375.0)
+            vol_fraction = self._get_expected_volume_fraction(elapsed_minutes)
+            expected_cum_volume = avg_vol_20d * vol_fraction
 
             if expected_cum_volume > 0:
                 rvol = round(

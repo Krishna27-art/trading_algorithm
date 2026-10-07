@@ -774,7 +774,7 @@ class PredictionService:
         peer_context: Optional[Any] = None,
         kite_client: Optional[Any] = None,
         ssf_strategy: Optional[Any] = None,
-        live_ltp_by_symbol: Optional[Dict[str, float]] = None,
+        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
         crsd_context: Optional[Any] = None,
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
         clean_symbol = str(symbol).strip().upper()

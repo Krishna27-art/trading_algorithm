@@ -174,9 +174,6 @@ def get_universe_scan(top_n: int = 5, refresh: bool = False):
         }
 
     try:
-        from backend.scanner.stock_ranker import ScannerSnapshot, StockUniverseScanner
-        from backend.streaming.market_stream_manager import market_stream_manager
-
         scanner = StockUniverseScanner()
         ranked_all, data_source = scanner.scan_universe(
             kite_client=kite,
@@ -184,11 +181,6 @@ def get_universe_scan(top_n: int = 5, refresh: bool = False):
             force_refresh_history=refresh,
             allow_synthetic=False,
         )
-        snapshot = ScannerSnapshot(
-            generated_at=now_ist_naive(),
-            candidates=ranked_all,
-        )
-        market_stream_manager.set_scanner_snapshot(snapshot)
         ranked = (
             ranked_all[:top_n] if top_n > 0 else ranked_all
         )

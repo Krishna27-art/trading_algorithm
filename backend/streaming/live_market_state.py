@@ -6,9 +6,11 @@ Maintains tick-by-tick prices, VWAP, Level-5 order book depth, and completed
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+import math
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -264,7 +266,27 @@ class LiveMarketState:
         day_low: Optional[float] = None,
         session_volume: Optional[int] = None,
     ) -> None:
-        ts = timestamp or now_ist_naive()
+        if timestamp is None:
+            logger.warning(
+                "[LiveMarketState] Rejecting tick for %s: missing mandatory exchange timestamp",
+                symbol,
+            )
+            return
+
+        try:
+            num_price = float(price)
+        except (TypeError, ValueError):
+            return
+
+        if not math.isfinite(num_price) or num_price <= 0:
+            logger.warning(
+                "[LiveMarketState] Rejecting non-finite/non-positive price for %s: %r",
+                symbol,
+                price,
+            )
+            return
+
+        ts = timestamp
         with self._lock:
             state = self._symbols.get(symbol)
             if state is None:
@@ -296,16 +318,33 @@ class LiveMarketState:
                 state.volume = None
                 state.vwap = None
 
-            state.ltp = float(price)
-            state.close = float(price)
+            state.ltp = num_price
+            state.close = num_price
 
             # Prefer authoritative Kite day OHLC.
-            if day_open is not None and day_open > 0:
-                state.open = float(day_open)
-            if day_high is not None and day_high > 0:
-                state.high = float(day_high)
-            if day_low is not None and day_low > 0:
-                state.low = float(day_low)
+            if day_open is not None:
+                try:
+                    num_open = float(day_open)
+                    if math.isfinite(num_open) and num_open > 0:
+                        state.open = num_open
+                except (TypeError, ValueError):
+                    pass
+
+            if day_high is not None:
+                try:
+                    num_high = float(day_high)
+                    if math.isfinite(num_high) and num_high > 0:
+                        state.high = num_high
+                except (TypeError, ValueError):
+                    pass
+
+            if day_low is not None:
+                try:
+                    num_low = float(day_low)
+                    if math.isfinite(num_low) and num_low > 0:
+                        state.low = num_low
+                except (TypeError, ValueError):
+                    pass
 
             # Prefer authoritative Kite session volume.
             if (
@@ -319,7 +358,7 @@ class LiveMarketState:
                 )
 
             state.last_tick_time = ts
-            state.updated_at = ts
+            state.updated_at = now_ist_naive()
 
     def add_volume(
         self,
@@ -419,11 +458,13 @@ class LiveMarketState:
     def get_symbol_state(self, symbol: str) -> Optional[LiveSymbolState]:
         with self._lock:
             st = self._symbols.get(symbol)
-            return st
+            if st is None:
+                return None
+            return copy.copy(st)
 
     def get_all_symbols_state(self) -> Dict[str, LiveSymbolState]:
         with self._lock:
-            return dict(self._symbols)
+            return {sym: copy.copy(st) for sym, st in self._symbols.items()}
 
     def get_candles_df(self, symbol: str) -> pd.DataFrame:
         with self._lock:

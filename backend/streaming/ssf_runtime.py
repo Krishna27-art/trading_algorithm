@@ -6,6 +6,7 @@ and 1-minute candle processing for SSF-L5-SRM.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -65,22 +66,25 @@ class SSFReturnTracker:
         timestamp: datetime,
         close: float,
     ) -> Optional[float]:
-        close = float(close)
-        if close <= 0:
+        try:
+            num_close = float(close)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(num_close) or num_close <= 0:
             return None
         with self._lock:
             series = self._series(key)
-            series.append((timestamp, close))
+            series.append((timestamp, num_close))
             target_time = timestamp.timestamp() - 30 * 60
             reference = None
             for ts, price in reversed(series):
                 if ts.timestamp() <= target_time:
                     reference = price
                     break
-            if reference is None or reference <= 0:
+            if reference is None or not math.isfinite(reference) or reference <= 0:
                 result = None
             else:
-                result = (close / reference) - 1.0
+                result = (num_close / reference) - 1.0
             self._latest_returns[key] = result
             return result
 
@@ -140,8 +144,10 @@ class SSFContextStore:
     ) -> None:
         clean = str(symbol).strip().upper()
         try:
-            valid_ltp = fut_ltp is not None and float(fut_ltp) > 0
-            valid_oi = fut_oi is not None and float(fut_oi) >= 0
+            num_ltp = float(fut_ltp) if fut_ltp is not None else None
+            num_oi = float(fut_oi) if fut_oi is not None else None
+            valid_ltp = num_ltp is not None and math.isfinite(num_ltp) and num_ltp > 0
+            valid_oi = num_oi is not None and math.isfinite(num_oi) and num_oi >= 0
         except (TypeError, ValueError):
             valid_ltp = False
             valid_oi = False
@@ -157,8 +163,8 @@ class SSFContextStore:
 
         with self._lock:
             ctx = self._get_or_create(clean)
-            ctx.fut_ltp = float(fut_ltp)
-            ctx.fut_oi = float(fut_oi)
+            ctx.fut_ltp = num_ltp
+            ctx.fut_oi = num_oi
             ctx.futures_updated_at = now
             ctx.last_updated = now
 
@@ -402,6 +408,7 @@ class SSFOneMinuteRuntime:
         symbols: List[str],
         kite_client: Optional[Any] = None,
         seed_history: bool = True,
+        pre_resolved_token_map: Optional[Dict[int, str]] = None,
     ) -> None:
         self._stock_symbols = {s.strip().upper() for s in symbols}
         self._index_symbols = set()
@@ -425,7 +432,15 @@ class SSFOneMinuteRuntime:
         all_symbols = list(self._stock_symbols | self._index_symbols)
         token_to_sym: Dict[int, str] = {}
 
-        for sym in all_symbols:
+        if pre_resolved_token_map:
+            for tok, sym in pre_resolved_token_map.items():
+                if tok > 0 and sym in all_symbols:
+                    token_to_sym[tok] = sym
+                    self._symbol_to_token[sym] = tok
+
+        # Resolve any remaining symbols if not in pre_resolved_token_map
+        unresolved = [sym for sym in all_symbols if sym not in self._symbol_to_token]
+        for sym in unresolved:
             tok = None
             if kite_client is None:
                 logger.warning(

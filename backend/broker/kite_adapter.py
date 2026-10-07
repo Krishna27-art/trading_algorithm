@@ -381,6 +381,7 @@ def clear_session() -> None:
 
     with _kite_lock:
         _cached_kite = None
+        kite_broker_adapter.disconnect()
 
     token_file = settings.token_file
 

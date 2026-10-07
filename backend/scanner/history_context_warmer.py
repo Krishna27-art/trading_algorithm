@@ -247,12 +247,9 @@ class DailyHistoryContextWarmer:
 
                     continue
 
-                cache_path = (
-                    settings.base_dir
-                    / "data"
-                    / "cache"
-                    / f"{symbol}_daily_context.csv"
-                )
+                cache_dir = settings.base_dir / "backend" / "data" / "cache"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = cache_dir / f"{symbol}_daily_context.csv"
 
                 try:
                     HistoricalDataLoader.fetch_real_data(

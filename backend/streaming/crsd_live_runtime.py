@@ -56,6 +56,9 @@ class CRSDLiveRuntime:
         )
         if ctx is not None:
             with self._lock:
+                # Double-check in case another thread initialized it in parallel
+                if clean in self._contexts:
+                    return self._contexts[clean]
                 self._contexts[clean] = ctx
         return ctx
 
@@ -77,7 +80,7 @@ class CRSDLiveRuntime:
                 elif sym in ctx.frames:
                     ctx.update(sym, candle)
             except Exception as exc:
-                logger.debug(f"[CRSDLiveRuntime] Failed to update bar for {sym}: {exc}")
+                logger.warning(f"[CRSDLiveRuntime] Failed to update bar for {sym}: {exc}")
 
     def update_stock_candle(self, candle_dict: Dict[str, Any]) -> None:
         """Feed a completed 15m stock candle into all active contexts."""

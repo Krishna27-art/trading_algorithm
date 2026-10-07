@@ -735,7 +735,8 @@ class DatabaseManager:
         Idempotent: cannot finalize twice.
         """
         prices = current_prices or {}
-        now_dt = session_close_time or datetime.now()
+        from backend.data.time_utils import now_ist_naive
+        now_dt = session_close_time or now_ist_naive()
         iso_close = now_dt.isoformat() if hasattr(now_dt, "isoformat") else str(now_dt)
         date_str = trading_date or now_dt.strftime("%Y-%m-%d")
 
@@ -760,14 +761,13 @@ class DatabaseManager:
                     direction = sig["direction"]
                     sym = sig["symbol"]
 
-                    out_price = prices.get(sym, entry)
-                    if not math.isfinite(out_price) or out_price <= 0:
-                        out_price = entry
-
-                    if direction == "LONG":
-                        ret_pct = round(((out_price - entry) / entry) * 100.0, 2)
+                    raw_out_price = prices.get(sym)
+                    if raw_out_price is not None and math.isfinite(raw_out_price) and raw_out_price > 0:
+                        out_price = float(raw_out_price)
+                        ret_pct = round(((out_price - entry) / entry) * 100.0, 2) if direction == "LONG" else round(((entry - out_price) / entry) * 100.0, 2)
                     else:
-                        ret_pct = round(((entry - out_price) / entry) * 100.0, 2)
+                        out_price = None
+                        ret_pct = None
 
                     try:
                         gen_dt = datetime.fromisoformat(sig["generated_at"]) if isinstance(sig["generated_at"], str) else sig["generated_at"]
@@ -844,8 +844,9 @@ class DatabaseManager:
                 params.append(outcome.strip().upper())
 
             if period:
+                from backend.data.time_utils import now_ist_naive
                 period_upper = period.strip().upper()
-                today = datetime.now().date()
+                today = now_ist_naive().date()
                 if period_upper == "TODAY":
                     query += " AND trading_date = ?"
                     params.append(today.strftime("%Y-%m-%d"))
@@ -879,8 +880,9 @@ class DatabaseManager:
         Dynamically computes strategy accuracy and excursion metrics directly
         from signal_events via SQL aggregation. Does NOT store hardcoded percentages.
         """
+        from backend.data.time_utils import now_ist_naive
         period_upper = (period or "TODAY").strip().upper()
-        today = datetime.now().date()
+        today = now_ist_naive().date()
         today_str = today.strftime("%Y-%m-%d")
 
         where_clauses = ["1=1"]

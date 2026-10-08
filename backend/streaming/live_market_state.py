@@ -191,6 +191,10 @@ class LiveMarketState:
         if data.empty:
             return 0
 
+        if "vwap" not in data.columns or data["vwap"].isna().any():
+            from backend.indicators.vwap import calculate_session_vwap
+            data["vwap"] = calculate_session_vwap(data).to_numpy()
+
         normalized_symbol = str(
             symbol
         ).strip().upper()

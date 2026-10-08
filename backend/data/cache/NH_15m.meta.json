@@ -3,10 +3,10 @@
   "instrument_token": 3031041,
   "interval": "15minute",
   "start_date": "2026-08-21",
-  "end_date": "2026-10-06",
+  "end_date": "2026-10-08",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-06T15:40:34.065473+05:30",
-  "latest_completed_candle": "2026-10-06T15:15:00",
-  "candle_count": 775,
-  "trading_days": 31
+  "downloaded_timestamp": "2026-10-08T10:08:05.956124+05:30",
+  "latest_completed_candle": "2026-10-08T09:45:00",
+  "candle_count": 803,
+  "trading_days": 33
 }

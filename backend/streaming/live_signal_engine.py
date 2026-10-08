@@ -587,20 +587,15 @@ class LiveSignalEngine:
             )
             return None
 
-        # Do not create a synthetic VWAP column from one callback scalar across the whole DataFrame.
+        # Ensure historical and closing candles have valid session VWAP
+        if "vwap" not in data.columns or data["vwap"].isna().any():
+            from backend.indicators.vwap import calculate_session_vwap
+            data["vwap"] = calculate_session_vwap(data).to_numpy()
+
         if self._valid_price(vwap):
             mask = data["datetime"] == candle_timestamp
             if mask.any():
-                existing = data.loc[mask, "vwap"] if "vwap" in data.columns else None
-
-                if "vwap" not in data.columns:
-                    data["vwap"] = pd.Series(
-                        [np.nan] * len(data),
-                        dtype="float64",
-                    )
-
-                if existing is None or existing.isna().all() or not self._valid_price(existing.iloc[-1]):
-                    data.loc[mask, "vwap"] = float(vwap)
+                data.loc[mask, "vwap"] = float(vwap)
 
         try:
             candle_close = float(

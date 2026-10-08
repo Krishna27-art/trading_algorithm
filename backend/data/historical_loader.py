@@ -193,6 +193,11 @@ class HistoricalDataLoader:
                         .reset_index(drop=True)
                     )
 
+                    if not result.empty:
+                        from backend.indicators.vwap import calculate_session_vwap
+                        if "vwap" not in result.columns or result["vwap"].isna().any():
+                            result["vwap"] = calculate_session_vwap(result).to_numpy()
+
                     return result
 
                 logger.info(
@@ -284,6 +289,10 @@ class HistoricalDataLoader:
         df = df[cols]
         df.sort_values("datetime", inplace=True)
         df.reset_index(drop=True, inplace=True)
+
+        if not df.empty:
+            from backend.indicators.vwap import calculate_session_vwap
+            df["vwap"] = calculate_session_vwap(df).to_numpy()
 
         raw_dup_count = int(
             df["datetime"].duplicated().sum()
@@ -687,6 +696,11 @@ class HistoricalDataLoader:
         merged = merged[
             merged["datetime"] <= latest_completed
         ].reset_index(drop=True)
+
+        if not merged.empty:
+            from backend.indicators.vwap import calculate_session_vwap
+            if "vwap" not in merged.columns or merged["vwap"].isna().any():
+                merged["vwap"] = calculate_session_vwap(merged).to_numpy()
 
         is_valid, errors = (
             HistoricalDataLoader.validate_candles(merged)

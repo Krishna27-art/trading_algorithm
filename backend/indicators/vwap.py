@@ -16,7 +16,10 @@ def calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
     """
     data = df.copy()
     if "datetime" in data.columns and not isinstance(data.index, pd.DatetimeIndex):
+        data["datetime"] = pd.to_datetime(data["datetime"])
         data.set_index("datetime", inplace=True)
+    elif not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.to_datetime(data.index)
 
     typical_price = (data["high"] + data["low"] + data["close"]) / 3.0
     pv = typical_price * data["volume"]
@@ -31,4 +34,5 @@ def calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
         np.nan,
     )
     vwap = cum_pv / safe_cum_vol
+    vwap = vwap.fillna(typical_price)
     return pd.Series(vwap, index=data.index, name="vwap")

@@ -889,6 +889,14 @@ class DatabaseManager:
         params: List[Any] = []
 
         if period_upper == "TODAY":
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM signal_events WHERE trading_date = ? LIMIT 1", (today_str,))
+                if not cursor.fetchone():
+                    cursor.execute("SELECT MAX(trading_date) FROM signal_events")
+                    max_row = cursor.fetchone()
+                    if max_row and max_row[0]:
+                        today_str = max_row[0]
             where_clauses.append("trading_date = ?")
             params.append(today_str)
         elif period_upper == "WEEK":

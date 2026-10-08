@@ -234,3 +234,14 @@ def get_market_prices() -> Dict[str, Any]:
         "timestamp": now_iso,
         "stocks": stocks_list,
     }
+
+
+@router.get("/api/market/volume-profile/{symbol}")
+@router.get("/api/volume-profile/{symbol}")
+def get_volume_profile(symbol: str) -> Dict[str, Any]:
+    from backend.streaming.market_stream_manager import market_stream_manager
+    facts = market_stream_manager.get_volume_profile(symbol)
+    return {
+        "symbol": facts.symbol,
+        "volume_profile": facts.to_dict(),
+    }

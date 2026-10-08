@@ -744,6 +744,13 @@ class LiveSignalEngine:
                 "data_source": "KITE_STREAM",
             }
 
+            try:
+                from backend.streaming.market_stream_manager import market_stream_manager
+                vp_facts = market_stream_manager.get_volume_profile(symbol, live_ltp)
+                result["volume_profile"] = vp_facts.to_dict()
+            except Exception:
+                pass
+
             if stock_metric is not None:
                 result["scanner_rank"] = stock_metric.rank
                 result["scanner_score"] = stock_metric.total_score
@@ -898,6 +905,13 @@ class LiveSignalEngine:
                 "status": "ERROR",
                 "error": error_message,
             }
+
+            try:
+                from backend.streaming.market_stream_manager import market_stream_manager
+                vp_facts = market_stream_manager.get_volume_profile(symbol)
+                error_result["volume_profile"] = vp_facts.to_dict()
+            except Exception:
+                pass
 
             self._store_result(
                 symbol,

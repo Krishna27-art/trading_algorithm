@@ -19,7 +19,7 @@ from backend.data.time_utils import now_ist_naive
 from backend.monitoring.logger import logger
 
 if TYPE_CHECKING:
-    from backend.strategy.sector_impulse_strategy import PeerContext
+    from backend.data.models import PeerContext
 
 
 @dataclass
@@ -225,7 +225,7 @@ class SectorPeerManager:
         or live 15m historical candles for leader, market, and sector representative.
         """
         from backend.data.historical_loader import HistoricalDataLoader
-        from backend.strategy.sector_impulse_strategy import PeerContext
+        from backend.data.models import PeerContext
 
         c_dir = Path(cache_dir) if cache_dir is not None else (settings.base_dir / "backend" / "data" / "cache")
         try:
@@ -244,28 +244,34 @@ class SectorPeerManager:
             c_file = c_dir / f"{sym}_15m.csv"
             if c_file.exists():
                 try:
-                    df, _ = HistoricalDataLoader.load_cached_data_with_validation(c_file)
+                    df, meta = HistoricalDataLoader.load_cached_data_with_validation(c_file)
                     if not df.empty and "datetime" in df.columns and "close" in df.columns:
-                        df["datetime"] = pd.to_datetime(df["datetime"])
-                        if latest_completed is None or df["datetime"].max() >= latest_completed:
+                        if meta is not None and str(meta.get("symbol", "")).upper() != sym.upper():
+                            raise ValueError(f"Cache symbol identity mismatch for {sym}")
+                        from backend.data.candle_aggregator import _normalize_ist_naive
+                        df["datetime"] = df["datetime"].map(_normalize_ist_naive)
+                        if latest_completed is not None:
+                            df = df[df["datetime"] <= latest_completed].copy()
+                        if not df.empty:
                             return df
                 except Exception as e:
                     logger.debug("Failed to load cached 15m data for %s: %s", sym, e)
 
-            # Fall back to NIFTY cache if market is NIFTY
             if sym == "NIFTY":
                 for alt_name in (
                     "NIFTY_15m.csv",
                     "NIFTY50_15m.csv",
-                    "NIFTY_15m_180d.csv",
                 ):
                     alt_file = c_dir / alt_name
                     if alt_file.exists():
                         try:
-                            df, _ = HistoricalDataLoader.load_cached_data_with_validation(alt_file)
+                            df, meta = HistoricalDataLoader.load_cached_data_with_validation(alt_file)
                             if not df.empty and "datetime" in df.columns and "close" in df.columns:
-                                df["datetime"] = pd.to_datetime(df["datetime"])
-                                if latest_completed is None or df["datetime"].max() >= latest_completed:
+                                from backend.data.candle_aggregator import _normalize_ist_naive
+                                df["datetime"] = df["datetime"].map(_normalize_ist_naive)
+                                if latest_completed is not None:
+                                    df = df[df["datetime"] <= latest_completed].copy()
+                                if not df.empty:
                                     return df
                         except Exception as exc:
                             logger.debug("Failed to load NIFTY cache %s: %s", alt_file, exc)

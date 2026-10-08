@@ -59,31 +59,7 @@ class SITConfig:
     max_trades_per_day: int = 1
 
 
-class PeerContext:
-    """Causal accessor over leader / market / sector frames."""
-
-    def __init__(self, leader: pd.DataFrame, market: pd.DataFrame, sector: pd.DataFrame):
-        self.frames: Dict[str, pd.DataFrame] = {}
-        for name, df in (("leader", leader), ("market", market), ("sector", sector)):
-            d = df.copy()
-            d["datetime"] = pd.to_datetime(d["datetime"])
-            self.frames[name] = d.sort_values("datetime").set_index("datetime")
-
-    def close_back(self, name: str, ts: datetime, back: int) -> Optional[float]:
-        idx = self.frames[name].index
-        pos = idx.searchsorted(pd.Timestamp(ts), side="right") - 1
-        if pos - back < 0 or pos < 0:
-            return None
-        return float(self.frames[name]["close"].iloc[pos - back])
-
-    def before(self, ts) -> pd.DataFrame:
-        """Aligned closes strictly before `ts` (leader volume kept)."""
-        cut = pd.Timestamp(ts)
-        out = pd.concat(
-            {k: v["close"] for k, v in self.frames.items()}, axis=1, sort=False
-        ).dropna()
-        out["leader_vol"] = self.frames["leader"]["volume"].reindex(out.index) if "volume" in self.frames["leader"] else 0.0
-        return out[out.index < cut]
+from backend.data.models import PeerContext
 
 
 def _ridge(X: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:

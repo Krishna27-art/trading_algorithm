@@ -94,10 +94,13 @@ def kite_callback(
             public_token=session_data.get("public_token", ""),
         )
 
-        logger.info(
-            "Successfully authenticated Kite session for user %s",
-            session_data.get("user_id", ""),
-        )
+        try:
+            from backend.streaming.market_stream_manager import market_stream_manager, StreamState
+            if market_stream_manager.state in (StreamState.CONNECTED, StreamState.CONNECTING, StreamState.RECONNECTING, StreamState.ERROR):
+                market_stream_manager.restart_stream()
+        except Exception:
+            pass
+
         return RedirectResponse(url=frontend_url, status_code=307)
 
     except Exception:

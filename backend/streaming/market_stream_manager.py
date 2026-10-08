@@ -53,6 +53,7 @@ from backend.data.instrument_resolver import instrument_resolver
 from backend.data.sector_peer_manager import get_sector_index_symbol
 from backend.data.time_utils import now_ist, now_ist_iso, now_ist_naive, to_ist_aware
 from backend.database.db import db_manager
+from backend.indicators.volume_profile import VolumeProfileEngine, VolumeProfileFacts
 from backend.streaming.crsd_live_runtime import crsd_live_runtime
 from backend.streaming.live_market_state import live_market_state
 from backend.streaming.live_signal_engine import live_signal_engine
@@ -69,7 +70,7 @@ NSE_SESSION_CLOSE = time(15, 30)
 DEFAULT_EVALUATION_WORKERS = 8
 MAX_EVALUATION_WORKERS = 16
 
-EVALUATION_QUEUE_SIZE = 1000
+EVALUATION_QUEUE_SIZE = 10000
 HISTORY_REFRESH_QUEUE_SIZE = 500
 L5_QUEUE_SIZE = 5000
 
@@ -129,6 +130,7 @@ class MarketStreamManager:
 
         self.kws: Optional[Any] = None
         self.aggregator: Optional[MultiSymbolCandleAggregator] = None
+        self.volume_profile_engine: VolumeProfileEngine = VolumeProfileEngine()
 
         self.futures_token_to_symbol: Dict[int, str] = {}
         self.index_token_to_symbol: Dict[int, str] = {}
@@ -1455,6 +1457,11 @@ class MarketStreamManager:
             all_tokens
         )
 
+        try:
+            self.volume_profile_engine.initialize_universe(resolved_token_to_symbol)
+        except Exception as vp_init_exc:
+            logger.debug("[MarketStreamManager] VolumeProfile universe init error: %s", vp_init_exc)
+
         callback_generation = generation
 
         # ==========================================================
@@ -1550,10 +1557,11 @@ class MarketStreamManager:
                 vwap,
             )
 
-            if symbol in ("NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__"):
+            if symbol in ("NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__") or symbol in self.index_token_to_symbol.values():
                 crsd_live_runtime.update_market_candle(
                     candle_dict
                 )
+                return
             else:
                 crsd_live_runtime.update_stock_candle(
                     candle_dict
@@ -1662,6 +1670,10 @@ class MarketStreamManager:
             api_key,
             access_token,
         )
+        try:
+            kws.enable_reconnect(reconnect_interval=3, reconnect_tries=50)
+        except Exception:
+            pass
 
         tokens_to_subscribe = list(
             all_tokens
@@ -2016,12 +2028,24 @@ class MarketStreamManager:
                                 session_close_time=latest_equity_timestamp,
                                 current_prices=latest_prices,
                             )
+                        try:
+                            self.volume_profile_engine.save_session_profiles()
+                        except Exception as vp_fin_exc:
+                            logger.debug("[MarketStreamManager] VolumeProfile session save error: %s", vp_fin_exc)
                     except Exception as fin_exc:
                         logger.debug("[MarketStreamManager] 15:30 session finalization error: %s", fin_exc)
 
-            # ======================================================
-            # CANDLE AGGREGATION
-            # ======================================================
+            if cash_ticks:
+                try:
+                    self.volume_profile_engine.process_ticks(
+                        cash_ticks,
+                        self.token_to_symbol,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[MarketStreamManager] Error processing "
+                        "cash ticks in VolumeProfileEngine"
+                    )
 
             if (
                 self.aggregator
@@ -2144,6 +2168,14 @@ class MarketStreamManager:
                             "[MarketStreamManager] Error recovering "
                             "aggregator state after connection gap."
                         )
+
+                try:
+                    self.volume_profile_engine.handle_connection_gap()
+                except Exception:
+                    logger.exception(
+                        "[MarketStreamManager] Error recovering "
+                        "volume profile state after connection gap."
+                    )
 
                 with self._lock:
                     self._first_observed_candle.clear()
@@ -2511,6 +2543,19 @@ class MarketStreamManager:
                 "state": self.state.value,
             }
 
+    def restart_stream(
+        self,
+        token_to_symbol: Optional[Dict[int, str]] = None,
+        kite_client: Optional[Any] = None,
+        timeframe_minutes: int = 15,
+    ) -> Dict[str, Any]:
+        self.stop_stream()
+        return self.start_stream(
+            token_to_symbol=token_to_symbol,
+            kite_client=kite_client,
+            timeframe_minutes=timeframe_minutes,
+        )
+
     # ==================================================================
     # STATUS
     # ==================================================================
@@ -2673,6 +2718,22 @@ class MarketStreamManager:
                 "l5_processed_count": self._l5_processed_count,
                 "l5_replaced_count": self._l5_replaced_count,
             }
+
+    def get_volume_profile(
+        self,
+        symbol: str,
+        current_price: Optional[float] = None,
+    ) -> VolumeProfileFacts:
+        sym = str(symbol).strip().upper()
+        price = current_price
+        if price is None or not math.isfinite(price) or price <= 0:
+            st = live_market_state.get_symbol_state(sym)
+            if st and st.ltp and math.isfinite(st.ltp) and st.ltp > 0:
+                price = float(st.ltp)
+        return self.volume_profile_engine.get_facts(
+            symbol=sym,
+            current_price=price,
+        )
 
 
 market_stream_manager = (

@@ -92,15 +92,24 @@ def _is_finite_positive(value: Any) -> bool:
 
 
 def _safe_non_negative_int(value: Any) -> Optional[int]:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or value is None:
         return None
 
     try:
-        number = int(value)
+        if isinstance(value, (int, float)):
+            f_val = float(value)
+        elif isinstance(value, str):
+            f_val = float(value.strip())
+        else:
+            return None
     except (TypeError, ValueError):
         return None
 
-    return number if number >= 0 else None
+    if not math.isfinite(f_val) or f_val < 0:
+        return None
+    if not f_val.is_integer():
+        return None
+    return int(f_val)
 
 
 class Candle:
@@ -223,21 +232,15 @@ class CandleAggregator:
             maxlen=int(max_completed_candles)
         )
 
-        # Session VWAP state.
         self.cum_pv: float = 0.0
         self.cum_vol: int = 0
         self.current_vwap: float = 0.0
         self.vwap_source: str = "UNAVAILABLE"
 
-        # Session state.
         self.session_date: Optional[date] = None
         self.last_tick_timestamp: Optional[datetime] = None
 
         self._lock = threading.RLock()
-
-    # ================================================================
-    # SESSION
-    # ================================================================
 
     def _reset_daily_session_locked(
         self,
@@ -401,7 +404,7 @@ class CandleAggregator:
         self.current_vwap = (
             self.cum_pv / self.cum_vol
         )
-        self.vwap_source = "OBSERVED_TICKS"
+        self.vwap_source = "OBSERVED_PARTIAL"
 
     # ================================================================
     # CANDLE FINALIZATION
@@ -426,8 +429,14 @@ class CandleAggregator:
 
         candle.finalize()
 
-        completed_vwap = float(
-            self.current_vwap
+        completed_vwap = (
+            float(self.current_vwap)
+            if (
+                self.current_vwap is not None
+                and math.isfinite(self.current_vwap)
+                and self.current_vwap > 0
+            )
+            else 0.0
         )
 
         payload = candle.to_dict()
@@ -607,13 +616,14 @@ class CandleAggregator:
             )
             return
 
-        try:
-            vol = int(volume)
-        except (TypeError, ValueError):
-            vol = 0
-
-        if vol < 0:
-            vol = 0
+        vol = _safe_non_negative_int(volume)
+        if vol is None:
+            logger.warning(
+                "[%s] Dropping tick with invalid volume: %r",
+                self.symbol,
+                volume,
+            )
+            return
 
         callback_payload = None
 
@@ -742,11 +752,15 @@ class CandleAggregator:
 
     def get_current_vwap(
         self,
-    ) -> float:
+    ) -> Optional[float]:
         with self._lock:
-            return float(
-                self.current_vwap
-            )
+            if (
+                self.current_vwap is not None
+                and math.isfinite(self.current_vwap)
+                and self.current_vwap > 0
+            ):
+                return float(self.current_vwap)
+            return None
 
     def get_current_candle(
         self,
@@ -756,6 +770,14 @@ class CandleAggregator:
                 return None
 
             return self.current_candle.to_dict()
+
+    def invalidate_gap_state(self) -> None:
+        with self._lock:
+            self.current_candle = None
+            self.cum_pv = 0.0
+            self.cum_vol = 0
+            self.current_vwap = 0.0
+            self.vwap_source = "UNAVAILABLE"
 
     # ================================================================
     # CONNECTION GAP RECOVERY
@@ -1202,7 +1224,7 @@ class MultiSymbolCandleAggregator:
             if bids[0][0] >= asks[0][0]:
                 return None
 
-            from backend.strategy.ssf_l5_srm_strategy import BookSnapshot
+            from backend.data.models import BookSnapshot
 
             # Optional fields. Missing OI/circuit values are allowed.
             oi_raw = tick.get("oi")
@@ -1641,9 +1663,11 @@ class MultiSymbolCandleAggregator:
             aggregators = list(self.aggregators.values())
             self.last_volume_by_token.clear()
             self.volume_session_date_by_token.clear()
+            self.latest_book_snapshots.clear()
 
         for aggregator in aggregators:
             aggregator.discard_in_progress_candle()
+            aggregator.invalidate_gap_state()
 
     def flush_due_candles(
         self,

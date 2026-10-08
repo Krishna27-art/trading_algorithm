@@ -36,51 +36,26 @@ without peeking ahead.
 
 from __future__ import annotations
 
+import os
 import time as _time
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
 
 from backend.data.time_utils import MarketCalendar
-from backend.data.time_utils import now_ist_iso, now_ist_naive
+from backend.data.time_utils import now_ist_iso, now_ist_naive, to_ist_naive
 from backend.monitoring.logger import logger
 
 IST = "Asia/Kolkata"
 
 
 def _normalize_timestamp_to_ist_naive(value: Any) -> Optional[datetime]:
-    """
-    Convert any timezone-aware timestamp to Asia/Kolkata and then
-    return a naive IST datetime.
+    return to_ist_naive(value)
 
-    Naive timestamps are treated as already-IST.
-    """
-    if value is None:
-        return None
 
-    try:
-        ts = pd.Timestamp(value)
-    except (TypeError, ValueError):
-        return None
-
-    if pd.isna(ts):
-        return None
-
-    if ts.tzinfo is not None:
-        try:
-            ts = ts.tz_convert(IST)
-        except (TypeError, ValueError):
-            return None
-
-        ts = ts.tz_localize(None)
-
-    return ts.to_pydatetime()
-
-# Kite's documented max days per request, by interval. Pulling a wider range
-# than this in one call gets rejected by the API, not silently truncated.
 _MAX_DAYS_PER_REQUEST = {
     "minute": 60,
     "3minute": 100,
@@ -94,9 +69,6 @@ _MAX_DAYS_PER_REQUEST = {
 
 
 class SupportsHistoricalCandles(Protocol):
-    """Structural type — any client with this method works (KiteApp from
-    kite_client.py satisfies it), so this module never has to import
-    kiteconnect directly."""
 
     def get_historical_candles(
         self,
@@ -116,35 +88,29 @@ class HistoricalDataLoader:
         df.columns = [c.lower().strip() for c in df.columns]
 
         if "datetime" in df.columns:
-            df["datetime"] = pd.to_datetime(df["datetime"])
+            df["datetime"] = df["datetime"].map(_normalize_timestamp_to_ist_naive)
         elif "date" in df.columns and "time" in df.columns:
-            df["datetime"] = pd.to_datetime(df["date"] + " " + df["time"])
+            combined = df["date"].astype(str) + " " + df["time"].astype(str)
+            df["datetime"] = combined.map(_normalize_timestamp_to_ist_naive)
         elif "date" in df.columns:
-            df["datetime"] = pd.to_datetime(df["date"])
+            df["datetime"] = df["date"].map(_normalize_timestamp_to_ist_naive)
+
+        if "datetime" not in df.columns or df["datetime"].isna().any():
+            raise ValueError(f"CSV contains invalid or missing timestamps: {filepath}")
 
         df.sort_values("datetime", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        is_valid, errors = HistoricalDataLoader.validate_candles(df)
+        if not is_valid:
+            raise ValueError(f"CSV candle validation failed for {filepath}: {'; '.join(errors)}")
         return df
 
     @staticmethod
     def resolve_instrument_token(
         kite_client: Any, tradingsymbol: str, exchange: str = "NFO"
     ) -> Optional[int]:
-        """One-time lookup helper: maps a trading symbol (e.g. 'NIFTY24DECFUT')
-        to the numeric instrument_token the historical API needs. Kite's
-        instrument dump is large (~90k rows for NFO); cache the token you get
-        back in config rather than resolving it on every run."""
-        try:
-            instruments = kite_client.kite.instruments(exchange)
-        except Exception as e:
-            logger.error(f"Could not fetch instrument dump for {exchange}: {e}")
-            return None
-
-        for inst in instruments:
-            if inst.get("tradingsymbol") == tradingsymbol:
-                return int(inst["instrument_token"])
-
-        logger.warning(f"No instrument_token found for {tradingsymbol} on {exchange}")
-        return None
+        from backend.data.instrument_resolver import resolve_token
+        return resolve_token(kite_client, tradingsymbol, exchange)
 
     @staticmethod
     def fetch_real_data(
@@ -179,28 +145,32 @@ class HistoricalDataLoader:
                         f"Cached historical data is empty: {cache_path}"
                     )
 
-                if metadata is not None:
-                    cached_interval = metadata.get("interval")
-                    if cached_interval != interval:
-                        raise ValueError(
-                            f"Cached interval mismatch: "
-                            f"cached={cached_interval!r}, expected={interval!r}"
-                        )
+                if metadata is None:
+                    raise ValueError(
+                        f"Cached metadata is missing: {cache_path}"
+                    )
 
-                    cached_token = metadata.get("instrument_token")
-                    if cached_token is not None:
-                        try:
-                            if int(cached_token) != int(instrument_token):
-                                raise ValueError(
-                                    f"Cached instrument token mismatch: "
-                                    f"cached={cached_token!r}, "
-                                    f"expected={instrument_token!r}"
-                                )
-                        except (TypeError, ValueError) as exc:
+                cached_interval = metadata.get("interval")
+                if cached_interval != interval:
+                    raise ValueError(
+                        f"Cached interval mismatch: "
+                        f"cached={cached_interval!r}, expected={interval!r}"
+                    )
+
+                cached_token = metadata.get("instrument_token")
+                if cached_token is not None:
+                    try:
+                        if int(cached_token) != int(instrument_token):
                             raise ValueError(
-                                f"Invalid cached instrument token metadata: "
-                                f"{cached_token!r}"
-                            ) from exc
+                                f"Cached instrument token mismatch: "
+                                f"cached={cached_token!r}, "
+                                f"expected={instrument_token!r}"
+                            )
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Invalid cached instrument token metadata: "
+                            f"{cached_token!r}"
+                        ) from exc
 
                 cached_start = cached["datetime"].dt.date.min()
                 cached_end = cached["datetime"].dt.date.max()
@@ -220,10 +190,6 @@ class HistoricalDataLoader:
                     result = (
                         result
                         .sort_values("datetime")
-                        .drop_duplicates(
-                            subset="datetime",
-                            keep="last",
-                        )
                         .reset_index(drop=True)
                     )
 
@@ -281,11 +247,18 @@ class HistoricalDataLoader:
             if candles:
                 all_rows.extend(candles)
             else:
-                logger.warning(f"No candles returned for {chunk_start} -> {chunk_end} "
-                                f"(holiday range, bad token, or missing Historical API subscription?)")
+                expected_days = sum(
+                    1 for d in range((chunk_end - chunk_start).days + 1)
+                    if MarketCalendar.is_trading_day(chunk_start + timedelta(days=d))
+                )
+                if expected_days > 0 and not all_rows:
+                    logger.warning(
+                        f"No candles returned for {chunk_start} -> {chunk_end} "
+                        f"(expected {expected_days} trading days)"
+                    )
 
             chunk_start = chunk_end + timedelta(days=1)
-            _time.sleep(request_pause_seconds)  # stay well under Kite's rate limit
+            _time.sleep(request_pause_seconds)
 
         if not all_rows:
             raise RuntimeError(
@@ -293,7 +266,6 @@ class HistoricalDataLoader:
                 "(1) instrument_token is correct, (2) Kite account has the paid Historical Data "
                 "API subscription active, (3) access token is valid."
             )
-
 
         df = pd.DataFrame(all_rows)
         df.rename(columns={"date": "datetime"}, inplace=True)
@@ -306,18 +278,13 @@ class HistoricalDataLoader:
             raise ValueError(
                 "Historical data contains invalid/unconvertible timestamps."
             )
-        df = df[["datetime", "open", "high", "low", "close", "volume"]]
+        cols = ["datetime", "open", "high", "low", "close", "volume"]
+        if "oi" in df.columns:
+            cols.append("oi")
+        df = df[cols]
         df.sort_values("datetime", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-        # --------------------------------------------------------------
-        # Detect duplicate timestamps in the RAW source data BEFORE any
-        # destructive cleanup. A duplicate timestamp returned by the Kite
-        # Historical API indicates a genuine data-quality problem and
-        # must be surfaced, not silently discarded ahead of validation
-        # (which would make validate_candles() always see zero
-        # duplicates and never actually detect this).
-        # --------------------------------------------------------------
         raw_dup_count = int(
             df["datetime"].duplicated().sum()
         )
@@ -344,8 +311,6 @@ class HistoricalDataLoader:
                 f"{duplicated_timestamps}"
             )
 
-        # Strict validation runs on data whose duplicate state has
-        # already been explicitly detected and logged above.
         is_valid, errors = HistoricalDataLoader.validate_candles(df)
         if not is_valid:
             raise ValueError(f"Historical market data validation failed: {'; '.join(errors)}")
@@ -368,16 +333,6 @@ class HistoricalDataLoader:
 
     @staticmethod
     def validate_candles(df: pd.DataFrame) -> Tuple[bool, List[str]]:
-        """
-        Validates OHLCV market candle integrity:
-        - Required columns present
-        - No NaN or null values
-        - Prices strictly positive, Volume >= 0
-        - High >= max(Open, Close, Low)
-        - Low <= min(Open, Close, High)
-        - Monotonically increasing timestamps (no out-of-order bars)
-        - Zero duplicate timestamps
-        """
         errors: List[str] = []
         required_cols = {"datetime", "open", "high", "low", "close", "volume"}
         if not required_cols.issubset(df.columns):
@@ -389,19 +344,20 @@ class HistoricalDataLoader:
             errors.append("Dataset contains 0 candles.")
             return False, errors
 
-        # Null check
         if df[list(required_cols)].isna().any().any():
             null_cols = df[list(required_cols)].columns[df[list(required_cols)].isna().any()].tolist()
             errors.append(f"Null values detected in columns: {null_cols}")
 
-        # Price positivity & volume
+        for col in ["open", "high", "low", "close", "volume"]:
+            if not np.isfinite(df[col]).all():
+                errors.append(f"Non-finite values (NaN or Inf) detected in {col}.")
+
         if (df["open"] <= 0).any() or (df["high"] <= 0).any() or (df["low"] <= 0).any() or (df["close"] <= 0).any():
             errors.append("Non-positive prices found in OHLC data.")
 
         if (df["volume"] < 0).any():
             errors.append("Negative volume found in dataset.")
 
-        # Geometric OHLC checks
         invalid_high = (df["high"] < df["low"]) | (df["high"] < df["open"]) | (df["high"] < df["close"])
         if invalid_high.any():
             bad_count = invalid_high.sum()
@@ -412,7 +368,6 @@ class HistoricalDataLoader:
             bad_count = invalid_low.sum()
             errors.append(f"Found {bad_count} candles where Low is higher than Open, High, or Close.")
 
-        # Timestamp order & duplicates
         if not df["datetime"].is_monotonic_increasing:
             errors.append("Timestamps are out of chronological order.")
 
@@ -420,30 +375,38 @@ class HistoricalDataLoader:
         if dup_count > 0:
             errors.append(f"Found {dup_count} duplicate timestamps.")
 
+        is_intraday = (df["datetime"].dt.time != time(0, 0)).any()
+        if is_intraday:
+            if (df["datetime"].dt.weekday >= 5).any():
+                errors.append("Weekend candles detected in dataset.")
+
         return len(errors) == 0, errors
 
     @staticmethod
     def save_with_metadata(df: pd.DataFrame, csv_path: Path, metadata: Dict[str, Any]):
-        """Saves validated candle dataset along with sidecar metadata JSON."""
         import json
         csv_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(csv_path, index=False)
+        tmp_csv = csv_path.with_name(f"{csv_path.name}.tmp")
+        df.to_csv(tmp_csv, index=False)
+        with open(tmp_csv, "a") as f:
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_csv, csv_path)
+
         meta_path = csv_path.with_suffix(".meta.json")
-        with open(meta_path, "w", encoding="utf-8") as f:
+        tmp_meta = meta_path.with_name(f"{meta_path.name}.tmp")
+        with open(tmp_meta, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_meta, meta_path)
         logger.info(f"Saved {len(df)} validated bars and metadata to {csv_path}")
 
     @staticmethod
     def load_cached_data_with_validation(csv_path: Path) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
-        """Loads and validates a cached candle CSV, returning dataframe and metadata."""
         import json
         if not csv_path.exists():
             raise FileNotFoundError(f"Cache file {csv_path} does not exist.")
-
-        df = pd.read_csv(csv_path, parse_dates=["datetime"])
-        is_valid, errors = HistoricalDataLoader.validate_candles(df)
-        if not is_valid:
-            raise ValueError(f"Cached data validation failed for {csv_path}: {'; '.join(errors)}")
 
         meta_path = csv_path.with_suffix(".meta.json")
         meta = None
@@ -452,7 +415,22 @@ class HistoricalDataLoader:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
             except Exception as e:
-                logger.warning(f"Could not load metadata from {meta_path}: {e}")
+                raise ValueError(f"Corrupt cache metadata for {csv_path}: {e}")
+
+        df = pd.read_csv(csv_path)
+        if "datetime" not in df.columns:
+            raise ValueError(f"Missing datetime column in {csv_path}")
+
+        df["datetime"] = df["datetime"].map(_normalize_timestamp_to_ist_naive)
+        if df["datetime"].isna().any():
+            raise ValueError(f"Invalid timestamps in cache {csv_path}")
+
+        if df["datetime"].duplicated().any():
+            raise ValueError(f"Corrupt cache: duplicate timestamps in {csv_path}")
+
+        is_valid, errors = HistoricalDataLoader.validate_candles(df)
+        if not is_valid:
+            raise ValueError(f"Cached data validation failed for {csv_path}: {'; '.join(errors)}")
 
         return df, meta
 
@@ -483,12 +461,13 @@ class HistoricalDataLoader:
         if interval_minutes <= 0:
             raise ValueError("interval_minutes must be > 0")
 
-        now = now.replace(tzinfo=None)
+        now = to_ist_naive(now)
+        if now is None:
+            raise ValueError("Invalid timestamp provided to get_latest_completed_candle_start")
 
         session_start = datetime.combine(now.date(), session_open)
         session_end = datetime.combine(now.date(), session_close)
 
-        # No completed 15m candle exists before 09:30.
         first_completed = session_start + timedelta(
             minutes=interval_minutes
         )
@@ -523,19 +502,6 @@ class HistoricalDataLoader:
         interval: str = "15minute",
         request_pause_seconds: float = 0.35,
     ) -> pd.DataFrame:
-        """
-        Load a 15-minute intraday dataset and incrementally refresh it.
-
-        Rules:
-        1. Historical cache is preserved.
-        2. Only today's data is fetched after the initial cache exists.
-        3. Refresh happens only when the cache is behind the latest
-           completed candle.
-        4. The currently-forming candle is excluded.
-        5. Duplicate candle timestamps are replaced by the newest Kite data.
-        6. No synthetic/fallback candles are generated.
-        """
-
         interval_minutes_map = {
             "minute": 1,
             "15minute": 15,
@@ -552,7 +518,9 @@ class HistoricalDataLoader:
                 "Kite client is required for live intraday data."
             )
 
-        now = (now or now_ist_naive()).replace(tzinfo=None)
+        now = to_ist_naive(now or now_ist_naive())
+        if now is None:
+            raise ValueError("Invalid current time for intraday cache refresh")
         today = now.date()
 
         latest_completed = (
@@ -562,38 +530,33 @@ class HistoricalDataLoader:
             )
         )
 
-        # Before the first completed 15m candle of today, use completed
-        # candles up to the previous session close so warm-up succeeds.
         if latest_completed is None:
-            prev_close_dt = datetime.combine(today - timedelta(days=1), time(15, 30))
+            prev_session = MarketCalendar.previous_trading_session(today)
+            prev_close_dt = datetime.combine(prev_session, time(15, 30))
             if cache_path.exists():
                 try:
-                    cached, _ = (
+                    cached, meta = (
                         HistoricalDataLoader
                         .load_cached_data_with_validation(cache_path)
                     )
-                    if not cached.empty:
-                        cached["datetime"] = (
-                            cached["datetime"]
-                            .map(_normalize_timestamp_to_ist_naive)
-                        )
-                        cached = cached[cached["datetime"] <= prev_close_dt]
-                        if not cached.empty:
-                            return cached.sort_values("datetime").reset_index(drop=True)
+                    if not cached.empty and meta is not None:
+                        if int(meta.get("instrument_token", 0)) == int(instrument_token):
+                            cached = cached[cached["datetime"] <= prev_close_dt]
+                            if not cached.empty:
+                                return cached.sort_values("datetime").reset_index(drop=True)
                 except Exception as exc:
                     logger.exception(
                         "Pre-market historical cache read failed for token %s: %s",
                         instrument_token,
                         exc,
                     )
-            # If no valid cache on disk, fetch prior completed days up to yesterday
             try:
                 start_date = today - timedelta(days=int(lookback_days))
                 fresh = HistoricalDataLoader.fetch_real_data(
                     kite_client=kite_client,
                     instrument_token=instrument_token,
                     start_date=start_date,
-                    end_date=today - timedelta(days=1),
+                    end_date=prev_session,
                     interval=interval,
                     cache_path=cache_path,
                     force_refresh=True,
@@ -612,25 +575,21 @@ class HistoricalDataLoader:
 
         if cache_path.exists():
             try:
-                cached, _ = (
+                cached, meta = (
                     HistoricalDataLoader
                     .load_cached_data_with_validation(cache_path)
                 )
 
-                if not cached.empty:
-                    cached["datetime"] = (
-                        cached["datetime"]
-                        .map(_normalize_timestamp_to_ist_naive)
-                    )
-
-                    if cached["datetime"].isna().any():
+                if not cached.empty and meta is not None:
+                    if int(meta.get("instrument_token", 0)) != int(instrument_token):
                         raise ValueError(
-                            f"Cached data contains invalid timestamps: {cache_path}"
+                            f"Cache token mismatch: {meta.get('instrument_token')} != {instrument_token}"
                         )
-
-                    cached = cached.sort_values(
-                        "datetime"
-                    ).reset_index(drop=True)
+                    if meta.get("interval") != interval:
+                        raise ValueError(
+                            f"Cache interval mismatch: {meta.get('interval')} != {interval}"
+                        )
+                    cached = cached.sort_values("datetime").reset_index(drop=True)
 
             except Exception as exc:
                 logger.warning(
@@ -639,7 +598,6 @@ class HistoricalDataLoader:
                 )
                 cached = pd.DataFrame()
 
-        # Never expose future/forming candles from cache.
         if not cached.empty:
             cached = cached[
                 cached["datetime"] <= latest_completed
@@ -647,20 +605,14 @@ class HistoricalDataLoader:
 
             cached = cached.sort_values(
                 "datetime"
-            ).drop_duplicates(
-                subset="datetime",
-                keep="last",
             ).reset_index(drop=True)
 
-        # Existing cache is already caught up.
         if (
             not cached.empty
             and cached["datetime"].max() >= latest_completed
         ):
             return cached
 
-        # First download: get enough prior history for CPR / EMA warm-up.
-        # Later refreshes: request from the last cached date to today.
         if cached.empty:
             start_date = today - timedelta(
                 days=int(lookback_days)
@@ -704,18 +656,6 @@ class HistoricalDataLoader:
                 "be used as a live substitute."
             )
 
-        fresh["datetime"] = (
-            fresh["datetime"]
-            .map(_normalize_timestamp_to_ist_naive)
-        )
-
-        if fresh["datetime"].isna().any():
-            raise ValueError(
-                f"Fresh Kite data contains invalid timestamps "
-                f"for token {instrument_token}."
-            )
-
-        # Remove the currently-forming candle.
         fresh = fresh[
             fresh["datetime"] <= latest_completed
         ].copy()
@@ -734,7 +674,6 @@ class HistoricalDataLoader:
                 f"token {instrument_token}."
             )
 
-        # Fresh Kite rows replace cached rows having the same timestamp.
         merged = (
             merged
             .drop_duplicates(
@@ -745,7 +684,6 @@ class HistoricalDataLoader:
             .reset_index(drop=True)
         )
 
-        # Final safety boundary.
         merged = merged[
             merged["datetime"] <= latest_completed
         ].reset_index(drop=True)
@@ -794,21 +732,15 @@ class HistoricalDataLoader:
         base_price: float = 24000.0,
         seed: int = 42,
     ) -> pd.DataFrame:
-        """
-        Fake data — a random-walk-with-drift generator, kept ONLY so the repo
-        still runs end-to-end (`--mode backtest`) for someone who hasn't set
-        up Kite API credentials yet. Any performance numbers from this are
-        meaningless for evaluating the actual strategy — they reflect the
-        random walk's statistical properties, not real NIFTY behavior
-        (no real volatility clustering, no real gap opens, no real event
-        days). Use fetch_real_data() for anything you intend to draw
-        conclusions from.
-        """
+        env = os.getenv("TRADING_ENVIRONMENT", "").lower()
+        if env in ("production", "prod", "live"):
+            raise RuntimeError("Synthetic market data is strictly forbidden in production.")
+
         if start_date is None:
             start_date = datetime(2025, 1, 1)
 
         rng = np.random.default_rng(seed)
-        bars_per_day = 25  # 09:15 to 15:15 in 15-min bars
+        bars_per_day = 25
         rows = []
         price = base_price
         current_date = start_date
@@ -833,7 +765,7 @@ class HistoricalDataLoader:
                 price = c
                 t += timedelta(minutes=15)
 
-            price = day_open + rng.normal(0, base_price * 0.002)  # overnight gap
+            price = day_open + rng.normal(0, base_price * 0.002)
             generated_days += 1
             current_date += timedelta(days=1)
 

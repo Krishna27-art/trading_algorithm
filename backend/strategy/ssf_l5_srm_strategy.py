@@ -41,28 +41,7 @@ from backend.config.settings import InstrumentConfig, StrategyConfig, settings
 from backend.monitoring.logger import logger
 from backend.strategy.base_strategy import BaseStrategy, SignalAction, StrategySignal
 
-Level = Tuple[float, int, int]  # (price, qty, orders)
-
-
-@dataclass
-class BookSnapshot:
-    timestamp: datetime
-    bids: List[Level]                    # 5 levels, best first
-    asks: List[Level]
-    ltp: float
-
-    fut_ltp: Optional[float] = None
-    fut_oi: Optional[float] = None
-
-    sector_ret_30m: Optional[float] = None   # sector index 30-min return
-    stock_ret_30m: Optional[float] = None
-
-    circuit_lower: Optional[float] = None
-    circuit_upper: Optional[float] = None
-
-    futures_updated_at: Optional[datetime] = None
-    sector_return_updated_at: Optional[datetime] = None
-    stock_return_updated_at: Optional[datetime] = None
+from backend.data.models import BookSnapshot, Level
 
 
 @dataclass

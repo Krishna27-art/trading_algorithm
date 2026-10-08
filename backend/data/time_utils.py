@@ -7,8 +7,9 @@ Naive datetimes returned by now_ist_naive() are IST by contract.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+import math
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -44,8 +45,16 @@ def to_ist_aware(dt: Any) -> Optional[datetime]:
     Convert any timestamp (datetime, ISO string, epoch) to timezone-aware Asia/Kolkata.
     Safely bridges naive and aware timestamps, assuming naive timestamps from NSE/Kite are IST.
     """
-    if dt is None:
-        return None
+    if isinstance(dt, (int, float)) and not isinstance(dt, bool):
+        try:
+            val = float(dt)
+            if not math.isfinite(val) or val <= 0:
+                return None
+            if val > 1e11:
+                val = val / 1000.0
+            return datetime.fromtimestamp(val, tz=IST)
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
     if isinstance(dt, str):
         try:
             dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
@@ -143,21 +152,24 @@ class MarketCalendar:
 
     @staticmethod
     def is_trading_day(d: date) -> bool:
-        """Weekday and not on the NSE holiday list. Falls back to weekday-only
-        for years not yet in HOLIDAYS_BY_YEAR, so requests still work — just
-        without holiday filtering for that year."""
-        if d.weekday() >= 5:  # Saturday=5, Sunday=6
+        if d.weekday() >= 5:
             return False
-        if d in MarketCalendar._all_holidays():
+        if d.year not in HOLIDAYS_BY_YEAR:
+            raise ValueError(f"No authoritative NSE holiday calendar available for year {d.year}. Cannot verify trading day.")
+        if d in HOLIDAYS_BY_YEAR[d.year]:
             return False
         return True
 
     @staticmethod
     def is_blackout_date(d: date) -> bool:
-        """Returns True if the date falls on Union Budget or Election Results day."""
-        if d in BLACKOUT_DATES or (d.month == 2 and d.day == 1):
-            return True
-        return False
+        return d in BLACKOUT_DATES
+
+    @staticmethod
+    def previous_trading_session(d: date) -> date:
+        cur = d - timedelta(days=1)
+        while not MarketCalendar.is_trading_day(cur):
+            cur -= timedelta(days=1)
+        return cur
 
     @staticmethod
     def get_session_phase(t: time) -> SessionPhase:

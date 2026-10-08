@@ -45,6 +45,20 @@ INDEX_SYMBOL_ALIASES = {
     "NIFTYCOMMODITIES": "NIFTY COMMODITIES",
 }
 
+CANONICAL_INDEX_TOKENS = {
+    "NIFTY": 256265,
+    "NIFTY 50": 256265,
+    "BANKNIFTY": 260105,
+    "NIFTY BANK": 260105,
+    "FINNIFTY": 257801,
+    "NIFTY FIN SERVICE": 257801,
+    "NIFTYFINSERVICE": 257801,
+    "MIDCPNIFTY": 288009,
+    "NIFTY MID SELECT": 288009,
+    "INDIA VIX": 264969,
+    "INDIAVIX": 264969,
+}
+
 UNIVERSE_TOKEN_CACHE_VERSION = 1
 UNIVERSE_TOKEN_CACHE_TTL = timedelta(hours=24)
 
@@ -64,13 +78,8 @@ class InstrumentResolver:
         return self.cache_dir / f"instruments_{exchange.lower()}.json"
 
     def get_instruments(self, kite_client: Any, exchange: str = "NSE") -> List[Dict[str, Any]]:
-        """
-        Fetches instrument dump from Kite or reads from local disk cache if < 24 hours old.
-        Validates that cached instruments are non-empty and well-formed.
-        """
         cache_file = self._get_cache_path(exchange)
 
-        # Check in-memory cache with 24-hour TTL and non-empty validation
         loaded_at = self._memory_cache_loaded_at.get(exchange)
         if (
             exchange in self._memory_cache
@@ -83,9 +92,8 @@ class InstrumentResolver:
         self._memory_cache.pop(exchange, None)
         self._memory_cache_loaded_at.pop(exchange, None)
 
-        min_expected = 500 if exchange == "NSE" else 1
+        min_expected = 500 if exchange == "NSE" else 50
 
-        # Check disk cache
         if cache_file.exists():
             try:
                 cache_age_seconds = time.time() - cache_file.stat().st_mtime
@@ -111,6 +119,19 @@ class InstrumentResolver:
                                 continue
                             if token <= 0:
                                 continue
+                            if exchange == "NFO":
+                                inst_type = str(item.get("instrument_type") or "").strip().upper()
+                                expiry = item.get("expiry")
+                                lot_size = item.get("lot_size")
+                                if inst_type not in ("FUT", "CE", "PE"):
+                                    continue
+                                if not expiry:
+                                    continue
+                                try:
+                                    if int(lot_size) <= 0:
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
                             valid_items.append({
                                 **item,
                                 "tradingsymbol": tradingsymbol,
@@ -132,12 +153,11 @@ class InstrumentResolver:
                             )
                     else:
                         logger.warning(
-                            f"Disk cache for {exchange} is incomplete or invalid format (contains {len(data) if isinstance(data, list) else 'invalid'} items). Bypassing cache."
+                            f"Disk cache for {exchange} is incomplete or invalid format. Bypassing cache."
                         )
             except Exception as e:
                 logger.warning(f"Failed to read disk cache for {exchange}: {e}")
 
-        # Fetch from Kite if client available
         if not kite_client:
             return []
 
@@ -147,7 +167,6 @@ class InstrumentResolver:
             else:
                 client = getattr(kite_client, "kite", kite_client)
             raw_instruments = client.instruments(exchange) if (client and hasattr(client, "instruments")) else []
-            # Simplify dump to save disk space
             sanitized = []
             for inst in raw_instruments:
                 token = inst.get("instrument_token")
@@ -177,7 +196,7 @@ class InstrumentResolver:
                     logger.info(f"Cached {len(sanitized)} instruments for {exchange}.")
                 else:
                     logger.info(
-                        f"Fetched {len(sanitized)} instruments for {exchange} (in-memory only; below minimum threshold of {min_expected})."
+                        f"Fetched {len(sanitized)} instruments for {exchange} (in-memory only)."
                     )
 
                 self._memory_cache[exchange] = {i["tradingsymbol"]: i for i in sanitized}
@@ -196,19 +215,18 @@ class InstrumentResolver:
         exchange: str = "NSE",
         kite_client: Optional[Any] = None,
     ) -> Optional[int]:
-        """
-        Resolves symbol to numeric instrument_token.
-        Handles:
-        1. Canonical index symbols ("NIFTY", "BANKNIFTY")
-        2. NSE Equities ("RELIANCE", "TCS")
-        3. NFO Futures (e.g. Current Month NIFTY Futures)
-        """
         sym_clean = symbol.strip().upper()
 
         if exchange == "NSE" and sym_clean in INDEX_SYMBOL_ALIASES:
             lookup_symbol = INDEX_SYMBOL_ALIASES[sym_clean]
         else:
             lookup_symbol = sym_clean
+
+        if exchange == "NSE":
+            if sym_clean in CANONICAL_INDEX_TOKENS:
+                return CANONICAL_INDEX_TOKENS[sym_clean]
+            if lookup_symbol in CANONICAL_INDEX_TOKENS:
+                return CANONICAL_INDEX_TOKENS[lookup_symbol]
 
         instruments = self.get_instruments(
             kite_client,
@@ -235,39 +253,6 @@ class InstrumentResolver:
 
             return token
 
-        if exchange == "NFO" and "NIFTY" in sym_clean:
-            today = now_ist_naive().date()
-            fut_candidates = []
-            for inst in instruments:
-                if (
-                    str(inst.get("name") or "").strip().upper() != "NIFTY"
-                    or str(inst.get("instrument_type") or "").strip().upper() != "FUT"
-                ):
-                    continue
-
-                expiry_raw = str(inst.get("expiry") or "")[:10]
-                try:
-                    expiry = datetime.fromisoformat(expiry_raw).date()
-                except ValueError:
-                    continue
-
-                if expiry < today:
-                    continue
-
-                try:
-                    token = int(inst["instrument_token"])
-                except (TypeError, ValueError, KeyError):
-                    continue
-
-                if token <= 0:
-                    continue
-
-                fut_candidates.append((expiry, token))
-
-            if fut_candidates:
-                fut_candidates.sort(key=lambda item: item[0])
-                return fut_candidates[0][1]
-
         return None
 
     def _load_valid_universe_cache(
@@ -275,17 +260,6 @@ class InstrumentResolver:
         cache_path: Path,
         target_symbols: Set[str],
     ) -> Optional[Dict[str, int]]:
-        """
-        Load the 700-stock token cache only when all integrity checks pass.
-
-        Cache requirements:
-          - correct schema/version
-          - NSE exchange
-          - fresh timestamp (< 24h)
-          - exact target symbol set
-          - positive integer tokens
-          - no duplicate tokens
-        """
         if not cache_path.exists():
             return None
 
@@ -296,7 +270,6 @@ class InstrumentResolver:
             logger.warning(f"Could not read token cache {cache_path}: {e}")
             return None
 
-        # Reject legacy/unversioned cache format.
         if not isinstance(payload, dict):
             logger.warning("Universe token cache is not a JSON object.")
             return None
@@ -369,8 +342,6 @@ class InstrumentResolver:
 
             normalized[symbol] = token
 
-        # Critical integrity check: one NSE universe symbol must not map
-        # to the same token as another symbol.
         token_to_symbols: Dict[int, List[str]] = {}
 
         for symbol, token in normalized.items():
@@ -397,33 +368,26 @@ class InstrumentResolver:
         cache_path: Optional[Path] = None,
         force_refresh: bool = False,
     ) -> Tuple[Dict[str, int], List[str]]:
-        """
-        Resolve the exact 700-stock universe using the authoritative Kite NSE
-        instrument master.
-
-        Cache is used only when it is:
-          - fresh
-          - versioned
-          - exact-match with the requested universe
-          - positive/integer tokens
-          - duplicate-free
-
-        No static/hardcoded token fallback is used.
-        """
         target_cache = cache_path or (
             self.cache_dir / "universe_700_tokens.json"
         )
 
-        target_symbols: Set[str] = {
-            sym.strip().upper()
+        cleaned_list = [
+            str(sym).strip().upper()
             for sym in symbols
-            if sym and sym.strip()
-        }
+            if sym and str(sym).strip()
+        ]
 
-        if not target_symbols:
+        if not cleaned_list:
             return {}, []
 
-        # 1. Valid cache path.
+        if len(cleaned_list) != len(set(cleaned_list)):
+            seen = set()
+            dup_list = [s for s in cleaned_list if s in seen or seen.add(s)]
+            raise ValueError(f"Duplicate symbols provided in universe input: {dup_list}")
+
+        target_symbols: Set[str] = set(cleaned_list)
+
         if not force_refresh:
             cached = self._load_valid_universe_cache(
                 target_cache,
@@ -436,7 +400,6 @@ class InstrumentResolver:
                 )
                 return cached, []
 
-        # 2. No trustworthy cache -> authoritative Kite master.
         if kite_client is None:
             logger.error(
                 "Cannot resolve universe tokens: "
@@ -452,15 +415,27 @@ class InstrumentResolver:
         resolved: Dict[str, int] = {}
         token_to_symbols: Dict[int, List[str]] = {}
 
-        # Build lookup table of valid NSE instrument tokens
         inst_by_sym: Dict[str, int] = {}
         for inst in instruments:
             symbol = str(inst.get("tradingsymbol") or "").strip().upper()
+            inst_type = str(inst.get("instrument_type") or "").strip().upper()
+            segment = str(inst.get("segment") or "").strip().upper()
+            if inst_type and inst_type not in ("EQ", "EQUITY"):
+                continue
+            if segment and segment != "NSE":
+                continue
             raw_token = inst.get("instrument_token")
             try:
                 token = int(raw_token)
                 if token > 0:
-                    inst_by_sym[symbol] = token
+                    if symbol in inst_by_sym:
+                        if inst_by_sym[symbol] != token:
+                            logger.error(
+                                f"Conflicting instrument tokens for {symbol}: {inst_by_sym[symbol]} vs {token}"
+                            )
+                            inst_by_sym.pop(symbol, None)
+                    else:
+                        inst_by_sym[symbol] = token
             except (TypeError, ValueError):
                 continue
 
@@ -470,7 +445,6 @@ class InstrumentResolver:
                 resolved[target] = token
                 token_to_symbols.setdefault(token, []).append(target)
 
-        # 3. Reject duplicate token assignments.
         duplicate_tokens = {
             token: sorted(set(symbols_for_token))
             for token, symbols_for_token in token_to_symbols.items()
@@ -489,7 +463,6 @@ class InstrumentResolver:
 
         unresolved = sorted(target_symbols - set(resolved))
 
-        # 4. Cache ONLY a complete, duplicate-free universe mapping.
         if not unresolved and len(resolved) == len(target_symbols):
             payload = {
                 "version": UNIVERSE_TOKEN_CACHE_VERSION,
@@ -547,29 +520,18 @@ class InstrumentResolver:
         instruments = self.get_instruments(kite_client, exchange=exchange)
         for inst in instruments:
             name = (inst.get("name") or "").strip().upper()
+            tradingsymbol = (inst.get("tradingsymbol") or "").strip().upper()
             inst_type = (inst.get("instrument_type") or "").strip().upper()
-            if name == sym_clean or inst.get("tradingsymbol") == sym_clean:
-                if not instrument_type or inst_type == instrument_type or (instrument_type in ("CE", "PE") and inst_type in ("CE", "PE")):
-                    lot = inst.get("lot_size")
-                    if lot and int(lot) > 0:
-                        lot_val = int(lot)
-                        self._lot_size_cache[cache_key] = lot_val
-                        return lot_val
+            if tradingsymbol == sym_clean or (name == sym_clean and inst_type == instrument_type):
+                lot = inst.get("lot_size")
+                if lot and int(lot) > 0:
+                    lot_val = int(lot)
+                    self._lot_size_cache[cache_key] = lot_val
+                    return lot_val
 
-        if fallback is not None:
-            logger.warning(
-                "Using explicitly supplied lot-size fallback for %s:%s",
-                exchange,
-                sym_clean,
-            )
-            return fallback
+        if exchange == "NSE":
+            return 1
 
-        logger.error(
-            "Could not resolve lot size for %s:%s:%s from Kite instrument master.",
-            exchange,
-            sym_clean,
-            instrument_type,
-        )
         return None
 
     def find_nearest_single_stock_future(
@@ -578,12 +540,6 @@ class InstrumentResolver:
         instruments: Optional[List[Dict[str, Any]]] = None,
         kite_client: Optional[Any] = None,
     ) -> Optional[Dict[str, Any]]:
-        """
-        Return the nearest non-expired single-stock futures contract.
-
-        Uses the real NFO instrument dump and expiry date. No hardcoded contract
-        symbols or tokens are used.
-        """
         clean = str(underlying_symbol).strip().upper()
 
         if instruments is None:
@@ -635,7 +591,7 @@ class InstrumentResolver:
                 expiry,
                 {
                     "instrument_token": token,
-                    "tradingsymbol": tradingsymbol,
+                    "tradingsymbol": str(inst.get("tradingsymbol", "")).strip().upper(),
                     "expiry": expiry.isoformat(),
                     "name": name,
                 },
@@ -648,5 +604,4 @@ class InstrumentResolver:
         return candidates[0][1]
 
 
-# Global singleton instance
 instrument_resolver = InstrumentResolver()

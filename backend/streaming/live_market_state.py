@@ -266,12 +266,7 @@ class LiveMarketState:
         day_low: Optional[float] = None,
         session_volume: Optional[int] = None,
     ) -> None:
-        if timestamp is None:
-            logger.warning(
-                "[LiveMarketState] Rejecting tick for %s: missing mandatory exchange timestamp",
-                symbol,
-            )
-            return
+        ts = timestamp or now_ist_naive()
 
         try:
             num_price = float(price)
@@ -285,8 +280,6 @@ class LiveMarketState:
                 price,
             )
             return
-
-        ts = timestamp
         with self._lock:
             state = self._symbols.get(symbol)
             if state is None:
@@ -457,14 +450,11 @@ class LiveMarketState:
 
     def get_symbol_state(self, symbol: str) -> Optional[LiveSymbolState]:
         with self._lock:
-            st = self._symbols.get(symbol)
-            if st is None:
-                return None
-            return copy.copy(st)
+            return self._symbols.get(symbol)
 
     def get_all_symbols_state(self) -> Dict[str, LiveSymbolState]:
         with self._lock:
-            return {sym: copy.copy(st) for sym, st in self._symbols.items()}
+            return dict(self._symbols)
 
     def get_candles_df(self, symbol: str) -> pd.DataFrame:
         with self._lock:

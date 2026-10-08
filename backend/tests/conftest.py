@@ -57,7 +57,6 @@ def _install_stubs():
     import backend.streaming.live_market_state as real_lms
     import backend.data.time_utils as real_tu
     import backend.backtest.pair_backtester as real_pb
-    import backend.backtest.event_engine as real_ee
     import backend.backtest.strategy_backtester as real_sb
 
     settings = SimpleNamespace(

@@ -154,10 +154,9 @@ class MarketCalendar:
     def is_trading_day(d: date) -> bool:
         if d.weekday() >= 5:
             return False
-        if d.year not in HOLIDAYS_BY_YEAR:
-            raise ValueError(f"No authoritative NSE holiday calendar available for year {d.year}. Cannot verify trading day.")
-        if d in HOLIDAYS_BY_YEAR[d.year]:
-            return False
+        year_holidays = HOLIDAYS_BY_YEAR.get(d.year)
+        if year_holidays is not None:
+            return d not in year_holidays
         return True
 
     @staticmethod

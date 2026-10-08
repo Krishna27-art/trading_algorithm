@@ -100,6 +100,46 @@ class LiveSignalEngine:
         self._crsd_runtime = crsd_live_runtime
         self._scanner_snapshot: Optional[Any] = None
         self._db = db_manager
+        self._closed_signals_today: Dict[Tuple[str, str, str], str] = {}
+
+    def mark_signal_closed(self, symbol: str, strategy: str, trading_date: str, reason: str = "") -> None:
+        clean = (symbol or "").strip().upper()
+        strat = (strategy or "").strip().lower()
+        if not clean or not strat or not trading_date:
+            return
+        key = (clean, strat, str(trading_date))
+        with self._lock:
+            self._closed_signals_today[key] = str(reason)
+
+    def is_signal_closed(self, symbol: str, strategy: str, trading_date: str) -> bool:
+        clean = (symbol or "").strip().upper()
+        strat = (strategy or "").strip().lower()
+        key = (clean, strat, str(trading_date))
+        with self._lock:
+            if key in self._closed_signals_today:
+                return True
+        try:
+            with self._db._get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT outcome FROM signal_events WHERE symbol = ? AND strategy = ? AND trading_date = ? AND signal_status = 'CLOSED' LIMIT 1",
+                    (clean, strat, str(trading_date)),
+                )
+                row = cur.fetchone()
+                if row:
+                    with self._lock:
+                        self._closed_signals_today[key] = f"Closed with outcome {row[0]}"
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def get_closed_reason(self, symbol: str, strategy: str, trading_date: str) -> Optional[str]:
+        clean = (symbol or "").strip().upper()
+        strat = (strategy or "").strip().lower()
+        key = (clean, strat, str(trading_date))
+        with self._lock:
+            return self._closed_signals_today.get(key)
 
     def set_scanner_snapshot(self, snapshot: Optional[Any]) -> None:
         with self._lock:
@@ -405,11 +445,23 @@ class LiveSignalEngine:
 
         # Evaluate active signals in database journal and in-memory prediction
         try:
-            self._db.update_active_signal_tick(
+            resolved_sigs = self._db.update_active_signal_tick(
                 normalized_symbol,
                 float(price),
                 normalized_ts,
             )
+            for res_sig in (resolved_sigs or []):
+                s_sym = res_sig.get("symbol")
+                s_strat = res_sig.get("strategy")
+                s_date = res_sig.get("trading_date")
+                if s_sym and s_strat and s_date:
+                    self.mark_signal_closed(
+                        s_sym,
+                        s_strat,
+                        s_date,
+                        f"Resolved with outcome {res_sig.get('outcome', 'CLOSED')} at {res_sig.get('outcome_price')}",
+                    )
+
             self.on_tick(
                 normalized_symbol,
                 float(price),
@@ -713,6 +765,32 @@ class LiveSignalEngine:
                 live_ltp_by_symbol=live_ltp_by_symbol,
                 crsd_context=crsd_ctx,
             )
+
+            # Prevent signal resurrection: if a strategy on this symbol was already
+            # stopped out, reached target, or closed during this session, suppress re-entry.
+            session_date_str = candle_timestamp.strftime("%Y-%m-%d")
+            suppressed = False
+            for strat_key, p_obj in list(preds.items()):
+                p_dir = getattr(p_obj, "direction", None) or (
+                    p_obj.get("direction") if isinstance(p_obj, dict) else None
+                )
+                if p_dir in _VALID_DIRECTIONS:
+                    if self.is_signal_closed(symbol, strat_key, session_date_str):
+                        closed_reason = (
+                            self.get_closed_reason(symbol, strat_key, session_date_str)
+                            or "Session signal already resolved"
+                        )
+                        preds[strat_key] = SingleStrategyPrediction(
+                            status="NO_TRADE",
+                            direction="NEUTRAL",
+                            reason=f"{strat_key.upper()} signal concluded for this session: {closed_reason}",
+                            levels=getattr(p_obj, "levels", {}) or {},
+                            metrics=getattr(p_obj, "metrics", {}) or {},
+                        )
+                        suppressed = True
+
+            if suppressed:
+                consensus = prediction_service.calculate_consensus(preds)
 
             prediction_payload = {
                 key: value.to_dict()
@@ -1261,6 +1339,12 @@ class LiveSignalEngine:
                 updated_pred["reason"] = exit_reason
                 predictions[strat_name] = updated_pred
                 updated = True
+                ts_date = (
+                    timestamp.strftime("%Y-%m-%d")
+                    if hasattr(timestamp, "strftime")
+                    else now_ist_naive().strftime("%Y-%m-%d")
+                )
+                self.mark_signal_closed(clean, strat_name, ts_date, exit_reason)
 
         # Refresh published LTP and timestamp on every valid incoming tick
         result = dict(payload)
@@ -1340,6 +1424,7 @@ class LiveSignalEngine:
             self._latest_ltp.clear()
             self._processed_candle_keys.clear()
             self._processed_candle_order.clear()
+            self._closed_signals_today.clear()
         # Clear persistent SSF and CRSD state so a new session starts clean.
         self._ssf_runtime.reset()
         self._crsd_runtime.reset()

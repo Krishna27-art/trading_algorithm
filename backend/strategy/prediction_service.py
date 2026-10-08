@@ -408,13 +408,14 @@ class PredictionService:
         data = data.reset_index(drop=True)
 
         if "vwap" not in data.columns:
-            data["vwap"] = calculate_session_vwap(data).to_numpy()
-        else:
-            supplied_vwap = pd.to_numeric(data["vwap"], errors="coerce")
-            if supplied_vwap.isna().any() or (supplied_vwap <= 0).any():
-                derived = calculate_session_vwap(data)
-                use_derived = supplied_vwap.isna() | (supplied_vwap <= 0)
-                data["vwap"] = supplied_vwap.where(~use_derived, derived)
+            logger.warning("[PredictionService] Upstream VWAP column missing from candle data. Failing closed.")
+            return pd.DataFrame(), []
+
+        supplied_vwap = pd.to_numeric(data["vwap"], errors="coerce")
+        if supplied_vwap.isna().any() or (supplied_vwap <= 0).any():
+            logger.warning("[PredictionService] Invalid/non-positive upstream VWAP detected. Failing closed.")
+            return pd.DataFrame(), []
+        data["vwap"] = supplied_vwap
 
         days = list(data.groupby("date", sort=True))
         return data, days
@@ -1899,14 +1900,14 @@ class PredictionService:
             direction = "LONG"
             agreeing = long_count
             strength = "STRONG" if long_count >= 3 else "MODERATE" if long_count >= 2 else "WEAK"
-            label = f"{strength} LONG ({long_count}/{total_live})"
+            label = f"{strength} LONG ({long_count}/{evaluable_count})"
         else:
             direction = "SHORT"
             agreeing = short_count
             strength = "STRONG" if short_count >= 3 else "MODERATE" if short_count >= 2 else "WEAK"
-            label = f"{strength} SHORT ({short_count}/{total_live})"
+            label = f"{strength} SHORT ({short_count}/{evaluable_count})"
 
-        agreement_pct = round((agreeing / total_live) * 100.0, 1)
+        agreement_pct = round((agreeing / evaluable_count) * 100.0, 1) if evaluable_count > 0 else None
         return {
             **base,
             "direction": direction,

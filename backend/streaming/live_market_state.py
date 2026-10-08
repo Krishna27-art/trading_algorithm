@@ -266,7 +266,13 @@ class LiveMarketState:
         day_low: Optional[float] = None,
         session_volume: Optional[int] = None,
     ) -> None:
-        ts = timestamp or now_ist_naive()
+        if timestamp is None:
+            logger.warning(
+                "[LiveMarketState] Rejecting tick with missing timestamp for %s",
+                symbol,
+            )
+            return
+        ts = timestamp
 
         try:
             num_price = float(price)
@@ -289,11 +295,11 @@ class LiveMarketState:
             # Reject stale/out-of-order ticks before mutating state.
             if (
                 state.last_tick_time is not None
-                and ts <= state.last_tick_time
+                and ts < state.last_tick_time
             ):
                 logger.warning(
-                    "[LiveMarketState] Ignoring out-of-order/duplicate "
-                    "tick for %s: %s <= %s",
+                    "[LiveMarketState] Ignoring out-of-order "
+                    "tick for %s: %s < %s",
                     symbol,
                     ts,
                     state.last_tick_time,
@@ -450,11 +456,14 @@ class LiveMarketState:
 
     def get_symbol_state(self, symbol: str) -> Optional[LiveSymbolState]:
         with self._lock:
-            return self._symbols.get(symbol)
+            st = self._symbols.get(symbol)
+            if st is None:
+                return None
+            return copy.copy(st)
 
     def get_all_symbols_state(self) -> Dict[str, LiveSymbolState]:
         with self._lock:
-            return dict(self._symbols)
+            return {sym: copy.copy(st) for sym, st in self._symbols.items()}
 
     def get_candles_df(self, symbol: str) -> pd.DataFrame:
         with self._lock:

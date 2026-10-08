@@ -68,6 +68,8 @@ def test_live_market_state_tick_processing():
         session_volume=150,
     )
 
+    state = live_market_state.get_symbol_state("RELIANCE")
+    assert state is not None
     assert state.ltp == 2510.0
     assert state.high == 2510.0
     assert state.low == 2500.0
@@ -281,7 +283,7 @@ def test_seed_historical_candles_populates_live_history():
     assert len(seeded) == 2
 
     # Verify LTP is NOT overwritten by historical candles
-    state.update_tick(symbol="TCS", price=3500.0, volume=10)
+    state.update_tick(symbol="TCS", price=3500.0, volume=10, timestamp=datetime(2026, 10, 1, 15, 16, 0))
     state.seed_historical_candles("TCS", df)
     assert state.get_symbol_state("TCS").ltp == 3500.0
 

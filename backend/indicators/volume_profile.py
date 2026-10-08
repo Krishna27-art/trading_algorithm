@@ -372,7 +372,7 @@ class VolumeProfileEngine:
                 continue
 
             cum_vol = tick.get("volume_traded")
-            ts = tick.get("exchange_timestamp") or tick.get("timestamp") or now_ist_naive()
+            ts = tick.get("exchange_timestamp") or tick.get("timestamp")
             if not isinstance(ts, datetime):
                 continue
 

@@ -5,8 +5,10 @@ import { apiGet, apiPost } from './client'
 export const runBacktest = (strategy, symbol, days) =>
   apiPost(
     `/api/strategy/backtest?days=${days}&symbol=${encodeURIComponent(symbol)}&strategy=${encodeURIComponent(strategy)}`,
+    undefined,
+    { requireSecret: true },
   )
 
 // GET /api/research/backtest?days=&symbol= -> ORB vs CPR vs Dual-EMA comparison
 export const getResearchBacktest = (days, symbol) =>
-  apiGet(`/api/research/backtest?days=${days}&symbol=${encodeURIComponent(symbol)}`)
+  apiGet(`/api/research/backtest?days=${days}&symbol=${encodeURIComponent(symbol)}`, { requireSecret: true })

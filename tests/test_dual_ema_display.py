@@ -144,6 +144,7 @@ def test_prediction_service_evaluate_dual_ema_does_not_duplicate_final_candle(mo
             "low": 99.0 + i,
             "close": 100.5 + i,
             "volume": 1000,
+            "vwap": 100.25 + i,
         })
 
     start_day2 = datetime(2026, 10, 1, 9, 15)
@@ -157,6 +158,7 @@ def test_prediction_service_evaluate_dual_ema_does_not_duplicate_final_candle(mo
             "low": 129.0 + i,
             "close": 130.5 + i,
             "volume": 1000,
+            "vwap": 130.25 + i,
         })
 
     df_15m = pd.DataFrame(rows)

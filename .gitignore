@@ -17,8 +17,15 @@ session_token.json
 *.log
 *.csv
 data/cache/
+backend/data/cache/
 downloads/
 database/*.db
+backend/database/*.db
+*.db
+*.db-wal
+*.db-shm
+*.lock
+.session_token.json*
 credentials.txt
 
 # Node

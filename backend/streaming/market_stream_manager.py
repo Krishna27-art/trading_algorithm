@@ -257,6 +257,34 @@ class MarketStreamManager:
         self._flush_worker_thread: Optional[
             threading.Thread
         ] = None
+        self._process_lock_fd: Optional[int] = None
+
+    def _acquire_process_stream_lock(self) -> None:
+        if self._process_lock_fd is not None:
+            return
+        lock_path = settings.base_dir / "backend" / "data" / ".market_stream.lock"
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            import fcntl
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._process_lock_fd = fd
+        except (IOError, OSError) as exc:
+            raise RuntimeError(
+                "Another process already owns the active KiteTicker market stream. "
+                "Multi-process concurrent streaming is prohibited."
+            ) from exc
+
+    def _release_process_stream_lock(self) -> None:
+        fd = self._process_lock_fd
+        if fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            except Exception:
+                pass
+            self._process_lock_fd = None
 
     def set_scanner_snapshot(self, snapshot: Optional[Any]) -> None:
         with self._lock:
@@ -562,6 +590,7 @@ class MarketStreamManager:
     ):
         return (
             settings.base_dir
+            / "backend"
             / "data"
             / "cache"
             / f"{symbol}_15m.csv"
@@ -1145,6 +1174,7 @@ class MarketStreamManager:
             if self.kws is not None:
                 self._stop_internal()
 
+            self._acquire_process_stream_lock()
             self._stream_generation += 1
 
             generation = (
@@ -1770,11 +1800,11 @@ class MarketStreamManager:
                     )
                     if (
                         previous_tick_ts is not None
-                        and exchange_timestamp <= previous_tick_ts
+                        and exchange_timestamp < previous_tick_ts
                     ):
                         logger.warning(
                             "[MarketStreamManager] Dropping "
-                            "out-of-order/duplicate tick "
+                            "out-of-order tick "
                             "token=%s ts=%s previous=%s",
                             tok,
                             exchange_timestamp,
@@ -2530,6 +2560,7 @@ class MarketStreamManager:
         self.last_disconnect_time = (
             now_ist()
         )
+        self._release_process_stream_lock()
 
     def stop_stream(
         self,

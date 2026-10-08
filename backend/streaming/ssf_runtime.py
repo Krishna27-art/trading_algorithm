@@ -584,9 +584,21 @@ class SSFOneMinuteRuntime:
             except Exception as exc:
                 logger.debug("[SSFOneMinuteRuntime] Failed to seed 1m history for index %s: %s", idx, exc)
 
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="ssf-seed") as executor:
-            list(executor.map(_seed_stock, stock_symbols))
-            list(executor.map(_seed_index, index_symbols))
+        if not self._running:
+            return
+
+        try:
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="ssf-seed") as executor:
+                if not self._running:
+                    return
+                list(executor.map(_seed_stock, stock_symbols))
+                if not self._running:
+                    return
+                list(executor.map(_seed_index, index_symbols))
+        except RuntimeError as exc:
+            logger.debug("[SSFOneMinuteRuntime] ThreadPool shutdown during seeding: %s", exc)
+        except Exception as exc:
+            logger.warning("[SSFOneMinuteRuntime] Error during historical seeding: %s", exc)
 
     def seed_historical_data(self, kite_client: Any) -> None:
         self._seed_historical_data(kite_client)

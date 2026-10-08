@@ -198,6 +198,8 @@ def get_system_health() -> Dict[str, Any]:
 
     if not kite_conn:
         overall = "DISCONNECTED"
+    elif not db_ok:
+        overall = "ERROR"
     elif engine_state == "ERROR":
         overall = "ERROR"
     elif stream_class == "ERROR":

@@ -769,4 +769,8 @@ class HistoricalDataLoader:
             generated_days += 1
             current_date += timedelta(days=1)
 
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            from backend.indicators.vwap import calculate_session_vwap
+            df["vwap"] = calculate_session_vwap(df).to_numpy()
+        return df

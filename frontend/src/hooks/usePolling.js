@@ -8,6 +8,7 @@ export function usePolling(
   fetcher,
   {
     intervalMs = 10000,
+    staleThresholdMs = 30000,
     deps = [],
     getSourceTimestamp = defaultSourceTimestamp,
   } = {},
@@ -17,20 +18,13 @@ export function usePolling(
   const [error, setError] = useState(null)
   const [updatedAt, setUpdatedAt] = useState(null)
   const [fetchedAt, setFetchedAt] = useState(null)
+  const [lastSuccessAt, setLastSuccessAt] = useState(null)
+  const [now, setNow] = useState(() => Date.now())
 
   const fetcherRef = useRef(fetcher)
   fetcherRef.current = fetcher
 
-  // Monotonically increasing request id. A response is only ever applied
-  // to state if it's still the most recent request issued — this is
-  // what prevents an older, slower-to-resolve request from overwriting
-  // state with stale data after a newer request has already resolved.
   const requestIdRef = useRef(0)
-
-  // Guards against a silent (timer-triggered) poll starting a second,
-  // overlapping request while a previous one is still in flight. A
-  // user-triggered refresh() always proceeds regardless (see run()
-  // below) and supersedes whatever is in flight via requestIdRef.
   const inFlightRef = useRef(false)
 
   const run = useCallback(async ({ silent = false } = {}) => {
@@ -41,18 +35,13 @@ export function usePolling(
     const requestId = ++requestIdRef.current
     inFlightRef.current = true
 
-    if (!silent) {
-      setStatus((s) => (s === 'success' ? 'success' : 'loading'))
+    if (!silent && !data) {
+      setStatus('loading')
     }
 
     try {
       const result = await fetcherRef.current()
 
-      // A newer request has started since this one began (e.g. a
-      // manual refresh() superseded a silent poll, or another poll
-      // tick fired). This response is stale — applying it now would
-      // overwrite data a newer, possibly-already-resolved request
-      // already set (or will set). Discard it.
       if (requestId !== requestIdRef.current) {
         return
       }
@@ -63,6 +52,7 @@ export function usePolling(
       setStatus('success')
       setError(null)
       setFetchedAt(receivedAt)
+      setLastSuccessAt(receivedAt)
 
       const sourceTimestamp = getSourceTimestamp(result)
 
@@ -83,21 +73,13 @@ export function usePolling(
       }
 
       setError(err)
-
-      setStatus((prev) =>
-        prev === 'success'
-          ? 'success'
-          : 'error',
-      )
+      setStatus(data ? 'stale' : 'error')
     } finally {
-      // Only the still-current request is allowed to clear the
-      // in-flight flag — a superseded request's finally block must not
-      // clear it out from under the request that superseded it.
       if (requestId === requestIdRef.current) {
         inFlightRef.current = false
       }
     }
-  }, [getSourceTimestamp])
+  }, [data, getSourceTimestamp])
 
   const refresh = useCallback(
     () => run(),
@@ -111,22 +93,32 @@ export function usePolling(
       return undefined
     }
 
-    const id = setInterval(
-      () => run({ silent: true }),
-      intervalMs,
-    )
+    const id = setInterval(() => {
+      setNow(Date.now())
+      run({ silent: true })
+    }, intervalMs)
 
     return () => clearInterval(id)
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
 
+  const sourceTime = updatedAt ? updatedAt.getTime() : (lastSuccessAt ? lastSuccessAt.getTime() : null)
+  const dataAgeSeconds = sourceTime ? Math.max(0, Math.round((now - sourceTime) / 1000)) : null
+  const isStale = Boolean(
+    error ||
+    status === 'stale' ||
+    (sourceTime && (now - sourceTime) > (staleThresholdMs || intervalMs * 2.5))
+  )
+
   return {
     data,
-    status,
+    status: isStale && data ? 'stale' : status,
     error,
     updatedAt,
     fetchedAt,
+    lastSuccessAt,
+    dataAgeSeconds,
+    isStale,
     refresh,
   }
 }

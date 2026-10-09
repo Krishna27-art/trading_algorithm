@@ -346,34 +346,6 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
     # Risk / validation helpers
     # ------------------------------------------------------------------
 
-    def _max_allowed_risk(self, entry_price: float) -> float:
-        """
-        Hard stop-distance cap.
-
-        Equities:
-            percentage-based risk so the cap scales with stock price.
-
-        Non-equities:
-            configured absolute max_risk_cap.
-        """
-        entry_price = float(entry_price)
-
-        if entry_price <= 0:
-            return 0.0
-
-        tick_size = max(float(getattr(self.instrument, "tick_size", 0.05)), 0.000001)
-
-        if self.instrument.instrument_type == InstrumentType.EQUITY:
-            pct = self.instrument.equity_orb_max_risk_pct
-            if pct is None or pct <= 0:
-                pct = 0.0040
-            return max(entry_price * float(pct), tick_size)
-
-        configured_cap = float(
-            getattr(self.instrument, "max_risk_cap", 0.0)
-        )
-        return max(configured_cap, tick_size)
-
     def _valid_long_trade(
         self,
         entry: float,
@@ -414,20 +386,7 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
         stop: float,
     ) -> bool:
         risk = abs(float(entry) - float(stop))
-
-        if risk <= 0:
-            return False
-
-        max_risk = self._max_allowed_risk(entry)
-
-        if risk > max_risk:
-            logger.info(
-                f"[{self.symbol}] CPR trade rejected: "
-                f"risk={risk:.4f} > max_allowed={max_risk:.4f}"
-            )
-            return False
-
-        return True
+        return risk > 0
 
     # ------------------------------------------------------------------
     # Signal generation

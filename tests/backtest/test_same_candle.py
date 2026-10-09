@@ -39,7 +39,6 @@ def test_same_candle_conservative_policy_picks_stop_loss():
         lot_size=25,
         min_orb_range=10.0,
         max_orb_range=120.0,
-        max_risk_cap=80.0,
     )
 
     # 09:15 and 09:30 define OR: High=24020, Low=24010 (width=10)

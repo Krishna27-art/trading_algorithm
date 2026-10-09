@@ -218,8 +218,9 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
     assert res["status"] == "CONNECTING"
 
     # Set history ready so strategy evaluation is not skipped
+    from backend.streaming.market_stream_manager import HistoryState
     with market_stream_manager._history_lock:
-        market_stream_manager._history_ready_symbols.add("RELIANCE")
+        market_stream_manager._history_state["RELIANCE"] = HistoryState.HISTORY_READY
     market_stream_manager._first_observed_candle.pop("RELIANCE", None)
 
     # Trigger aggregator's candle close callback

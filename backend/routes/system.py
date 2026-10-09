@@ -69,12 +69,7 @@ def _fresh_prediction_timestamp(
     return 0 <= age <= max_age_seconds
 
 
-def _risk_engine_status() -> str:
-    """
-    The current signal-only live runtime has no long-lived RiskManager instance.
-    Never claim the risk engine is active merely because the class can be imported.
-    """
-    return "NOT_WIRED"
+
 
 
 def _classify(stream_state: str) -> str:
@@ -196,15 +191,47 @@ def get_system_health() -> Dict[str, Any]:
         )
         prediction_count, producing_signal_count, engine_state = 0, 0, "ERROR"
 
+    # Separate subsystem statuses
+    if not kite_conn or stream_class == "DISCONNECTED":
+        candle_pipeline_state = "DISCONNECTED"
+    elif stream_class == "ERROR":
+        candle_pipeline_state = "ERROR"
+    elif stream_status.get("candle_count", 0) > 0 or market_feed_fresh:
+        candle_pipeline_state = "HEALTHY"
+    else:
+        candle_pipeline_state = "IDLE"
+
+    hist_failed = stream_status.get("history_failed_count", 0)
+    hist_loading = stream_status.get("history_loading_count", 0)
+    hist_ready = stream_status.get("history_ready_count", 0)
+    if hist_failed > 0:
+        historical_data_state = "DEGRADED"
+    elif hist_loading > 0:
+        historical_data_state = "LOADING"
+    elif hist_ready > 0:
+        historical_data_state = "HEALTHY"
+    else:
+        historical_data_state = "IDLE"
+
+    eval_dropped = stream_status.get("evaluation_dropped_count", 0)
+    eval_error = stream_status.get("last_evaluation_error")
+    eval_qsize = stream_status.get("evaluation_queue_size", 0)
+    if eval_error:
+        eval_state = "ERROR"
+    elif eval_dropped > 0 or eval_qsize > 5000:
+        eval_state = "DEGRADED"
+    elif eval_qsize > 0 or stream_status.get("evaluation_inflight", 0) > 0:
+        eval_state = "BUSY"
+    else:
+        eval_state = "HEALTHY" if market_feed_fresh else "IDLE"
+
     if not kite_conn:
         overall = "DISCONNECTED"
     elif not db_ok:
         overall = "ERROR"
-    elif engine_state == "ERROR":
+    elif engine_state == "ERROR" or stream_class == "ERROR" or eval_state == "ERROR":
         overall = "ERROR"
-    elif stream_class == "ERROR":
-        overall = "ERROR"
-    elif market_feed_fresh:
+    elif market_feed_fresh and eval_state in {"HEALTHY", "BUSY"}:
         overall = "LIVE"
     elif stream_status.get("connected") is True:
         overall = "STALE"
@@ -225,11 +252,14 @@ def get_system_health() -> Dict[str, Any]:
         ),
         "market_stream": stream_state,
         "market_stream_error": stream_error,
+        "candle_pipeline": candle_pipeline_state,
+        "historical_data": historical_data_state,
+        "evaluation_workers": eval_state,
         "database": "CONNECTED" if db_ok else "ERROR",
+        "signal_engine": engine_state,
         "strategy_engine": engine_state,
         "signal_count": prediction_count,
         "active_signal_count": producing_signal_count,
-        "risk_engine": _risk_engine_status(),
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
         "overall_status": overall,
         "timestamp": now_ist_iso(),

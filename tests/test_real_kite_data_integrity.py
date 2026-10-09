@@ -38,8 +38,6 @@ def _create_sample_instrument():
         tick_size=0.05,
         min_orb_range=2.0,
         max_orb_range=20.0,
-        max_risk_cap=15.0,
-        equity_orb_max_risk_pct=0.15,
         instrument_token=123456,
     )
 

@@ -9,10 +9,12 @@ import { getStrategyState } from '../api/market'
 
 const HEALTH_ROWS = [
   { key: 'kite_api', label: 'Kite API' },
-  { key: 'market_data', label: 'Market data' },
+  { key: 'market_data', label: 'Market data feed' },
+  { key: 'candle_pipeline', label: 'Candle pipeline' },
+  { key: 'historical_data', label: 'Historical data' },
+  { key: 'evaluation_workers', label: 'Evaluation workers' },
+  { key: 'strategy_engine', label: 'Signal engine' },
   { key: 'database', label: 'Database' },
-  { key: 'strategy_engine', label: 'Strategy engine' },
-  { key: 'risk_engine', label: 'Risk engine' },
 ]
 
 export default function SystemStatusPage() {

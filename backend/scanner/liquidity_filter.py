@@ -1,14 +1,7 @@
-"""
-Liquidity Filter Layer for the 700-Stock Scanning Universe.
-
-Evaluates raw stock market data against configurable liquidity, price, turnover,
-and circuit limits before strategy execution. Handles missing stock data
-gracefully with DATA_UNAVAILABLE status without crashing the scanner.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,120 +24,207 @@ class LiquidityFilterResult:
     avg_volume_20d: int = 0
     adtv: float = 0.0
     spread_pct: Optional[float] = None
-    rejection_reasons: List[str] = None
-
-    def __post_init__(self):
-        if self.rejection_reasons is None:
-            self.rejection_reasons = []
+    rejection_reasons: List[str] = field(default_factory=list)
 
     @property
     def is_tradable(self) -> bool:
         return self.status == LiquidityStatus.PASS
 
 
-class LiquidityFilter:
-    """
-    Separate liquidity filter layer evaluating 700 stocks against threshold rules.
-    """
+def _finite_float(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
 
+
+class LiquidityFilter:
     def __init__(self, config: Optional[LiquidityFilterConfig] = None):
         self.config = config or settings.liquidity_filter
+        for name in (
+            "min_stock_price",
+            "min_avg_volume",
+            "min_avg_traded_value",
+            "max_spread_pct",
+        ):
+            if _finite_float(getattr(self.config, name, None)) is None:
+                raise ValueError(f"liquidity filter config '{name}' must be a finite number")
+
+    @staticmethod
+    def _unavailable(
+        symbol: str,
+        reason: str,
+        ltp: float = 0.0,
+        volume: int = 0,
+        avg_volume_20d: int = 0,
+        adtv: float = 0.0,
+    ) -> LiquidityFilterResult:
+        return LiquidityFilterResult(
+            symbol=symbol,
+            status=LiquidityStatus.DATA_UNAVAILABLE,
+            ltp=ltp,
+            volume=volume,
+            avg_volume_20d=avg_volume_20d,
+            adtv=adtv,
+            rejection_reasons=[reason],
+        )
+
+    @staticmethod
+    def _best_prices(depth: Any) -> Optional[Tuple[float, float]]:
+        if not isinstance(depth, dict):
+            return None
+        buy_orders = depth.get("buy")
+        sell_orders = depth.get("sell")
+        if not isinstance(buy_orders, (list, tuple)) or not buy_orders:
+            return None
+        if not isinstance(sell_orders, (list, tuple)) or not sell_orders:
+            return None
+        if not isinstance(buy_orders[0], dict) or not isinstance(sell_orders[0], dict):
+            return None
+        best_bid = _finite_float(buy_orders[0].get("price"))
+        best_ask = _finite_float(sell_orders[0].get("price"))
+        if best_bid is None or best_ask is None:
+            return None
+        return best_bid, best_ask
 
     def evaluate_stock(self, stock_quote_data: Dict[str, Any]) -> LiquidityFilterResult:
-        """
-        Evaluates a single stock quote dictionary against liquidity criteria.
-        
-        Expected fields in stock_quote_data:
-        - symbol: str
-        - ltp / last_price: float
-        - volume: int
-        - avg_volume_20d: int
-        - depth (optional): dict with buy/sell bid/ask
-        - upper_circuit_limit / lower_circuit_limit (optional): float
-        """
-        symbol = stock_quote_data.get("symbol", "UNKNOWN")
-
-        # 1. Check for missing/corrupt data
-        if not stock_quote_data or stock_quote_data.get("is_data_unavailable", False):
-            return LiquidityFilterResult(
-                symbol=symbol,
-                status=LiquidityStatus.DATA_UNAVAILABLE,
-                rejection_reasons=["Data feed or historical context unavailable"],
+        if not isinstance(stock_quote_data, dict) or not stock_quote_data:
+            return self._unavailable(
+                "UNKNOWN",
+                "Data feed or historical context unavailable",
             )
 
-        ltp = float(stock_quote_data.get("ltp") or stock_quote_data.get("last_price") or 0.0)
-        volume = int(stock_quote_data.get("volume") or 0)
+        symbol = str(stock_quote_data.get("symbol") or "UNKNOWN")
 
-        raw_avg_vol_20d = stock_quote_data.get("avg_volume_20d")
-
-        try:
-            avg_vol_20d = int(raw_avg_vol_20d)
-        except (TypeError, ValueError):
-            return LiquidityFilterResult(
-                symbol=symbol,
-                status=LiquidityStatus.DATA_UNAVAILABLE,
-                rejection_reasons=[
-                    "20-day full-session average volume unavailable"
-                ],
+        if stock_quote_data.get("is_data_unavailable", False):
+            return self._unavailable(
+                symbol,
+                "Data feed or historical context unavailable",
             )
 
+        raw_ltp = stock_quote_data.get("ltp")
+        if raw_ltp is None:
+            raw_ltp = stock_quote_data.get("last_price")
+        ltp = _finite_float(raw_ltp)
+        if ltp is None or ltp <= 0:
+            return self._unavailable(
+                symbol,
+                "LTP missing, non-finite or not positive",
+            )
+
+        raw_volume = stock_quote_data.get("volume")
+        if raw_volume is None:
+            volume = 0
+        else:
+            volume_value = _finite_float(raw_volume)
+            if volume_value is None or volume_value < 0:
+                return self._unavailable(
+                    symbol,
+                    "Volume non-finite or negative",
+                    ltp=ltp,
+                )
+            volume = int(volume_value)
+
+        avg_value = _finite_float(stock_quote_data.get("avg_volume_20d"))
+        if avg_value is None or avg_value <= 0:
+            return self._unavailable(
+                symbol,
+                "20-day full-session average volume unavailable, invalid or non-finite",
+                ltp=ltp,
+                volume=volume,
+            )
+        avg_vol_20d = int(avg_value)
         if avg_vol_20d <= 0:
-            return LiquidityFilterResult(
-                symbol=symbol,
-                status=LiquidityStatus.DATA_UNAVAILABLE,
-                rejection_reasons=[
-                    "20-day full-session average volume unavailable or invalid"
-                ],
-            )
-
-        if ltp <= 0:
-            return LiquidityFilterResult(
-                symbol=symbol,
-                status=LiquidityStatus.DATA_UNAVAILABLE,
-                rejection_reasons=["Invalid or zero stock price (LTP <= 0)"],
+            return self._unavailable(
+                symbol,
+                "20-day full-session average volume unavailable, invalid or non-finite",
+                ltp=ltp,
+                volume=volume,
             )
 
         adtv = float(avg_vol_20d * ltp)
+        if math.isnan(adtv) or math.isinf(adtv):
+            return self._unavailable(
+                symbol,
+                "ADTV non-finite",
+                ltp=ltp,
+                volume=volume,
+                avg_volume_20d=avg_vol_20d,
+            )
+
+        depth_data = stock_quote_data.get("depth")
+        best_bid: Optional[float] = None
+        best_ask: Optional[float] = None
+        if depth_data is not None:
+            best_prices = self._best_prices(depth_data)
+            if best_prices is None:
+                return self._unavailable(
+                    symbol,
+                    "Required live market depth missing, incomplete or non-finite; spread cannot be validated",
+                    ltp=ltp,
+                    volume=volume,
+                    avg_volume_20d=avg_vol_20d,
+                    adtv=adtv,
+                )
+            best_bid, best_ask = best_prices
+
+        upper_limit: Optional[float] = None
+        lower_limit: Optional[float] = None
+        if self.config.reject_circuits:
+            raw_upper = stock_quote_data.get("upper_circuit_limit")
+            raw_lower = stock_quote_data.get("lower_circuit_limit")
+            if raw_upper is not None:
+                upper_limit = _finite_float(raw_upper)
+                if upper_limit is None:
+                    return self._unavailable(
+                        symbol,
+                        "Upper circuit limit non-finite or invalid",
+                        ltp=ltp,
+                        volume=volume,
+                        avg_volume_20d=avg_vol_20d,
+                        adtv=adtv,
+                    )
+            if raw_lower is not None:
+                lower_limit = _finite_float(raw_lower)
+                if lower_limit is None:
+                    return self._unavailable(
+                        symbol,
+                        "Lower circuit limit non-finite or invalid",
+                        ltp=ltp,
+                        volume=volume,
+                        avg_volume_20d=avg_vol_20d,
+                        adtv=adtv,
+                    )
+
         rejections: List[str] = []
 
-        # 2. Minimum stock price check
         if ltp < self.config.min_stock_price:
             rejections.append(f"LTP ₹{ltp:.2f} < Min ₹{self.config.min_stock_price:.2f}")
 
-        # 3. Minimum average volume check
         if avg_vol_20d < self.config.min_avg_volume:
             rejections.append(f"Avg Vol {avg_vol_20d:,} < Min {self.config.min_avg_volume:,}")
 
-        # 4. Minimum ADTV (traded value) check
         if adtv < self.config.min_avg_traded_value:
             rejections.append(f"ADTV ₹{adtv:,.0f} < Min ₹{self.config.min_avg_traded_value:,.0f}")
 
-        # 5. Bid-Ask Spread check (if market depth available)
-        spread_pct = None
-        depth = stock_quote_data.get("depth")
-        if depth and isinstance(depth, dict):
-            buy_orders = depth.get("buy", [])
-            sell_orders = depth.get("sell", [])
-            if not buy_orders or not sell_orders:
-                rejections.append("Live market depth is incomplete; spread cannot be validated.")
+        spread_pct: Optional[float] = None
+        if best_bid is not None and best_ask is not None:
+            if best_bid <= 0 or best_ask <= best_bid:
+                rejections.append("Invalid live bid/ask spread.")
             else:
-                best_bid = float(buy_orders[0].get("price", 0))
-                best_ask = float(sell_orders[0].get("price", 0))
-                if best_bid <= 0 or best_ask <= best_bid:
-                    rejections.append("Invalid live bid/ask spread.")
-                else:
-                    spread_pct = round(((best_ask - best_bid) / best_bid) * 100.0, 2)
-                    if spread_pct > self.config.max_spread_pct:
-                        rejections.append(f"Spread {spread_pct}% > Max {self.config.max_spread_pct}%")
+                spread_pct = round(((best_ask - best_bid) / best_bid) * 100.0, 2)
+                if spread_pct > self.config.max_spread_pct:
+                    rejections.append(f"Spread {spread_pct}% > Max {self.config.max_spread_pct}%")
 
-        # 6. Upper / Lower circuit condition check
-        if self.config.reject_circuits:
-            upper_c = stock_quote_data.get("upper_circuit_limit")
-            lower_c = stock_quote_data.get("lower_circuit_limit")
-            if upper_c and ltp >= float(upper_c):
-                rejections.append("Stock locked at upper circuit limit")
-            if lower_c and ltp <= float(lower_c):
-                rejections.append("Stock locked at lower circuit limit")
+        if upper_limit and ltp >= upper_limit:
+            rejections.append("Stock locked at upper circuit limit")
+        if lower_limit and ltp <= lower_limit:
+            rejections.append("Stock locked at lower circuit limit")
 
         status = LiquidityStatus.PASS if not rejections else LiquidityStatus.FAIL
 
@@ -162,9 +242,6 @@ class LiquidityFilter:
     def filter_universe(
         self, stock_quotes: List[Dict[str, Any]]
     ) -> Tuple[List[LiquidityFilterResult], List[LiquidityFilterResult]]:
-        """
-        Filters a list of stock quote records into (tradable_results, untradable_results).
-        """
         tradable: List[LiquidityFilterResult] = []
         untradable: List[LiquidityFilterResult] = []
 
@@ -176,14 +253,10 @@ class LiquidityFilter:
                 else:
                     untradable.append(res)
             except Exception as e:
-                sym = quote.get("symbol", "UNKNOWN")
+                sym = quote.get("symbol", "UNKNOWN") if isinstance(quote, dict) else "UNKNOWN"
                 logger.error(f"Error evaluating liquidity for {sym}: {e}")
                 untradable.append(
-                    LiquidityFilterResult(
-                        symbol=sym,
-                        status=LiquidityStatus.DATA_UNAVAILABLE,
-                        rejection_reasons=[f"Evaluation exception: {str(e)}"],
-                    )
+                    self._unavailable(str(sym), f"Evaluation exception: {str(e)}")
                 )
 
         return tradable, untradable

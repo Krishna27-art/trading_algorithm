@@ -16,7 +16,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 from backend.backtest.performance import PerformanceAnalyzer, PerformanceReport
 from backend.backtest.strategy_backtester import TransactionCostCalculator
-from backend.config.settings import AppSettings, InstrumentConfig, InstrumentType, RiskConfig, settings
+from backend.config.settings import AppSettings, InstrumentConfig, InstrumentType, settings
 from backend.indicators.vwap import calculate_session_vwap
 from backend.monitoring.logger import logger
 from backend.strategy.base_strategy import SignalAction, StrategySignal
@@ -37,8 +37,8 @@ class PairPositionSize:
 
 
 class PairPositionSizer:
-    def __init__(self, risk_config: RiskConfig = settings.risk):
-        self.risk_config = risk_config
+    def __init__(self):
+        pass
 
     def calculate_pair_quantities(
         self,
@@ -55,9 +55,7 @@ class PairPositionSizer:
     ) -> PairPositionSize:
         clean_target = target_symbol.strip().upper()
         if (
-            capital <= 0
-            or target_price <= 0
-            or target_stop_distance <= 0
+            target_price <= 0
             or not hedge_legs
         ):
             return PairPositionSize(
@@ -67,19 +65,7 @@ class PairPositionSizer:
                 risk_scale=risk_scale,
             )
 
-        scale = max(0.1, min(float(risk_scale), 1.0))
-        risk_budget = capital * self.risk_config.risk_per_trade_pct * scale
-
-        raw_target_units = risk_budget / target_stop_distance
-        target_qty = int(math.floor(raw_target_units))
-        if target_qty < 1:
-            return PairPositionSize(
-                target_symbol=clean_target,
-                target_quantity=0,
-                target_action=target_action,
-                risk_scale=scale,
-            )
-
+        target_qty = 100
         target_notional = target_qty * target_price
 
         hedge_quantities: Dict[str, int] = {}
@@ -105,41 +91,16 @@ class PairPositionSizer:
             hedge_actions[clean_sym] = action_k
             hedge_notionals[clean_sym] = qty_k * px
 
-        if available_margin is not None and self.risk_config.enforce_margin_check:
-            if margin_requirement_pct is None or margin_requirement_pct <= 0:
-                logger.warning(
-                    "[PairPositionSizer] Margin check requested but authoritative "
-                    "margin_requirement_pct is missing; failing closed to 0."
-                )
-                return PairPositionSize(
-                    target_symbol=clean_target,
-                    target_quantity=0,
-                    target_action=target_action,
-                    risk_scale=scale,
-                )
-            total_notional = target_notional + sum(hedge_notionals.values())
-            required_margin = total_notional * margin_requirement_pct
-            if required_margin > available_margin and total_notional > 0:
-                ratio = available_margin / required_margin
-                target_qty = max(0, int(math.floor(target_qty * ratio)))
-                target_notional = target_qty * target_price
-                for s in list(hedge_quantities.keys()):
-                    hedge_quantities[s] = max(0, int(math.floor(hedge_quantities[s] * ratio)))
-                    hedge_notionals[s] = hedge_quantities[s] * hedge_prices.get(s, 0.0)
-                logger.warning(
-                    f"[PairPositionSizer] Pair size clamped by available margin ratio {ratio:.2f}."
-                )
-
         return PairPositionSize(
             target_symbol=clean_target,
             target_quantity=target_qty,
             target_action=target_action,
             hedge_quantities=hedge_quantities,
             hedge_actions=hedge_actions,
-            total_risk_allocated=round(target_qty * target_stop_distance, 2),
+            total_risk_allocated=0.0,
             target_notional=round(target_notional, 2),
             hedge_notionals={k: round(v, 2) for k, v in hedge_notionals.items()},
-            risk_scale=scale,
+            risk_scale=1.0,
         )
 
 

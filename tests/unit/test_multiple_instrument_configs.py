@@ -50,7 +50,6 @@ def test_multiple_instrument_configs():
         lot_size=25,
         min_orb_range=10.0,
         max_orb_range=120.0,
-        max_risk_cap=80.0,
     )
 
     inst2 = InstrumentConfig(
@@ -60,7 +59,6 @@ def test_multiple_instrument_configs():
         lot_size=1,
         min_orb_range=5.0,
         max_orb_range=50.0,
-        max_risk_cap=30.0,
     )
 
     df1 = _generate_test_candles(base_price=24000.0, days=3)

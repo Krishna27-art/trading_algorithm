@@ -5,8 +5,8 @@
   "start_date": "2026-08-21",
   "end_date": "2026-10-08",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T10:04:47.291921+05:30",
-  "latest_completed_candle": "2026-10-08T09:45:00",
-  "candle_count": 790,
+  "downloaded_timestamp": "2026-10-08T11:47:23.591835+05:30",
+  "latest_completed_candle": "2026-10-08T11:30:00",
+  "candle_count": 797,
   "trading_days": 33
 }

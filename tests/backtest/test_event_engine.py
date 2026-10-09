@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from backend.backtest.strategy_backtester import EventDrivenBacktester, ExecutionPolicy
-from backend.config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
+from backend.config.settings import AppSettings, InstrumentConfig, StrategyConfig
 from backend.indicators.vwap import calculate_session_vwap
 
 
@@ -59,7 +59,6 @@ def test_event_engine_breakout_and_target_hit():
         max_risk_cap=150.0,
     )
     settings = AppSettings(
-        risk=RiskConfig(initial_capital=500_000.0, risk_per_trade_pct=1.0, max_trades_per_day=3),
         strategy=StrategyConfig(),
     )
     engine = EventDrivenBacktester(instrument=inst, app_settings=settings)
@@ -112,7 +111,6 @@ def test_no_overnight_positions():
         max_orb_range=120.0,
     )
     settings = AppSettings(
-        risk=RiskConfig(initial_capital=500_000.0, risk_per_trade_pct=1.0, max_trades_per_day=3),
         strategy=StrategyConfig(),
     )
     engine = EventDrivenBacktester(instrument=inst, app_settings=settings)

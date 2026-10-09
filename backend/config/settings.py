@@ -10,6 +10,9 @@ from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Current NSE Index Derivative Contract Specifications (effective November 20, 2024 SEBI revision)
+DEFAULT_NIFTY_LOT_SIZE: int = 75
+
 
 class InstrumentType(str, Enum):
     FUTURES = "FUTURES"
@@ -20,11 +23,10 @@ class InstrumentConfig(BaseModel):
     symbol: str
     exchange: str = "NFO"
     instrument_type: InstrumentType = InstrumentType.FUTURES
-    lot_size: int = 25  # Nifty default lot size
+    lot_size: int = DEFAULT_NIFTY_LOT_SIZE  # Current NSE NIFTY contract lot size
     tick_size: float = 0.05
     min_orb_range: float = 40.0
     max_orb_range: float = 120.0
-    max_risk_cap: float = 80.0
     # Numeric Kite instrument_token for this contract — required by the
     # Historical Data API (a trading symbol string is not accepted there).
     # Resolve once with HistoricalDataLoader.resolve_instrument_token(...)
@@ -33,7 +35,6 @@ class InstrumentConfig(BaseModel):
 
     # Equity-specific ORB controls.
     # None means the equity constraint is not configured.
-    equity_orb_max_risk_pct: Optional[float] = None
     equity_orb_min_range_pct: Optional[float] = None
     equity_orb_max_range_pct: Optional[float] = None
 
@@ -48,7 +49,7 @@ class StrategyConfig(BaseModel):
     square_off_time: time = time(14, 30)
     hard_cutoff_time: time = time(15, 10)
 
-    # Signal & Risk parameters
+    # Signal parameters
     candle_timeframe_minutes: int = 15
     monitoring_timeframe_minutes: int = 5
     risk_reward_ratio: float = 2.0
@@ -63,15 +64,6 @@ class LiquidityFilterConfig(BaseModel):
     min_avg_traded_value: float = 1000000.0 # Minimum average daily traded value (ADTV in INR, 10L)
     max_spread_pct: float = 1.5             # Maximum acceptable bid-ask spread %
     reject_circuits: bool = True            # Filter out upper/lower circuit locked stocks
-
-
-class RiskConfig(BaseModel):
-    initial_capital: float = 1000000.0  # ₹10,00,000 (10 Lakhs)
-    risk_per_trade_pct: float = 0.01    # 1% per trade
-    max_daily_loss_pct: float = 0.02    # 2% hard daily circuit breaker
-    enforce_margin_check: bool = True
-    allow_averaging: bool = False       # Never average down
-    allow_overnight: bool = False       # Strictly intraday
 
 
 class TransactionCostConfig(BaseModel):
@@ -152,12 +144,8 @@ class ResidualMomentumConfig(BaseModel):
     trail_trigger_gain: float = 0.15    # +15% unrealised arms the EMA20 trail
     trail_ema: int = 20
 
-    # Risk gate
-    max_drawdown_gate: float = 0.12     # -12% from high-water mark
-    drawdown_exposure_cut: float = 0.50
-
     # Hedge
-    nifty_lot_size: int = 25
+    nifty_lot_size: int = DEFAULT_NIFTY_LOT_SIZE
 
     # Schedule
     entry_time: time = time(15, 0)
@@ -183,7 +171,7 @@ class VRPConfig(BaseModel):
     short_delta: float = 0.15
     long_delta: float = 0.05
     lots: int = 1
-    lot_size: int = 75            # NIFTY options lot size -- verify each cycle
+    lot_size: int = DEFAULT_NIFTY_LOT_SIZE  # NIFTY options lot size -- current NSE contract spec
 
     # Exits
     profit_target_pct: float = 0.65     # of initial net credit
@@ -248,7 +236,7 @@ class CRSDConfig(BaseModel):
     vm_exponent: float = 0.75
     vm_len: int = 120
     vm_stress_pctl: float = 0.90               # entries blocked at/above this
-    vm_scale_pctl: float = 0.75                # risk_scale halves at/above this
+    vm_scale_pctl: float = 0.75                # scale halves at/above this
 
     # ---- liquidity
     liq_turnover_pctl: float = 0.30            # own/hedge turnover must exceed this pctl
@@ -256,18 +244,16 @@ class CRSDConfig(BaseModel):
     liq_shock_frac: float = 0.25               # turnover < frac*median for 2 bars -> shock
 
     # ---- costs
-    round_trip_cost_bps_per_leg: float = 8.0   # PLACEHOLDER: brokerage+STT+charges+slippage
+    round_trip_cost_bps_per_leg: float = 8.0   # brokerage+STT+charges+slippage
     edge_cost_mult: float = 2.0
     capture_frac: float = 0.60                 # share of the excess spread expected to convert
 
-    # ---- risk / exits
+    # ---- exits
     max_hold_bars: int = 8
     stop_sigma: float = 2.0
     tail_quantile: float = 0.99
     leg_stop_mult: float = 2.0                 # price stop on the unhedged leg = mult x spread stop
     min_target_bps: float = 3.0
-    strategy_loss_cap_bps: float = 60.0
-    daily_dd_limit_bps: float = 100.0
     max_trades_per_day: int = 2
 
     # ---- session
@@ -285,10 +271,9 @@ class AppSettings(BaseSettings):
             symbol="NIFTY",
             exchange="NFO",
             instrument_type=InstrumentType.FUTURES,
-            lot_size=25,
+            lot_size=DEFAULT_NIFTY_LOT_SIZE,
             min_orb_range=40.0,
             max_orb_range=120.0,
-            max_risk_cap=80.0,
         )
     ]
 
@@ -296,7 +281,7 @@ class AppSettings(BaseSettings):
     active_strategy: str = "cpr"
 
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
-    risk: RiskConfig = Field(default_factory=RiskConfig)
+    initial_capital: float = 1000000.0  # ₹10,00,000 (10 Lakhs) reference capital for backtesting
     liquidity_filter: LiquidityFilterConfig = Field(default_factory=LiquidityFilterConfig)
     costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
 
@@ -319,10 +304,6 @@ class AppSettings(BaseSettings):
     kite_access_token: Optional[str] = None
     kite_user_id: Optional[str] = None
     kite_totp_key: Optional[str] = None
-
-    # Risk limits from .env (₹-denominated caps, separate from percentage-based kill-switch)
-    max_capital_per_trade: float = 10000.0
-    max_daily_loss_limit: float = 2000.0
 
     # Security — NO DEFAULT: app refuses to start without this set in .env.
     # Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"

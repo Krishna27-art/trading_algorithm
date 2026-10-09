@@ -16,7 +16,6 @@ def _instrument():
         tick_size=0.05,
         min_orb_range=5.0,
         max_orb_range=50.0,
-        max_risk_cap=30.0,
     )
 
 

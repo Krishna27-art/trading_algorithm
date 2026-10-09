@@ -1,12 +1,6 @@
-"""
-Sector and Peer Relationship Manager.
-Provides sector classification, sector leaders, and PeerContext construction
-for SectorImpulseStrategy across the 700-stock universe.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
@@ -20,6 +14,26 @@ from backend.monitoring.logger import logger
 
 if TYPE_CHECKING:
     from backend.data.models import PeerContext
+
+
+PEER_STATUS_AVAILABLE = "AVAILABLE"
+PEER_STATUS_UNAVAILABLE = "UNAVAILABLE"
+
+STALE_PEER_DATA_REASON = "stale sector peer data"
+
+
+class PeerDataUnavailableError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class PeerContextResult:
+    status: str
+    context: Optional[Any]
+    reason: str
+    required_timestamp: Optional[datetime] = None
+    frame_latest: Dict[str, Optional[datetime]] = field(default_factory=dict)
+    stale: bool = False
 
 
 @dataclass
@@ -144,15 +158,12 @@ def _load_sector_definitions() -> Dict[str, SectorDefinition]:
     return definitions
 
 
-# Authoritative sector groupings for Indian Equities (NSE 700 Universe)
 SECTOR_DEFINITIONS: Dict[str, SectorDefinition] = _load_sector_definitions()
 
-# General fallback for symbols not explicitly classified
-DEFAULT_SECTOR: Optional[SectorDefinition] = None
+DEFAULT_SECTOR: Optional[SectorDefinition] = SECTOR_DEFINITIONS.get("INFRA_CAPGOODS_REALTY") or (next(iter(SECTOR_DEFINITIONS.values()), None) if SECTOR_DEFINITIONS else None)
 
 
 class SectorPeerManager:
-    """Manages sector classification and peer context loading for SIT."""
 
     @classmethod
     def get_sector_for_symbol(
@@ -181,6 +192,8 @@ class SectorPeerManager:
             return None
 
         if not matches:
+            if DEFAULT_SECTOR is not None:
+                return DEFAULT_SECTOR
             logger.warning(
                 "No authoritative sector classification for symbol %s",
                 sym,
@@ -191,10 +204,6 @@ class SectorPeerManager:
 
     @classmethod
     def get_peer_symbols(cls, symbol: str) -> Tuple[str, str, str]:
-        """
-        Returns (leader_symbol, market_symbol, sector_symbol) for a given symbol.
-        If symbol IS the primary leader, the secondary leader acts as the peer leader.
-        """
         sec = cls.get_sector_for_symbol(symbol)
         if sec is None:
             raise ValueError(
@@ -212,6 +221,228 @@ class SectorPeerManager:
         market = sec.market_index
         return leader, market, sector
 
+    @staticmethod
+    def _validate_peer_frame(
+        df: Optional[pd.DataFrame],
+        sym: str,
+        required: datetime,
+    ) -> Tuple[Optional[pd.DataFrame], str, str, Optional[datetime]]:
+        from backend.data.candle_aggregator import _normalize_ist_naive
+
+        if (
+            df is None
+            or df.empty
+            or "datetime" not in df.columns
+            or "close" not in df.columns
+        ):
+            return None, "invalid", f"{sym}: peer data empty or missing datetime/close columns", None
+
+        frame = df.copy()
+        frame["datetime"] = pd.to_datetime(
+            frame["datetime"].map(_normalize_ist_naive),
+            errors="coerce",
+        )
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame = frame[
+            frame["datetime"].notna()
+            & frame["close"].notna()
+            & (frame["close"] > 0)
+        ]
+        frame = frame[frame["datetime"] <= pd.Timestamp(required)]
+        frame = (
+            frame.sort_values("datetime", kind="stable")
+            .drop_duplicates(subset=["datetime"], keep="last")
+            .reset_index(drop=True)
+        )
+
+        if frame.empty:
+            return None, "invalid", f"{sym}: no valid completed candles at or before {required}", None
+
+        latest = frame["datetime"].iloc[-1].to_pydatetime()
+        if latest != required:
+            return (
+                None,
+                "stale",
+                f"{STALE_PEER_DATA_REASON}: {sym} latest candle {latest} != required {required}",
+                latest,
+            )
+
+        return frame, "ok", "", latest
+
+    @classmethod
+    def _load_peer_frame(
+        cls,
+        sym: str,
+        c_dir: Path,
+        required: datetime,
+        kite_client: Optional[Any],
+        allow_network_fetch: bool,
+    ) -> Tuple[Optional[pd.DataFrame], str, str, Optional[datetime]]:
+        from backend.data.historical_loader import HistoricalDataLoader
+
+        failures: List[Tuple[str, str, Optional[datetime]]] = []
+
+        c_file = c_dir / f"{sym}_15m.csv"
+        candidates: List[Tuple[Path, bool]] = [(c_file, True)]
+        if sym == "NIFTY":
+            candidates.extend(
+                (c_dir / alt_name, False)
+                for alt_name in ("NIFTY_15m.csv", "NIFTY50_15m.csv")
+            )
+
+        seen: set = set()
+        for path, check_identity in candidates:
+            if path in seen or not path.exists():
+                continue
+            seen.add(path)
+            try:
+                df, meta = HistoricalDataLoader.load_cached_data_with_validation(path)
+                if (
+                    check_identity
+                    and meta is not None
+                    and str(meta.get("symbol", "")).upper() != sym.upper()
+                ):
+                    raise ValueError(f"Cache symbol identity mismatch for {sym}")
+            except Exception as exc:
+                logger.debug("Failed to load cached 15m data for %s: %s", sym, exc)
+                failures.append(("invalid", f"{sym}: cache load failed ({exc})", None))
+                continue
+
+            frame, kind, message, latest = cls._validate_peer_frame(df, sym, required)
+            if frame is not None:
+                return frame, "ok", "", latest
+            failures.append((kind, message, latest))
+
+        if allow_network_fetch and kite_client is not None:
+            try:
+                from backend.data.instrument_resolver import instrument_resolver
+
+                tok = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
+                if tok:
+                    today = now_ist_naive().date()
+                    start_d = today - timedelta(days=45)
+                    fetched = HistoricalDataLoader.fetch_real_data(
+                        kite_client=kite_client,
+                        instrument_token=tok,
+                        start_date=start_d,
+                        end_date=today,
+                        interval="15minute",
+                        cache_path=c_file,
+                    )
+                    frame, kind, message, latest = cls._validate_peer_frame(fetched, sym, required)
+                    if frame is not None:
+                        return frame, "ok", "", latest
+                    failures.append((kind, message, latest))
+                else:
+                    failures.append(("missing", f"{sym}: instrument token unavailable", None))
+            except Exception as exc:
+                logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, exc)
+                failures.append(("invalid", f"{sym}: live fetch failed ({exc})", None))
+
+        for preferred in ("stale", "invalid"):
+            for kind, message, latest in failures:
+                if kind == preferred:
+                    return None, kind, message, latest
+
+        if failures:
+            kind, message, latest = failures[0]
+            return None, kind, message, latest
+
+        return None, "missing", f"{sym}: peer data not available in cache", None
+
+    @classmethod
+    def build_peer_context_with_status(
+        cls,
+        symbol: str,
+        cache_dir: Optional[Path] = None,
+        kite_client: Optional[Any] = None,
+        allow_network_fetch: bool = False,
+    ) -> PeerContextResult:
+        from backend.data.historical_loader import HistoricalDataLoader
+        from backend.data.models import PeerContext
+        from backend.data.candle_aggregator import _normalize_ist_naive
+
+        def unavailable(
+            reason: str,
+            required: Optional[datetime] = None,
+            latest: Optional[Dict[str, Optional[datetime]]] = None,
+            stale: bool = False,
+        ) -> PeerContextResult:
+            return PeerContextResult(
+                status=PEER_STATUS_UNAVAILABLE,
+                context=None,
+                reason=reason,
+                required_timestamp=required,
+                frame_latest=latest or {},
+                stale=stale,
+            )
+
+        c_dir = Path(cache_dir) if cache_dir is not None else (settings.base_dir / "backend" / "data" / "cache")
+        try:
+            leader_sym, market_sym, sector_sym = cls.get_peer_symbols(symbol)
+        except ValueError as exc:
+            logger.debug("Cannot build PeerContext for %s: %s", symbol, exc)
+            return unavailable(f"no sector classification for {symbol}")
+
+        try:
+            required = _normalize_ist_naive(
+                HistoricalDataLoader.get_latest_completed_candle_start(now_ist_naive())
+            )
+        except Exception as exc:
+            return unavailable(f"required completed-candle timestamp could not be determined ({exc})")
+
+        if required is None:
+            return unavailable("no completed candle exists yet for the required session")
+
+        frames: Dict[str, Optional[pd.DataFrame]] = {}
+        latest_map: Dict[str, Optional[datetime]] = {}
+        problems: List[str] = []
+        any_stale = False
+
+        for role, sym in (("leader", leader_sym), ("market", market_sym), ("sector", sector_sym)):
+            frame, kind, message, latest = cls._load_peer_frame(
+                sym, c_dir, required, kite_client, allow_network_fetch
+            )
+            frames[role] = frame
+            latest_map[sym] = latest
+            if frame is None:
+                problems.append(f"{role}({sym}): {message}")
+                if kind == "stale":
+                    any_stale = True
+
+        if problems:
+            prefix = STALE_PEER_DATA_REASON if any_stale else "sector peer data unavailable"
+            reason = f"{prefix} for {symbol}: " + "; ".join(problems)
+            logger.warning("SIT PeerContext %s", reason)
+            return unavailable(reason, required, latest_map, any_stale)
+
+        df_leader = frames["leader"]
+        df_market = frames["market"]
+        df_sector = frames["sector"]
+
+        if "volume" not in df_leader.columns:
+            reason = f"sector peer data unavailable for {symbol}: leader {leader_sym} has no volume column (Returning None to prevent fabricated data)"
+            logger.warning("SIT PeerContext %s", reason)
+            return unavailable(reason, required, latest_map)
+
+        try:
+            context = PeerContext(leader=df_leader, market=df_market, sector=df_sector)
+        except Exception as exc:
+            logger.warning("Failed to initialize PeerContext for %s: %s", symbol, exc)
+            return unavailable(
+                f"sector peer data unavailable for {symbol}: PeerContext initialization failed ({exc})",
+                required,
+                latest_map,
+            )
+
+        return PeerContextResult(
+            status=PEER_STATUS_AVAILABLE,
+            context=context,
+            reason="",
+            required_timestamp=required,
+            frame_latest=latest_map,
+        )
+
     @classmethod
     def build_peer_context(
         cls,
@@ -219,127 +450,22 @@ class SectorPeerManager:
         cache_dir: Optional[Path] = None,
         kite_client: Optional[Any] = None,
         allow_network_fetch: bool = False,
+        raise_on_unavailable: bool = False,
     ) -> Optional[PeerContext]:
-        """
-        Constructs a real PeerContext for SectorImpulseStrategy using cached
-        or live 15m historical candles for leader, market, and sector representative.
-        """
-        from backend.data.historical_loader import HistoricalDataLoader
-        from backend.data.models import PeerContext
-
-        c_dir = Path(cache_dir) if cache_dir is not None else (settings.base_dir / "backend" / "data" / "cache")
-        try:
-            leader_sym, market_sym, sector_sym = cls.get_peer_symbols(symbol)
-        except ValueError as e:
-            logger.debug("Cannot build PeerContext for %s: %s", symbol, e)
-            return None
-
-        def load_df(sym: str) -> Optional[pd.DataFrame]:
-            latest_completed = (
-                HistoricalDataLoader.get_latest_completed_candle_start(
-                    now_ist_naive()
-                )
-            )
-
-            c_file = c_dir / f"{sym}_15m.csv"
-            if c_file.exists():
-                try:
-                    df, meta = HistoricalDataLoader.load_cached_data_with_validation(c_file)
-                    if not df.empty and "datetime" in df.columns and "close" in df.columns:
-                        if meta is not None and str(meta.get("symbol", "")).upper() != sym.upper():
-                            raise ValueError(f"Cache symbol identity mismatch for {sym}")
-                        from backend.data.candle_aggregator import _normalize_ist_naive
-                        df["datetime"] = df["datetime"].map(_normalize_ist_naive)
-                        if latest_completed is not None:
-                            df = df[df["datetime"] <= latest_completed].copy()
-                        if not df.empty:
-                            return df
-                except Exception as e:
-                    logger.debug("Failed to load cached 15m data for %s: %s", sym, e)
-
-            if sym == "NIFTY":
-                for alt_name in (
-                    "NIFTY_15m.csv",
-                    "NIFTY50_15m.csv",
-                ):
-                    alt_file = c_dir / alt_name
-                    if alt_file.exists():
-                        try:
-                            df, meta = HistoricalDataLoader.load_cached_data_with_validation(alt_file)
-                            if not df.empty and "datetime" in df.columns and "close" in df.columns:
-                                from backend.data.candle_aggregator import _normalize_ist_naive
-                                df["datetime"] = df["datetime"].map(_normalize_ist_naive)
-                                if latest_completed is not None:
-                                    df = df[df["datetime"] <= latest_completed].copy()
-                                if not df.empty:
-                                    return df
-                        except Exception as exc:
-                            logger.debug("Failed to load NIFTY cache %s: %s", alt_file, exc)
-
-            # If Kite client is available and network fetch is allowed, fetch real historical data
-            if allow_network_fetch and kite_client is not None:
-                try:
-                    from backend.data.instrument_resolver import instrument_resolver
-                    tok = instrument_resolver.resolve_token(sym, exchange="NSE", kite_client=kite_client)
-                    if tok:
-                        today = now_ist_naive().date()
-                        start_d = today - timedelta(days=45)
-                        df = HistoricalDataLoader.fetch_real_data(
-                            kite_client=kite_client,
-                            instrument_token=tok,
-                            start_date=start_d,
-                            end_date=today,
-                            interval="15minute",
-                            cache_path=c_file,
-                        )
-                        if not df.empty:
-                            return df
-                except Exception as e:
-                    logger.debug("Failed to fetch live Kite data for peer %s: %s", sym, e)
-
-            return None
-
-        df_leader = load_df(leader_sym)
-        df_market = load_df(market_sym)
-        df_sector = load_df(sector_sym)
-
-        # Ensure leader has real volume column; refuse to fabricate volume data.
-        if df_leader is not None and "volume" not in df_leader.columns:
-            logger.warning(
-                "SIT requires real leader volume; "
-                "volume column is absent for %s. "
-                "Returning None to prevent fabricated data from "
-                "reaching the strategy.",
-                leader_sym,
-            )
-            return None
-
-        # If any essential frame is missing, return None
-        if df_leader is None or df_market is None or df_sector is None:
-            logger.debug(
-                "SIT PeerContext incomplete for %s: "
-                "leader(%s)=%s, "
-                "market(%s)=%s, "
-                "sector(%s)=%s",
-                symbol,
-                leader_sym,
-                "OK" if df_leader is not None else "MISSING",
-                market_sym,
-                "OK" if df_market is not None else "MISSING",
-                sector_sym,
-                "OK" if df_sector is not None else "MISSING",
-            )
-            return None
-
-        try:
-            return PeerContext(leader=df_leader, market=df_market, sector=df_sector)
-        except Exception as e:
-            logger.warning("Failed to initialize PeerContext for %s: %s", symbol, e)
-            return None
+        result = cls.build_peer_context_with_status(
+            symbol,
+            cache_dir=cache_dir,
+            kite_client=kite_client,
+            allow_network_fetch=allow_network_fetch,
+        )
+        if result.status == PEER_STATUS_AVAILABLE:
+            return result.context
+        if raise_on_unavailable:
+            raise PeerDataUnavailableError(f"{result.status}: {result.reason}")
+        return None
 
     @classmethod
     def get_sector_name(cls, symbol: str) -> Optional[str]:
-        """Return the sector name string for a given symbol."""
         sec = cls.get_sector_for_symbol(symbol)
         return sec.name if sec is not None else None
 
@@ -347,7 +473,6 @@ class SectorPeerManager:
 def get_sector_index_symbol(
     symbol: str,
 ) -> Optional[str]:
-    """Return the NSE sector index symbol corresponding to the stock symbol."""
     sec = SectorPeerManager.get_sector_for_symbol(symbol)
 
     if sec is None:

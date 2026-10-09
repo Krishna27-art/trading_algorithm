@@ -1,35 +1,5 @@
-"""
-Central WebSocket stream manager coordinating Zerodha KiteTicker,
-MultiSymbolCandleAggregator, LiveMarketState, and LiveSignalEngine.
-
-Production live-data flow
--------------------------
-KiteTicker
-    -> validated exchange-timestamped ticks
-    -> live LTP/state update
-    -> 15-minute candle aggregation
-    -> bounded evaluation queue
-    -> LiveSignalEngine
-    -> PredictionService / strategies
-    -> frontend
-    -> manual execution by the user
-
-This module NEVER places, changes, or cancels broker orders.
-
-Runtime guarantees
-------------------
-- Strategy evaluation never runs inside the KiteTicker callback thread.
-- Evaluation uses a bounded, coalescing queue.
-- The first observed in-progress candle for a symbol is never evaluated.
-- A skipped partial first candle is recovered from real Kite historical data.
-- Fresh cash LTP is sent directly to LiveSignalEngine with exchange time.
-- Kite cumulative volume is not passed as incremental tick volume.
-- No fake instrument tokens or synthetic market data are created here.
-"""
-
 from __future__ import annotations
 
-from enum import Enum
 import logging
 import math
 import os
@@ -37,7 +7,8 @@ import queue
 import threading
 import time as _time
 from datetime import datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from enum import Enum
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import pandas as pd
 
@@ -71,8 +42,16 @@ DEFAULT_EVALUATION_WORKERS = 8
 MAX_EVALUATION_WORKERS = 16
 
 EVALUATION_QUEUE_SIZE = 10000
+EVALUATION_MAX_AGE_SECONDS = 300
 HISTORY_REFRESH_QUEUE_SIZE = 500
 L5_QUEUE_SIZE = 5000
+
+HISTORY_MAX_CONCURRENCY = 4
+HISTORY_MIN_REQUEST_INTERVAL_SECONDS = 0.34
+HISTORY_RATE_LIMIT_RETRIES = 3
+HISTORY_RATE_LIMIT_BACKOFF_SECONDS = 1.0
+HISTORY_WARMUP_PASSES = 2
+HISTORY_WARMUP_RETRY_DELAY_SECONDS = 5.0
 
 
 class StreamState(str, Enum):
@@ -84,48 +63,93 @@ class StreamState(str, Enum):
     STOPPED = "STOPPED"
 
 
+class HistoryState(str, Enum):
+    HISTORY_LOADING = "HISTORY_LOADING"
+    HISTORY_READY = "HISTORY_READY"
+    HISTORY_STALE = "HISTORY_STALE"
+    HISTORY_FAILED = "HISTORY_FAILED"
+
+
+class _EvaluationTask(NamedTuple):
+    generation: int
+    symbol: str
+    candle_start: datetime
+    candle_dict: dict
+    vwap: float
+    kite_client: Any
+    queued_at: datetime
+
+
+class _RequestRateLimiter:
+    def __init__(self, min_interval_seconds: float) -> None:
+        self._min_interval = float(min_interval_seconds)
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = _time.monotonic()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + self._min_interval
+        wait = slot - now
+        if wait > 0:
+            _time.sleep(wait)
+
+
+class _ThrottledKiteClient:
+    def __init__(self, client: Any, limiter: _RequestRateLimiter) -> None:
+        self._client = client
+        self._limiter = limiter
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ("_client", "_limiter"):
+            raise AttributeError(name)
+        attribute = getattr(self._client, name)
+        if name != "historical_data" or not callable(attribute):
+            return attribute
+        limiter = self._limiter
+
+        def throttled(*args: Any, **kwargs: Any) -> Any:
+            attempt = 0
+            while True:
+                limiter.acquire()
+                try:
+                    return attribute(*args, **kwargs)
+                except Exception as exc:
+                    if (
+                        attempt >= HISTORY_RATE_LIMIT_RETRIES
+                        or "too many requests" not in str(exc).lower()
+                    ):
+                        raise
+                    attempt += 1
+                    _time.sleep(HISTORY_RATE_LIMIT_BACKOFF_SECONDS * attempt)
+
+        return throttled
+
+
+def _safe_positive_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 class MarketStreamManager:
-    """
-    Singleton manager for the canonical KiteTicker market stream.
-
-    One manager owns the production WebSocket stream.
-    """
-
     def __init__(self) -> None:
         self._lock = threading.Lock()
 
-        # --------------------------------------------------------------
-        # STREAM STATE
-        # --------------------------------------------------------------
         self.state: StreamState = StreamState.DISCONNECTED
-
         self.token_to_symbol: Dict[int, str] = {}
-
+        self.symbol_to_token: Dict[str, int] = {}
         self.subscribed_token_count: int = 0
-
         self.tick_count: int = 0
         self.candle_count: int = 0
-
-        # This is intentionally the server-side receipt timestamp.
-        # It reflects ANY accepted tick (cash, futures, or index) and is
-        # used only as a general "is the socket alive" diagnostic.
         self.last_tick_time: Optional[datetime] = None
-
-        # Freshness of the REQUIRED stock-equity feed specifically.
-        # Only updated from actual cash-stock ticks (never futures or
-        # sector/index ticks). This is the authoritative field for
-        # "is the stock universe data fresh" — futures/index activity
-        # must never be able to make stale equity data look fresh.
         self.last_equity_tick_time: Optional[datetime] = None
-
         self.last_connect_time: Optional[datetime] = None
         self.last_disconnect_time: Optional[datetime] = None
-
-        # Set on disconnect, consumed on the next successful connect.
-        # Marks that candle/volume state may span a connection gap and
-        # must be recovered before new ticks are trusted.
         self._awaiting_gap_recovery: bool = False
-
         self.last_error: Optional[str] = None
 
         self.kws: Optional[Any] = None
@@ -137,71 +161,51 @@ class MarketStreamManager:
         self.scanner_snapshot: Optional[Any] = None
         self._session_finalized_date: Optional[str] = None
 
-        # --------------------------------------------------------------
-        # HISTORY STATE
-        # --------------------------------------------------------------
-        self._history_ready_symbols: set[str] = set()
+        self._history_state: Dict[str, HistoryState] = {}
+        self._history_epoch: Dict[str, int] = {}
         self._history_lock = threading.Lock()
+        self._history_io_semaphore = threading.BoundedSemaphore(
+            HISTORY_MAX_CONCURRENCY
+        )
+        self._history_rate_limiter = _RequestRateLimiter(
+            HISTORY_MIN_REQUEST_INTERVAL_SECONDS
+        )
+        self._history_symbol_locks: Dict[str, threading.Lock] = {}
+        self._history_symbol_locks_guard = threading.Lock()
 
-        # Historical cache/network operations are serialized so a warm-up
-        # and a partial-candle recovery cannot write the same cache at once.
-        self._history_io_lock = threading.Lock()
-
-        # symbol -> (first observed candle bucket, first tick timestamp)
-        #
-        # Example:
-        # stream starts at 11:07
-        # first tick arrives at 11:07:30
-        # bucket = 11:00
-        #
-        # The 11:00 candle is partial and must not be evaluated.
         self._first_observed_candle: Dict[
             str,
             Tuple[datetime, datetime],
         ] = {}
 
-        # A stream generation invalidates old warm-up/history work after
-        # a stop/restart.
         self._stream_generation: int = 0
         self._last_accepted_tick_timestamp_by_token: Dict[int, datetime] = {}
 
-        # --------------------------------------------------------------
-        # EVALUATION WORKERS
-        # --------------------------------------------------------------
-        self._evaluation_worker_count = (
-            self._read_worker_count()
-        )
-
-        # Queue contains symbols only.
-        #
-        # _pending_evaluations contains the latest task for that symbol.
-        # This coalesces repeated candle evaluations and prevents an
-        # unlimited backlog when strategy calculation is slower than input.
-        self._evaluation_queue = queue.Queue(
-            maxsize=EVALUATION_QUEUE_SIZE
-        )
-
+        self._evaluation_worker_count = self._read_worker_count()
+        self._evaluation_queue = queue.Queue(maxsize=EVALUATION_QUEUE_SIZE)
         self._evaluation_queue_lock = threading.Lock()
-
-        self._pending_evaluations: Dict[
+        self._pending_evaluations: Dict[str, _EvaluationTask] = {}
+        self._queued_symbols: set[str] = set()
+        self._inflight_symbols: set[str] = set()
+        self._last_evaluated_candle_start: Dict[str, datetime] = {}
+        self._latest_completed_candle_start: Dict[str, datetime] = {}
+        self._deferred_candles: Dict[
             str,
-            Tuple[int, dict, float, Any, datetime],
+            Tuple[int, dict, float, datetime],
         ] = {}
 
         self._evaluation_workers_started = False
-        self._evaluation_worker_threads: List[
-            threading.Thread
-        ] = []
+        self._evaluation_worker_threads: List[threading.Thread] = []
 
         self._evaluation_enqueued_count = 0
         self._evaluation_coalesced_count = 0
         self._evaluation_dropped_count = 0
+        self._evaluation_stale_dropped_count = 0
         self._evaluation_inflight = 0
 
         self._last_evaluation_time: Optional[datetime] = None
         self._last_evaluation_error: Optional[str] = None
 
-        # Detailed stream tick metrics
         self._ticks_received_count = 0
         self._ticks_accepted_count = 0
         self._ticks_rejected_count = 0
@@ -209,54 +213,28 @@ class MarketStreamManager:
         self._ticks_stale_count = 0
         self._ticks_out_of_order_count = 0
 
-        # Detailed L5 snapshot metrics
         self._l5_received_count = 0
         self._l5_processed_count = 0
         self._l5_replaced_count = 0
 
-        # --------------------------------------------------------------
-        # HISTORY REFRESH WORKER
-        # --------------------------------------------------------------
         self._history_refresh_queue = queue.Queue(
             maxsize=HISTORY_REFRESH_QUEUE_SIZE
         )
-
         self._history_refresh_lock = threading.Lock()
-
-        # symbol -> generation
-        self._history_refresh_requested: Dict[
-            str,
-            int,
-        ] = {}
-
+        self._history_refresh_requested: Dict[str, int] = {}
         self._history_refresh_worker_started = False
+        self._history_refresh_thread: Optional[threading.Thread] = None
 
-        self._history_refresh_thread: Optional[
-            threading.Thread
-        ] = None
-
-        # --------------------------------------------------------------
-        # SSF L5 BOOK QUEUE AND WORKER (LATEST-PER-SYMBOL BUFFERING)
-        # --------------------------------------------------------------
-        self._book_queue = queue.Queue(
-            maxsize=L5_QUEUE_SIZE
-        )
+        self._book_queue = queue.Queue(maxsize=L5_QUEUE_SIZE)
         self._book_lock = threading.Lock()
-        self._pending_book_snapshots: Dict[str, Any] = {}
-
+        self._pending_book_snapshots: Dict[str, Tuple[int, Any]] = {}
         self._book_worker_started = False
-        self._book_worker_thread: Optional[
-            threading.Thread
-        ] = None
+        self._book_worker_thread: Optional[threading.Thread] = None
 
-        self._ssf_seed_thread: Optional[
-            threading.Thread
-        ] = None
+        self._ssf_seed_thread: Optional[threading.Thread] = None
 
         self._flush_worker_started = False
-        self._flush_worker_thread: Optional[
-            threading.Thread
-        ] = None
+        self._flush_worker_thread: Optional[threading.Thread] = None
         self._process_lock_fd: Optional[int] = None
 
     def _acquire_process_stream_lock(self) -> None:
@@ -295,86 +273,55 @@ class MarketStreamManager:
         with self._lock:
             return self.scanner_snapshot
 
-    # ==================================================================
-    # CONFIGURATION
-    # ==================================================================
-
     @staticmethod
     def _read_worker_count() -> int:
         raw = os.getenv(
             "MARKET_STREAM_EVALUATION_WORKERS",
             str(DEFAULT_EVALUATION_WORKERS),
         )
-
         try:
             value = int(raw)
         except (TypeError, ValueError):
             value = DEFAULT_EVALUATION_WORKERS
-
-        return max(
-            1,
-            min(
-                value,
-                MAX_EVALUATION_WORKERS,
-            ),
-        )
+        return max(1, min(value, MAX_EVALUATION_WORKERS))
 
     def _ensure_background_workers_started(self) -> None:
-        """
-        Start permanent background workers once per backend process.
-        """
-
         if not self._evaluation_workers_started:
             self._evaluation_workers_started = True
-
-            for index in range(
-                self._evaluation_worker_count
-            ):
+            for index in range(self._evaluation_worker_count):
                 thread = threading.Thread(
                     target=self._evaluation_worker_loop,
-                    name=(
-                        f"signal-evaluator-{index + 1}"
-                    ),
+                    name=f"signal-evaluator-{index + 1}",
                     daemon=True,
                 )
-
                 thread.start()
-
-                self._evaluation_worker_threads.append(
-                    thread
-                )
+                self._evaluation_worker_threads.append(thread)
 
         if not self._history_refresh_worker_started:
             self._history_refresh_worker_started = True
-
             self._history_refresh_thread = threading.Thread(
                 target=self._history_refresh_worker_loop,
                 name="kite-history-refresh",
                 daemon=True,
             )
-
             self._history_refresh_thread.start()
 
         if not self._book_worker_started:
             self._book_worker_started = True
-
             self._book_worker_thread = threading.Thread(
                 target=self._book_worker_loop,
                 name="ssf-l5-worker",
                 daemon=True,
             )
-
             self._book_worker_thread.start()
 
         if not self._flush_worker_started:
             self._flush_worker_started = True
-
             self._flush_worker_thread = threading.Thread(
                 target=self._flush_worker_loop,
                 name="candle-flush-worker",
                 daemon=True,
             )
-
             self._flush_worker_thread.start()
 
     def _flush_worker_loop(self) -> None:
@@ -390,50 +337,21 @@ class MarketStreamManager:
                         exc_info=True,
                     )
 
-    # ==================================================================
-    # TIMESTAMP HELPERS
-    # ==================================================================
-
     @staticmethod
-    def _normalize_exchange_timestamp(
-        value: Any,
-    ) -> Optional[datetime]:
-        """
-        Normalize an exchange timestamp to naive Asia/Kolkata.
-
-        Invalid/missing timestamps return None.
-
-        IMPORTANT:
-        Never replace invalid exchange time with server time.
-        """
-
+    def _normalize_exchange_timestamp(value: Any) -> Optional[datetime]:
         if value is None:
             return None
-
         try:
             ts = pd.Timestamp(value)
-        except (
-            TypeError,
-            ValueError,
-        ):
+        except (TypeError, ValueError):
             return None
-
         if pd.isna(ts):
             return None
-
         try:
             if ts.tzinfo is not None:
-                ts = (
-                    ts
-                    .tz_convert("Asia/Kolkata")
-                    .tz_localize(None)
-                )
-        except (
-            TypeError,
-            ValueError,
-        ):
+                ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+        except (TypeError, ValueError):
             return None
-
         return ts.to_pydatetime()
 
     @classmethod
@@ -441,99 +359,43 @@ class MarketStreamManager:
         cls,
         tick: Dict[str, Any],
     ) -> Optional[datetime]:
-        raw_timestamp = (
-            tick.get("exchange_timestamp")
-            or tick.get("timestamp")
-        )
-
-        return cls._normalize_exchange_timestamp(
-            raw_timestamp
-        )
-
-    # ==================================================================
-    # CANDLE BUCKET HELPERS
-    # ==================================================================
+        raw_timestamp = tick.get("exchange_timestamp") or tick.get("timestamp")
+        return cls._normalize_exchange_timestamp(raw_timestamp)
 
     @staticmethod
     def _candle_bucket_start(
         timestamp: datetime,
         timeframe_minutes: int,
     ) -> Optional[datetime]:
-        """
-        Return the NSE session candle-open timestamp containing `timestamp`.
-
-        Example for 15-minute candles:
-
-            09:15 -> 09:15
-            09:17 -> 09:15
-            10:03 -> 10:00
-            11:07 -> 11:00
-
-        Timestamps outside the regular NSE session return None.
-        """
-
         if timeframe_minutes <= 0:
-            raise ValueError(
-                "timeframe_minutes must be > 0"
-            )
+            raise ValueError("timeframe_minutes must be > 0")
 
-        session_open = datetime.combine(
-            timestamp.date(),
-            NSE_SESSION_OPEN,
-        )
+        session_open = datetime.combine(timestamp.date(), NSE_SESSION_OPEN)
+        session_close = datetime.combine(timestamp.date(), NSE_SESSION_CLOSE)
 
-        session_close = datetime.combine(
-            timestamp.date(),
-            NSE_SESSION_CLOSE,
-        )
-
-        if timestamp < session_open:
+        if timestamp < session_open or timestamp >= session_close:
             return None
 
-        if timestamp >= session_close:
-            return None
-
-        elapsed_minutes = int(
-            (
-                timestamp - session_open
-            ).total_seconds()
-            // 60
-        )
-
-        bucket_offset = (
-            elapsed_minutes
-            // timeframe_minutes
-        ) * timeframe_minutes
-
-        return (
-            session_open
-            + timedelta(
-                minutes=bucket_offset
-            )
-        )
+        elapsed_minutes = int((timestamp - session_open).total_seconds() // 60)
+        bucket_offset = (elapsed_minutes // timeframe_minutes) * timeframe_minutes
+        return session_open + timedelta(minutes=bucket_offset)
 
     def _record_first_observed_candle(
         self,
         symbol: str,
         exchange_timestamp: datetime,
         timeframe_minutes: int,
+        generation: int,
     ) -> None:
-        """
-        Record the first candle bucket actually observed by this process.
-
-        This is better than using only stream-start time because a symbol may
-        receive its first tick several minutes after the WebSocket connects.
-        """
-
         bucket_start = self._candle_bucket_start(
             exchange_timestamp,
             timeframe_minutes,
         )
-
         if bucket_start is None:
             return
-
         with self._lock:
+            if generation != self._stream_generation:
+                return
             if symbol not in self._first_observed_candle:
                 self._first_observed_candle[symbol] = (
                     bucket_start,
@@ -544,50 +406,73 @@ class MarketStreamManager:
         self,
         symbol: str,
         candle_timestamp: datetime,
+        generation: int,
     ) -> bool:
-        """
-        Return True only when the candle is the symbol's first observed
-        candle and its first tick arrived after the candle opened.
-        """
-
         with self._lock:
-            marker = self._first_observed_candle.pop(
-                symbol,
-                None,
-            )
-
+            if generation != self._stream_generation:
+                return False
+            marker = self._first_observed_candle.pop(symbol, None)
         if marker is None:
             return False
-
         bucket_start, first_tick_timestamp = marker
-
         return (
             candle_timestamp == bucket_start
             and first_tick_timestamp > bucket_start
         )
 
-    # ==================================================================
-    # HISTORY READINESS
-    # ==================================================================
+    def _is_current_generation(self, generation: int) -> bool:
+        return generation == self._stream_generation
 
-    def is_history_ready(
-        self,
-        symbol: str,
-    ) -> bool:
-        clean_symbol = str(
-            symbol
-        ).strip().upper()
-
+    def get_history_state(self, symbol: str) -> HistoryState:
+        clean_symbol = str(symbol).strip().upper()
         with self._history_lock:
-            return (
-                clean_symbol
-                in self._history_ready_symbols
+            return self._history_state.get(
+                clean_symbol,
+                HistoryState.HISTORY_LOADING,
             )
 
-    def _cache_path_for_symbol(
+    def is_history_ready(self, symbol: str) -> bool:
+        return self.get_history_state(symbol) == HistoryState.HISTORY_READY
+
+    def _set_history_state(
         self,
         symbol: str,
-    ):
+        state: HistoryState,
+        generation: int,
+        expected_epoch: Optional[int] = None,
+    ) -> Optional[HistoryState]:
+        with self._lock:
+            if generation != self._stream_generation:
+                return None
+            with self._history_lock:
+                final_state = state
+                if (
+                    state == HistoryState.HISTORY_READY
+                    and expected_epoch is not None
+                    and self._history_epoch.get(symbol, 0) != expected_epoch
+                ):
+                    final_state = HistoryState.HISTORY_STALE
+                self._history_state[symbol] = final_state
+                return final_state
+
+    def _mark_history_stale(self, symbol: str, generation: int) -> None:
+        with self._lock:
+            if generation != self._stream_generation:
+                return
+            with self._history_lock:
+                if self._history_state.get(symbol) == HistoryState.HISTORY_READY:
+                    self._history_state[symbol] = HistoryState.HISTORY_STALE
+
+    def _mark_all_history_stale(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._stream_generation:
+                return
+            with self._history_lock:
+                for symbol, state in list(self._history_state.items()):
+                    if state == HistoryState.HISTORY_READY:
+                        self._history_state[symbol] = HistoryState.HISTORY_STALE
+
+    def _cache_path_for_symbol(self, symbol: str):
         return (
             settings.base_dir
             / "backend"
@@ -596,155 +481,202 @@ class MarketStreamManager:
             / f"{symbol}_15m.csv"
         )
 
-    # ==================================================================
-    # HISTORY WARM-UP
-    # ==================================================================
+    def _symbol_history_lock(self, symbol: str) -> threading.Lock:
+        with self._history_symbol_locks_guard:
+            lock = self._history_symbol_locks.get(symbol)
+            if lock is None:
+                lock = threading.Lock()
+                self._history_symbol_locks[symbol] = lock
+            return lock
+
+    def _flush_deferred_candle(
+        self,
+        symbol: str,
+        kite_client: Any,
+        generation: int,
+    ) -> bool:
+        with self._evaluation_queue_lock:
+            deferred = self._deferred_candles.pop(symbol, None)
+        if deferred is None or deferred[0] != generation:
+            return False
+        return self._enqueue_evaluation(
+            candle_dict=deferred[1],
+            vwap=deferred[2],
+            kite_client=kite_client,
+            generation=generation,
+        )
+
+    def _enqueue_after_history_ready(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        kite_client: Any,
+        generation: int,
+    ) -> None:
+        if self._flush_deferred_candle(symbol, kite_client, generation):
+            return
+
+        latest_row = df.iloc[-1].to_dict()
+        latest_timestamp = latest_row.get("datetime")
+        normalized = self._normalize_exchange_timestamp(latest_timestamp)
+        if normalized is None:
+            logger.warning(
+                "[%s] Historical warm-up produced no timestamp; live evaluation skipped.",
+                symbol,
+            )
+            return
+
+        today = now_ist_naive().date()
+        if normalized.date() != today:
+            logger.info(
+                "[%s] Historical warm-up is not current-session data (latest=%s today=%s); strategy evaluation skipped.",
+                symbol,
+                latest_timestamp,
+                today,
+            )
+            return
+
+        latest_candle = {
+            "symbol": symbol,
+            "datetime": latest_timestamp,
+            "open": float(latest_row.get("open", 0.0)),
+            "high": float(latest_row.get("high", 0.0)),
+            "low": float(latest_row.get("low", 0.0)),
+            "close": float(latest_row.get("close", 0.0)),
+            "volume": int(latest_row.get("volume", 0)),
+        }
+        latest_vwap = latest_row.get("vwap")
+        if latest_vwap is not None:
+            try:
+                latest_vwap = float(latest_vwap)
+            except (TypeError, ValueError):
+                latest_vwap = None
+        if latest_vwap is not None and latest_vwap <= 0:
+            latest_vwap = None
+
+        self._enqueue_evaluation(
+            candle_dict=latest_candle,
+            vwap=latest_vwap,
+            kite_client=kite_client,
+            generation=generation,
+        )
 
     def _warm_one_symbol_historical_state(
         self,
         token: int,
         symbol: str,
         kite_client: Any,
-        generation: Optional[int] = None,
+        generation: int,
     ) -> bool:
-        """
-        Load real completed Kite history and seed LiveMarketState.
+        clean_symbol = str(symbol).strip().upper()
+        cache_path = self._cache_path_for_symbol(clean_symbol)
 
-        `generation` prevents an old stream's background history request from
-        mutating a newly-started stream after a restart.
-        """
+        with self._history_lock:
+            epoch = self._history_epoch.get(clean_symbol, 0)
 
-        clean_symbol = str(
-            symbol
-        ).strip().upper()
-
-        cache_path = self._cache_path_for_symbol(
-            clean_symbol
-        )
+        if (
+            self._set_history_state(
+                clean_symbol,
+                HistoryState.HISTORY_LOADING,
+                generation,
+            )
+            is None
+        ):
+            return False
 
         try:
-            with self._history_io_lock:
-                df = (
-                    HistoricalDataLoader
-                    .load_or_refresh_intraday_cache(
-                        kite_client=kite_client,
+            throttled_client = _ThrottledKiteClient(
+                kite_client,
+                self._history_rate_limiter,
+            )
+
+            with self._symbol_history_lock(clean_symbol):
+                if not self._is_current_generation(generation):
+                    return False
+                with self._history_io_semaphore:
+                    df = HistoricalDataLoader.load_or_refresh_intraday_cache(
+                        kite_client=throttled_client,
                         instrument_token=int(token),
                         cache_path=cache_path,
                         now=now_ist_naive(),
                         lookback_days=45,
                         interval="15minute",
                     )
-                )
 
-            if generation is not None:
-                with self._lock:
-                    if (
-                        generation
-                        != self._stream_generation
-                    ):
-                        logger.debug(
-                            "[MarketStreamManager] Ignoring stale "
-                            "history result for %s from generation %s",
-                            clean_symbol,
-                            generation,
-                        )
-                        return False
+            if not self._is_current_generation(generation):
+                return False
 
             if df is None or df.empty:
                 logger.warning(
-                    "[MarketStreamManager] No historical 15m "
-                    "data available for %s",
+                    "[MarketStreamManager] No historical 15m data available for %s",
                     clean_symbol,
+                )
+                self._set_history_state(
+                    clean_symbol,
+                    HistoryState.HISTORY_FAILED,
+                    generation,
                 )
                 return False
 
-            seeded = (
-                live_market_state
-                .seed_historical_candles(
-                    symbol=clean_symbol,
-                    candles=df,
-                )
+            seeded = live_market_state.seed_historical_candles(
+                symbol=clean_symbol,
+                candles=df,
             )
 
             if seeded <= 0:
                 logger.warning(
-                    "[MarketStreamManager] Historical data for %s "
-                    "contained no valid completed candles.",
+                    "[MarketStreamManager] Historical data for %s contained no valid completed candles.",
                     clean_symbol,
+                )
+                self._set_history_state(
+                    clean_symbol,
+                    HistoryState.HISTORY_FAILED,
+                    generation,
                 )
                 return False
 
-            with self._history_lock:
-                self._history_ready_symbols.add(
-                    clean_symbol
-                )
-
-            logger.info(
-                "[MarketStreamManager] Seeded %s historical "
-                "candles for %s",
-                seeded,
+            final_state = self._set_history_state(
                 clean_symbol,
+                HistoryState.HISTORY_READY,
+                generation,
+                expected_epoch=epoch,
             )
 
-            # Enqueue initial strategy evaluation only if the latest candle belongs to the CURRENT session.
-            try:
-                latest_row = df.iloc[-1].to_dict()
-                latest_timestamp = latest_row.get("datetime")
-                if latest_timestamp is None:
-                    logger.warning(
-                        "[%s] Historical warm-up produced no timestamp; live evaluation skipped.",
+            if final_state is None:
+                return False
+
+            logger.info(
+                "[MarketStreamManager] Seeded %s historical candles for %s (%s)",
+                seeded,
+                clean_symbol,
+                final_state.value,
+            )
+
+            if final_state == HistoryState.HISTORY_READY:
+                try:
+                    self._enqueue_after_history_ready(
                         clean_symbol,
+                        df,
+                        kite_client,
+                        generation,
                     )
-                    return True
-
-                today = now_ist_naive().date()
-                row_date = latest_timestamp.date() if hasattr(latest_timestamp, "date") else None
-                if row_date != today:
-                    logger.info(
-                        "[%s] Historical warm-up is not current-session data (latest=%s today=%s); strategy evaluation skipped.",
+                except Exception as eval_exc:
+                    logger.debug(
+                        "[MarketStreamManager] Initial history evaluation enqueue skipped for %s: %s",
                         clean_symbol,
-                        latest_timestamp,
-                        today,
+                        eval_exc,
                     )
-                    return True
-
-                latest_candle = {
-                    "symbol": clean_symbol,
-                    "datetime": latest_timestamp,
-                    "open": float(latest_row.get("open", 0.0)),
-                    "high": float(latest_row.get("high", 0.0)),
-                    "low": float(latest_row.get("low", 0.0)),
-                    "close": float(latest_row.get("close", 0.0)),
-                    "volume": int(latest_row.get("volume", 0)),
-                }
-                latest_vwap = latest_row.get("vwap")
-                if latest_vwap is not None:
-                    try:
-                        latest_vwap = float(latest_vwap)
-                    except (TypeError, ValueError):
-                        latest_vwap = None
-                if latest_vwap is not None and latest_vwap <= 0:
-                    latest_vwap = None
-
-                self._enqueue_evaluation(
-                    candle_dict=latest_candle,
-                    vwap=latest_vwap,
-                    kite_client=kite_client,
-                    generation=generation or self._stream_generation,
-                )
-            except Exception as eval_exc:
-                logger.debug(
-                    "[MarketStreamManager] Initial history evaluation enqueue skipped for %s: %s",
-                    clean_symbol,
-                    eval_exc,
-                )
 
             return True
 
         except Exception as exc:
+            self._set_history_state(
+                clean_symbol,
+                HistoryState.HISTORY_FAILED,
+                generation,
+            )
             logger.error(
-                "[MarketStreamManager] Historical warm-up failed "
-                "for %s token=%s: %s",
+                "[MarketStreamManager] Historical warm-up failed for %s token=%s: %s",
                 clean_symbol,
                 token,
                 exc,
@@ -758,65 +690,72 @@ class MarketStreamManager:
         kite_client: Any,
         generation: int,
     ) -> None:
-        """
-        Warm every subscribed cash symbol with real completed history.
-
-        Uses bounded concurrency (ThreadPoolExecutor max_workers=4)
-        within Kite API limits.
-        """
         from concurrent.futures import ThreadPoolExecutor
 
-        items = list(token_to_symbol.items())
+        remaining = list(token_to_symbol.items())
 
-        def _worker(tok: int, sym: str):
-            with self._lock:
-                if generation != self._stream_generation:
-                    return
-            self._warm_one_symbol_historical_state(
-                token=int(tok),
-                symbol=sym,
-                kite_client=kite_client,
-                generation=generation,
-            )
+        def _worker(tok: int, sym: str) -> None:
+            if not self._is_current_generation(generation):
+                return
+            try:
+                self._warm_one_symbol_historical_state(
+                    token=int(tok),
+                    symbol=sym,
+                    kite_client=kite_client,
+                    generation=generation,
+                )
+            except Exception:
+                logger.exception(
+                    "[MarketStreamManager] Historical warm-up worker failed."
+                )
 
-        with ThreadPoolExecutor(
-            max_workers=4,
-            thread_name_prefix="history-warm",
-        ) as executor:
-            futures = [
-                executor.submit(_worker, token, symbol)
-                for token, symbol in items
-            ]
-            for future in futures:
-                try:
+        for pass_index in range(HISTORY_WARMUP_PASSES):
+            if not remaining or not self._is_current_generation(generation):
+                return
+
+            with ThreadPoolExecutor(
+                max_workers=HISTORY_MAX_CONCURRENCY,
+                thread_name_prefix="history-warm",
+            ) as executor:
+                futures = [
+                    executor.submit(_worker, token, symbol)
+                    for token, symbol in remaining
+                ]
+                for future in futures:
                     future.result()
-                except Exception:
-                    logger.exception(
-                        "[MarketStreamManager] Historical warm-up worker failed."
-                    )
+
+            remaining = [
+                (token, symbol)
+                for token, symbol in remaining
+                if self.get_history_state(symbol) == HistoryState.HISTORY_FAILED
+            ]
+
+            if remaining and pass_index + 1 < HISTORY_WARMUP_PASSES:
+                _time.sleep(HISTORY_WARMUP_RETRY_DELAY_SECONDS)
 
     def _book_worker_loop(self) -> None:
         while True:
             symbol = self._book_queue.get()
-
             try:
                 with self._book_lock:
-                    snapshot = self._pending_book_snapshots.pop(symbol, None)
+                    entry = self._pending_book_snapshots.pop(symbol, None)
 
-                if snapshot is not None:
-                    self._l5_processed_count += 1
-                    live_signal_engine.on_book_update(
-                        symbol=symbol,
-                        snapshot=snapshot,
-                    )
-
+                if entry is not None:
+                    entry_generation, snapshot = entry
+                    if self._is_current_generation(entry_generation):
+                        self._l5_processed_count += 1
+                        live_signal_engine.on_book_update(
+                            symbol=symbol,
+                            snapshot=snapshot,
+                        )
             except Exception:
-                logger.exception(
-                    "[MarketStreamManager] SSF L5 worker failed."
-                )
-
+                logger.exception("[MarketStreamManager] SSF L5 worker failed.")
             finally:
                 self._book_queue.task_done()
+
+    def _drain_book_state(self) -> None:
+        with self._book_lock:
+            self._pending_book_snapshots.clear()
 
     def _seed_ssf_history_background(
         self,
@@ -824,304 +763,282 @@ class MarketStreamManager:
         generation: int,
     ) -> None:
         try:
-            with self._lock:
-                if generation != self._stream_generation:
-                    return
-
-            ssf_one_minute_runtime.seed_historical_data(
-                kite_client
-            )
-
+            if not self._is_current_generation(generation):
+                return
+            ssf_one_minute_runtime.seed_historical_data(kite_client)
         except Exception:
             logger.exception(
-                "[MarketStreamManager] Background SSF "
-                "historical seeding failed."
+                "[MarketStreamManager] Background SSF historical seeding failed."
             )
-
-    # ==================================================================
-    # PARTIAL-CANDLE HISTORY RECOVERY
-    # ==================================================================
 
     def _schedule_symbol_history_refresh(
         self,
         symbol: str,
         token: Optional[int],
         kite_client: Any,
+        generation: int,
     ) -> bool:
-        """
-        Queue one real Kite historical refresh for a symbol.
-
-        This is used when the first observed live candle was partial.
-        """
-
-        clean_symbol = str(
-            symbol
-        ).strip().upper()
+        clean_symbol = str(symbol).strip().upper()
 
         if token is None:
             logger.error(
-                "[MarketStreamManager] Cannot refresh history for %s: "
-                "missing real instrument token.",
+                "[MarketStreamManager] Cannot refresh history for %s: missing real instrument token.",
                 clean_symbol,
             )
             return False
 
-        with self._lock:
-            generation = self._stream_generation
+        if not self._is_current_generation(generation):
+            return False
 
         with self._history_refresh_lock:
-            existing_generation = (
-                self._history_refresh_requested.get(
-                    clean_symbol
-                )
-            )
-
-            if existing_generation == generation:
+            if self._history_refresh_requested.get(clean_symbol) == generation:
                 return True
 
-            self._history_refresh_requested[
-                clean_symbol
-            ] = generation
+            self._history_refresh_requested[clean_symbol] = generation
 
             try:
                 self._history_refresh_queue.put_nowait(
-                    (
-                        generation,
-                        clean_symbol,
-                        int(token),
-                        kite_client,
-                    )
+                    (generation, clean_symbol, int(token), kite_client)
                 )
-
-                return True
-
             except queue.Full:
-                self._history_refresh_requested.pop(
-                    clean_symbol,
-                    None,
-                )
-
+                self._history_refresh_requested.pop(clean_symbol, None)
                 logger.error(
-                    "[MarketStreamManager] History refresh queue "
-                    "full; cannot recover partial first candle for %s.",
+                    "[MarketStreamManager] History refresh queue full; cannot recover history for %s.",
                     clean_symbol,
                 )
-
                 return False
 
-    def _history_refresh_worker_loop(
-        self,
-    ) -> None:
-        """
-        Single worker prevents hundreds of concurrent historical API calls.
-        """
+            with self._history_lock:
+                self._history_epoch[clean_symbol] = (
+                    self._history_epoch.get(clean_symbol, 0) + 1
+                )
 
+            return True
+
+    def _history_refresh_worker_loop(self) -> None:
         while True:
-            item = (
-                self._history_refresh_queue.get()
-            )
+            item = self._history_refresh_queue.get()
 
             generation = None
             symbol = None
 
             try:
-                (
-                    generation,
-                    symbol,
-                    token,
-                    kite_client,
-                ) = item
+                generation, symbol, token, kite_client = item
 
-                self._warm_one_symbol_historical_state(
-                    token=token,
-                    symbol=symbol,
-                    kite_client=kite_client,
-                    generation=generation,
-                )
-
+                if self._is_current_generation(generation):
+                    self._warm_one_symbol_historical_state(
+                        token=token,
+                        symbol=symbol,
+                        kite_client=kite_client,
+                        generation=generation,
+                    )
             except Exception:
                 logger.exception(
-                    "[MarketStreamManager] Unhandled "
-                    "history-refresh worker error"
+                    "[MarketStreamManager] Unhandled history-refresh worker error"
                 )
-
             finally:
                 if symbol is not None:
                     with self._history_refresh_lock:
-                        current = (
-                            self._history_refresh_requested.get(
-                                symbol
-                            )
-                        )
-
-                        if current == generation:
-                            self._history_refresh_requested.pop(
-                                symbol,
-                                None,
-                            )
-
+                        if self._history_refresh_requested.get(symbol) == generation:
+                            self._history_refresh_requested.pop(symbol, None)
                 self._history_refresh_queue.task_done()
-
-    # ==================================================================
-    # EVALUATION QUEUE
-    # ==================================================================
 
     def _enqueue_evaluation(
         self,
         candle_dict: dict,
-        vwap: float,
+        vwap: Optional[float],
         kite_client: Any,
         generation: int,
     ) -> bool:
-        """
-        Add a completed candle to the ordered evaluation queue.
-        Preserves distinct candle events without silent drop or loss.
-        """
-        symbol = str(
-            candle_dict.get(
-                "symbol",
-                "",
-            )
-        ).strip().upper()
+        symbol = str(candle_dict.get("symbol", "")).strip().upper()
 
         if not symbol:
             logger.error(
-                "[MarketStreamManager] Cannot queue candle "
-                "without a symbol."
+                "[MarketStreamManager] Cannot queue candle without a symbol."
             )
             return False
 
-        task = (
-            generation,
-            symbol,
-            dict(candle_dict),
-            float(vwap),
-            kite_client,
-            now_ist_naive(),
+        candle_start = self._normalize_exchange_timestamp(
+            candle_dict.get("datetime")
         )
-
-        try:
-            self._evaluation_queue.put_nowait(task)
-            self._evaluation_enqueued_count += 1
-            return True
-        except queue.Full:
-            self._evaluation_dropped_count += 1
+        if candle_start is None:
             logger.error(
-                "[MarketStreamManager] Evaluation queue full (%d); "
-                "dropping evaluation task for %s to fail closed.",
-                EVALUATION_QUEUE_SIZE,
+                "[MarketStreamManager] Cannot queue candle for %s without a valid datetime.",
                 symbol,
             )
             return False
 
-    def _evaluation_worker_loop(
-        self,
-    ) -> None:
-        """
-        Background strategy evaluation worker.
+        try:
+            vwap_value = float(vwap)
+        except (TypeError, ValueError):
+            logger.debug(
+                "[MarketStreamManager] Skipping evaluation enqueue for %s: invalid vwap.",
+                symbol,
+            )
+            return False
 
-        IMPORTANT:
-        This function is never called from KiteTicker.on_ticks().
-        """
-        while True:
-            item = self._evaluation_queue.get()
+        if not self._is_current_generation(generation):
+            return False
+
+        task = _EvaluationTask(
+            generation=generation,
+            symbol=symbol,
+            candle_start=candle_start,
+            candle_dict=dict(candle_dict),
+            vwap=vwap_value,
+            kite_client=kite_client,
+            queued_at=now_ist_naive(),
+        )
+
+        with self._evaluation_queue_lock:
+            last_evaluated = self._last_evaluated_candle_start.get(symbol)
+            latest_completed = self._latest_completed_candle_start.get(symbol)
+
+            if (
+                last_evaluated is not None and candle_start <= last_evaluated
+            ) or (
+                latest_completed is not None and candle_start < latest_completed
+            ):
+                self._evaluation_stale_dropped_count += 1
+                return False
+
+            existing = self._pending_evaluations.get(symbol)
+
+            if existing is not None:
+                if existing.candle_start > candle_start:
+                    self._evaluation_stale_dropped_count += 1
+                    return False
+                self._pending_evaluations[symbol] = task
+                self._evaluation_coalesced_count += 1
+                return True
+
+            self._pending_evaluations[symbol] = task
+
+            if symbol in self._inflight_symbols or symbol in self._queued_symbols:
+                self._evaluation_enqueued_count += 1
+                return True
 
             try:
-                if item is None:
-                    continue
-
-                (
-                    generation,
+                self._evaluation_queue.put_nowait(symbol)
+            except queue.Full:
+                self._pending_evaluations.pop(symbol, None)
+                self._evaluation_dropped_count += 1
+                logger.error(
+                    "[MarketStreamManager] Evaluation queue full (%d); dropping evaluation task for %s to fail closed.",
+                    EVALUATION_QUEUE_SIZE,
                     symbol,
-                    candle_dict,
-                    vwap,
-                    kite_client,
-                    queued_at,
-                ) = item
+                )
+                return False
 
-                with self._lock:
-                    current_generation = (
-                        self._stream_generation
-                    )
-                    self._evaluation_inflight += 1
+            self._queued_symbols.add(symbol)
+            self._evaluation_enqueued_count += 1
+            return True
+
+    def _run_evaluation(self, task: _EvaluationTask) -> None:
+        symbol = task.symbol
+
+        with self._lock:
+            if task.generation != self._stream_generation:
+                return
+            self._evaluation_inflight += 1
+
+        try:
+            wait_seconds = (now_ist_naive() - task.queued_at).total_seconds()
+            if wait_seconds > EVALUATION_MAX_AGE_SECONDS:
+                logger.warning(
+                    "[MarketStreamManager] Candle evaluation for %s delayed by %.1fs > %ds; skipped.",
+                    symbol,
+                    wait_seconds,
+                    EVALUATION_MAX_AGE_SECONDS,
+                )
+                return
+
+            if not self.is_history_ready(symbol):
+                return
+
+            with self._evaluation_queue_lock:
+                last_evaluated = self._last_evaluated_candle_start.get(symbol)
+                latest_completed = self._latest_completed_candle_start.get(symbol)
 
                 if (
-                    generation
-                    != current_generation
+                    last_evaluated is not None
+                    and task.candle_start <= last_evaluated
+                ) or (
+                    latest_completed is not None
+                    and task.candle_start < latest_completed
                 ):
-                    continue
+                    self._evaluation_stale_dropped_count += 1
+                    return
 
-                # Freshness check: if evaluation worker was severely delayed,
-                # do not evaluate very old completed candle as if live.
-                wait_seconds = (now_ist_naive() - queued_at).total_seconds()
-                if wait_seconds > 300:
-                    logger.warning(
-                        "[MarketStreamManager] Candle evaluation for %s delayed by %.1fs > 300s; skipped.",
-                        symbol,
-                        wait_seconds,
-                    )
-                    continue
+                self._last_evaluated_candle_start[symbol] = task.candle_start
 
-                try:
-                    live_signal_engine.on_candle_close(
-                        candle_dict,
-                        vwap,
-                        kite_client=kite_client,
-                    )
+            if task.generation != self._stream_generation:
+                return
 
-                    with self._lock:
-                        self._last_evaluation_time = (
-                            now_ist()
-                        )
-                        self._last_evaluation_error = None
-
-                except Exception as exc:
-                    error = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
-
-                    with self._lock:
-                        self._last_evaluation_error = (
-                            f"{symbol}: {error}"
-                        )
-
-                    logger.exception(
-                        "[MarketStreamManager] Strategy evaluation "
-                        "failed for %s",
-                        symbol,
-                    )
-
-                finally:
-                    with self._lock:
-                        self._evaluation_inflight = max(
-                            0,
-                            self._evaluation_inflight - 1,
-                        )
-
-            except Exception:
-                logger.exception(
-                    "[MarketStreamManager] Unhandled "
-                    "evaluation-worker error"
+            try:
+                live_signal_engine.on_candle_close(
+                    task.candle_dict,
+                    task.vwap,
+                    kite_client=task.kite_client,
                 )
 
+                with self._lock:
+                    self._last_evaluation_time = now_ist()
+                    self._last_evaluation_error = None
+
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                with self._lock:
+                    self._last_evaluation_error = f"{symbol}: {error}"
+                logger.exception(
+                    "[MarketStreamManager] Strategy evaluation failed for %s",
+                    symbol,
+                )
+        finally:
+            with self._lock:
+                self._evaluation_inflight = max(0, self._evaluation_inflight - 1)
+
+    def _evaluation_worker_loop(self) -> None:
+        while True:
+            symbol = self._evaluation_queue.get()
+
+            try:
+                with self._evaluation_queue_lock:
+                    self._queued_symbols.discard(symbol)
+                    task = self._pending_evaluations.pop(symbol, None)
+                    if task is not None:
+                        self._inflight_symbols.add(symbol)
+
+                if task is not None:
+                    try:
+                        self._run_evaluation(task)
+                    finally:
+                        with self._evaluation_queue_lock:
+                            self._inflight_symbols.discard(symbol)
+                            if (
+                                symbol in self._pending_evaluations
+                                and symbol not in self._queued_symbols
+                            ):
+                                try:
+                                    self._evaluation_queue.put_nowait(symbol)
+                                    self._queued_symbols.add(symbol)
+                                except queue.Full:
+                                    self._pending_evaluations.pop(symbol, None)
+                                    self._evaluation_dropped_count += 1
+            except Exception:
+                logger.exception(
+                    "[MarketStreamManager] Unhandled evaluation-worker error"
+                )
             finally:
                 self._evaluation_queue.task_done()
 
-    def _drain_evaluation_queue(
-        self,
-    ) -> None:
-        """
-        Remove queued evaluation work.
-        """
+    def _drain_evaluation_queue(self) -> None:
         with self._evaluation_queue_lock:
             self._pending_evaluations.clear()
-
-        while True:
-            try:
-                self._evaluation_queue.get_nowait()
-                self._evaluation_queue.task_done()
-            except queue.Empty:
-                break
+            self._queued_symbols.clear()
+            self._last_evaluated_candle_start.clear()
+            self._latest_completed_candle_start.clear()
+            self._deferred_candles.clear()
 
             while True:
                 try:
@@ -1130,9 +1047,7 @@ class MarketStreamManager:
                 except queue.Empty:
                     break
 
-    def _drain_history_refresh_queue(
-        self,
-    ) -> None:
+    def _drain_history_refresh_queue(self) -> None:
         with self._history_refresh_lock:
             self._history_refresh_requested.clear()
 
@@ -1143,53 +1058,28 @@ class MarketStreamManager:
                 except queue.Empty:
                     break
 
-    # ==================================================================
-    # STREAM START
-    # ==================================================================
-
     def start_stream(
         self,
-        token_to_symbol: Optional[
-            Dict[int, str]
-        ] = None,
+        token_to_symbol: Optional[Dict[int, str]] = None,
         kite_client: Optional[Any] = None,
         timeframe_minutes: int = 15,
     ) -> Dict[str, Any]:
-        """
-        Start the single canonical KiteTicker stream.
-
-        No strategy calculation occurs synchronously inside the KiteTicker
-        callback thread.
-        """
-
         if timeframe_minutes <= 0:
-            raise ValueError(
-                "timeframe_minutes must be > 0"
-            )
+            raise ValueError("timeframe_minutes must be > 0")
 
         with self._lock:
-            # ----------------------------------------------------------
-            # Stop an existing WebSocket before starting a new one.
-            # ----------------------------------------------------------
             if self.kws is not None:
                 self._stop_internal()
 
             self._acquire_process_stream_lock()
             self._stream_generation += 1
-
-            generation = (
-                self._stream_generation
-            )
+            generation = self._stream_generation
 
             self._first_observed_candle.clear()
-
             self._drain_evaluation_queue()
-
             self._drain_history_refresh_queue()
+            self._drain_book_state()
 
-        # ----------------------------------------------------------
-        # 1. Resolve authenticated Kite client.
-        # ----------------------------------------------------------
         if kite_client is None:
             kite_client = get_active_kite()
 
@@ -1200,28 +1090,14 @@ class MarketStreamManager:
                     "No active Zerodha Kite client available. "
                     "Please authenticate via Kite Connect."
                 )
-            raise RuntimeError(
-                self.last_error
-            )
+            raise RuntimeError(self.last_error)
 
-        # ----------------------------------------------------------
-        # 2. Resolve real universe tokens.
-        # ----------------------------------------------------------
         if not token_to_symbol:
-            token_map = (
-                resolve_universe_tokens(
-                    kite_client=kite_client
-                )
-            )
+            token_map = resolve_universe_tokens(kite_client=kite_client)
 
             token_to_symbol = {
-                int(token): (
-                    str(symbol)
-                    .strip()
-                    .upper()
-                )
-                for symbol, token
-                in token_map.items()
+                int(token): str(symbol).strip().upper()
+                for symbol, token in token_map.items()
                 if token
             }
 
@@ -1235,15 +1111,8 @@ class MarketStreamManager:
                 for symbol in token_to_symbol.values()
             }
 
-            missing_symbols = (
-                expected_symbols
-                - resolved_symbols
-            )
-
-            unexpected_symbols = (
-                resolved_symbols
-                - expected_symbols
-            )
+            missing_symbols = expected_symbols - resolved_symbols
+            unexpected_symbols = resolved_symbols - expected_symbols
 
             if (
                 missing_symbols
@@ -1261,13 +1130,8 @@ class MarketStreamManager:
                         f"missing={len(missing_symbols)}, "
                         f"unexpected={len(unexpected_symbols)}"
                     )
-                logger.error(
-                    "[MarketStreamManager] %s",
-                    self.last_error,
-                )
-                raise RuntimeError(
-                    self.last_error
-                )
+                logger.error("[MarketStreamManager] %s", self.last_error)
+                raise RuntimeError(self.last_error)
         else:
             expected_universe = {
                 str(record.symbol).strip().upper()
@@ -1295,16 +1159,10 @@ class MarketStreamManager:
             with self._lock:
                 self.state = StreamState.ERROR
                 self.last_error = (
-                    "No valid instrument tokens available "
-                    "to start market stream."
+                    "No valid instrument tokens available to start market stream."
                 )
-            raise ValueError(
-                self.last_error
-            )
+            raise ValueError(self.last_error)
 
-        # ----------------------------------------------------------
-        # 3. Validate saved Kite session.
-        # ----------------------------------------------------------
         session = get_saved_session()
 
         if not session:
@@ -1314,64 +1172,41 @@ class MarketStreamManager:
                     "No active Zerodha Kite session found. "
                     "Please authenticate via Kite login."
                 )
-            raise RuntimeError(
-                self.last_error
-            )
+            raise RuntimeError(self.last_error)
 
-        api_key = session.get(
-            "api_key"
-        )
-
-        access_token = session.get(
-            "access_token"
-        )
+        api_key = session.get("api_key")
+        access_token = session.get("access_token")
 
         if not api_key or not access_token:
             with self._lock:
                 self.state = StreamState.ERROR
-                self.last_error = (
-                    "Invalid session credentials."
-                )
-            raise RuntimeError(
-                self.last_error
-            )
+                self.last_error = "Invalid session credentials."
+            raise RuntimeError(self.last_error)
 
-        resolved_token_to_symbol = dict(
-            token_to_symbol
-        )
+        resolved_token_to_symbol = dict(token_to_symbol)
+        resolved_symbol_to_token = {
+            sym: tok for tok, sym in resolved_token_to_symbol.items()
+        }
 
-        # ----------------------------------------------------------
-        # 4. Resolve real futures tokens.
-        # ----------------------------------------------------------
         resolved_futures_token_to_symbol: Dict[int, str] = {}
 
-        for sym in (
-            resolved_token_to_symbol.values()
-        ):
+        for sym in resolved_token_to_symbol.values():
             try:
-                fut_info = (
-                    instrument_resolver
-                    .find_nearest_single_stock_future(
-                        sym,
-                        kite_client=kite_client,
-                    )
+                fut_info = instrument_resolver.find_nearest_single_stock_future(
+                    sym,
+                    kite_client=kite_client,
                 )
 
                 if fut_info is None:
                     continue
 
-                raw_fut_token = fut_info.get(
-                    "instrument_token"
-                )
+                raw_fut_token = fut_info.get("instrument_token")
 
                 try:
-                    fut_token = int(
-                        raw_fut_token
-                    )
+                    fut_token = int(raw_fut_token)
                 except (TypeError, ValueError):
                     logger.warning(
-                        "[MarketStreamManager] Invalid futures "
-                        "instrument token for %s: %r",
+                        "[MarketStreamManager] Invalid futures instrument token for %s: %r",
                         sym,
                         raw_fut_token,
                     )
@@ -1379,40 +1214,27 @@ class MarketStreamManager:
 
                 if fut_token <= 0:
                     logger.warning(
-                        "[MarketStreamManager] Non-positive futures "
-                        "instrument token for %s: %s",
+                        "[MarketStreamManager] Non-positive futures instrument token for %s: %s",
                         sym,
                         fut_token,
                     )
                     continue
 
-                resolved_futures_token_to_symbol[
-                    fut_token
-                ] = sym
+                resolved_futures_token_to_symbol[fut_token] = sym
 
             except Exception as exc:
                 logger.debug(
-                    "[MarketStreamManager] Failed to resolve "
-                    "futures token for %s: %s",
+                    "[MarketStreamManager] Failed to resolve futures token for %s: %s",
                     sym,
                     exc,
                 )
 
-        # ----------------------------------------------------------
-        # 5. Resolve real sector-index tokens.
-        # ----------------------------------------------------------
         resolved_index_token_to_symbol: Dict[int, str] = {}
         _resolved_index_tokens: Dict[str, Optional[int]] = {}
 
-        for sym in (
-            resolved_token_to_symbol.values()
-        ):
+        for sym in resolved_token_to_symbol.values():
             try:
-                idx_sym = (
-                    get_sector_index_symbol(
-                        sym
-                    )
-                )
+                idx_sym = get_sector_index_symbol(sym)
 
                 if not idx_sym:
                     continue
@@ -1420,30 +1242,23 @@ class MarketStreamManager:
                 if idx_sym in _resolved_index_tokens:
                     idx_tok = _resolved_index_tokens[idx_sym]
                 else:
-                    idx_tok = (
-                        instrument_resolver
-                        .resolve_token(
-                            idx_sym,
-                            exchange="NSE",
-                            kite_client=kite_client,
-                        )
+                    idx_tok = instrument_resolver.resolve_token(
+                        idx_sym,
+                        exchange="NSE",
+                        kite_client=kite_client,
                     )
                     _resolved_index_tokens[idx_sym] = idx_tok
 
                 if idx_tok:
-                    resolved_index_token_to_symbol[
-                        int(idx_tok)
-                    ] = idx_sym
+                    resolved_index_token_to_symbol[int(idx_tok)] = idx_sym
 
             except Exception as exc:
                 logger.debug(
-                    "[MarketStreamManager] Failed to resolve "
-                    "index token for %s: %s",
+                    "[MarketStreamManager] Failed to resolve index token for %s: %s",
                     sym,
                     exc,
                 )
 
-        # Explicitly resolve and subscribe real NIFTY benchmark token for CRSD market factor and index context
         try:
             nifty_tok = (
                 instrument_resolver.resolve_token(
@@ -1459,72 +1274,50 @@ class MarketStreamManager:
             )
             if nifty_tok:
                 resolved_index_token_to_symbol[int(nifty_tok)] = "NIFTY"
-                # NIFTY is an index — NEVER add it to resolved_token_to_symbol (equity universe)
         except Exception as exc:
             logger.debug(
                 "[MarketStreamManager] Failed to resolve NIFTY token: %s",
                 exc,
             )
 
-        # ----------------------------------------------------------
-        # 6. Deduplicate actual subscription tokens.
-        # ----------------------------------------------------------
         all_tokens = list(
             dict.fromkeys(
-                list(
-                    resolved_token_to_symbol.keys()
-                )
-                + list(
-                    resolved_futures_token_to_symbol.keys()
-                )
-                + list(
-                    resolved_index_token_to_symbol.keys()
-                )
+                list(resolved_token_to_symbol.keys())
+                + list(resolved_futures_token_to_symbol.keys())
+                + list(resolved_index_token_to_symbol.keys())
             )
         )
 
-        tokens_to_subscribe = list(
-            all_tokens
-        )
+        tokens_to_subscribe = list(all_tokens)
 
         try:
             self.volume_profile_engine.initialize_universe(resolved_token_to_symbol)
         except Exception as vp_init_exc:
-            logger.debug("[MarketStreamManager] VolumeProfile universe init error: %s", vp_init_exc)
-
-        callback_generation = generation
-
-        # ==========================================================
-        # CANDLE CLOSE CALLBACK
-        # ==========================================================
-
-        def _on_candle_close(
-            candle_dict: dict,
-            vwap: float,
-        ) -> None:
-
-            symbol = str(
-                candle_dict.get(
-                    "symbol",
-                    "",
-                )
-            ).strip().upper()
-
-            candle_timestamp = (
-                self._normalize_exchange_timestamp(
-                    candle_dict.get(
-                        "datetime"
-                    )
-                )
+            logger.debug(
+                "[MarketStreamManager] VolumeProfile universe init error: %s",
+                vp_init_exc,
             )
 
-            if (
-                not symbol
-                or candle_timestamp is None
-            ):
+        callback_generation = generation
+        index_symbol_set = set(resolved_index_token_to_symbol.values())
+
+        def _token_for(symbol: str) -> Optional[int]:
+            state = live_market_state.get_symbol_state(symbol)
+            return (
+                (state.token if state is not None else None)
+                or resolved_symbol_to_token.get(symbol)
+            )
+
+        def _on_candle_close(candle_dict: dict, vwap: float) -> None:
+            symbol = str(candle_dict.get("symbol", "")).strip().upper()
+
+            candle_timestamp = self._normalize_exchange_timestamp(
+                candle_dict.get("datetime")
+            )
+
+            if not symbol or candle_timestamp is None:
                 logger.error(
-                    "[MarketStreamManager] Rejected malformed "
-                    "candle-close callback: %r",
+                    "[MarketStreamManager] Rejected malformed candle-close callback: %r",
                     candle_dict,
                 )
                 return
@@ -1532,269 +1325,182 @@ class MarketStreamManager:
             with self._lock:
                 if callback_generation != self._stream_generation:
                     logger.debug(
-                        "[MarketStreamManager] Ignoring stale candle callback "
-                        "from generation %s; current=%s",
+                        "[MarketStreamManager] Ignoring stale candle callback from generation %s; current=%s",
                         callback_generation,
                         self._stream_generation,
                     )
                     return
-
                 self.candle_count += 1
-                current_generation = (
-                    self._stream_generation
-                )
 
-            # ------------------------------------------------------
-            # FIRST CANDLE PARTIAL-CANDLE PROTECTION
-            # ------------------------------------------------------
             if self._consume_partial_first_candle(
                 symbol=symbol,
                 candle_timestamp=candle_timestamp,
+                generation=callback_generation,
             ):
                 logger.warning(
-                    "[MarketStreamManager] Ignoring partial first "
-                    "candle for %s at %s. Scheduling real Kite "
-                    "historical backfill.",
+                    "[MarketStreamManager] Ignoring partial first candle for %s at %s. Scheduling real Kite historical backfill.",
                     symbol,
                     candle_timestamp,
                 )
 
-                state = (
-                    live_market_state
-                    .get_symbol_state(
-                        symbol
-                    )
-                )
-
-                token = (
-                    (state.token if state is not None else None)
-                    or self.symbol_to_token.get(symbol)
-                )
+                self._mark_history_stale(symbol, callback_generation)
 
                 self._schedule_symbol_history_refresh(
                     symbol=symbol,
-                    token=token,
+                    token=_token_for(symbol),
                     kite_client=kite_client,
-                )
-
-                return
-
-            # ------------------------------------------------------
-            # Only complete valid candles reach strategy state.
-            # ------------------------------------------------------
-            live_market_state.update_candle_close(
-                candle_dict,
-                vwap,
-            )
-
-            if symbol in ("NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__") or symbol in self.index_token_to_symbol.values():
-                crsd_live_runtime.update_market_candle(
-                    candle_dict
+                    generation=callback_generation,
                 )
                 return
-            else:
-                crsd_live_runtime.update_stock_candle(
-                    candle_dict
-                )
 
-            # ------------------------------------------------------
-            # History must be ready before strategy evaluation.
-            # ------------------------------------------------------
-            if not self.is_history_ready(
-                symbol
+            if callback_generation != self._stream_generation:
+                return
+
+            live_market_state.update_candle_close(candle_dict, vwap)
+
+            if (
+                symbol in ("NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__")
+                or symbol in index_symbol_set
             ):
+                crsd_live_runtime.update_market_candle(candle_dict)
+                return
+
+            crsd_live_runtime.update_stock_candle(candle_dict)
+
+            with self._evaluation_queue_lock:
+                latest = self._latest_completed_candle_start.get(symbol)
+                if latest is None or candle_timestamp > latest:
+                    self._latest_completed_candle_start[symbol] = candle_timestamp
+
+            history_state = self.get_history_state(symbol)
+
+            if history_state != HistoryState.HISTORY_READY:
+                with self._evaluation_queue_lock:
+                    existing = self._deferred_candles.get(symbol)
+                    if existing is None or existing[3] < candle_timestamp:
+                        self._deferred_candles[symbol] = (
+                            callback_generation,
+                            dict(candle_dict),
+                            vwap,
+                            candle_timestamp,
+                        )
+
+                if self.get_history_state(symbol) == HistoryState.HISTORY_READY:
+                    self._flush_deferred_candle(
+                        symbol,
+                        kite_client,
+                        callback_generation,
+                    )
+                    return
+
+                if history_state in (
+                    HistoryState.HISTORY_STALE,
+                    HistoryState.HISTORY_FAILED,
+                ):
+                    self._schedule_symbol_history_refresh(
+                        symbol=symbol,
+                        token=_token_for(symbol),
+                        kite_client=kite_client,
+                        generation=callback_generation,
+                    )
+
                 logger.info(
-                    "[MarketStreamManager] Skipping strategy "
-                    "evaluation for %s: historical warm-up "
-                    "not complete.",
+                    "[MarketStreamManager] Deferring strategy evaluation for %s: history state is %s.",
                     symbol,
+                    history_state.value,
                 )
                 return
 
-            # ------------------------------------------------------
-            # NEVER execute strategy calculation here.
-            #
-            # Queue it for worker threads so the KiteTicker callback
-            # returns immediately.
-            # ------------------------------------------------------
-            queued = (
-                self._enqueue_evaluation(
-                    candle_dict=candle_dict,
-                    vwap=vwap,
-                    kite_client=kite_client,
-                    generation=current_generation,
-                )
+            queued = self._enqueue_evaluation(
+                candle_dict=candle_dict,
+                vwap=vwap,
+                kite_client=kite_client,
+                generation=callback_generation,
             )
 
             if not queued:
-                logger.error(
-                    "[MarketStreamManager] Could not queue completed "
-                    "candle evaluation for %s.",
+                logger.debug(
+                    "[MarketStreamManager] Completed candle evaluation for %s was not queued.",
                     symbol,
                 )
 
-        # ==========================================================
-        # BOOK UPDATE CALLBACK
-        # ==========================================================
+        def _on_book_update(symbol: str, snapshot: Any) -> None:
+            if callback_generation != self._stream_generation:
+                return
 
-        def _on_book_update(
-            symbol: str,
-            snapshot: Any,
-        ) -> None:
             self._l5_received_count += 1
-            live_market_state.update_book_snapshot(
-                symbol,
-                snapshot,
-            )
+            live_market_state.update_book_snapshot(symbol, snapshot)
 
             with self._book_lock:
                 if symbol in self._pending_book_snapshots:
                     self._l5_replaced_count += 1
-                self._pending_book_snapshots[symbol] = snapshot
+                self._pending_book_snapshots[symbol] = (
+                    callback_generation,
+                    snapshot,
+                )
 
             try:
                 self._book_queue.put_nowait(symbol)
             except queue.Full:
                 pass
 
-        # ==========================================================
-        # CANDLE AGGREGATOR
-        # ==========================================================
-
-        aggregator = (
-            MultiSymbolCandleAggregator(
-                token_to_symbol_map=(
-                    resolved_token_to_symbol
-                ),
-                timeframe_minutes=(
-                    timeframe_minutes
-                ),
-                on_candle_close=(
-                    _on_candle_close
-                ),
-                on_book_update=(
-                    _on_book_update
-                ),
-            )
+        aggregator = MultiSymbolCandleAggregator(
+            token_to_symbol_map=resolved_token_to_symbol,
+            timeframe_minutes=timeframe_minutes,
+            on_candle_close=_on_candle_close,
+            on_book_update=_on_book_update,
         )
 
-        # ==========================================================
-        # KITE TICKER
-        # ==========================================================
-
         try:
-            from kiteconnect import (
-                KiteTicker,
-            )
+            from kiteconnect import KiteTicker
         except ImportError:
             with self._lock:
                 self.state = StreamState.ERROR
-                self.last_error = (
-                    "kiteconnect package is not installed."
-                )
-            raise RuntimeError(
-                self.last_error
-            )
+                self.last_error = "kiteconnect package is not installed."
+            raise RuntimeError(self.last_error)
 
-        kws = KiteTicker(
-            api_key,
-            access_token,
-        )
+        kws = KiteTicker(api_key, access_token)
         try:
             kws.enable_reconnect(reconnect_interval=3, reconnect_tries=50)
         except Exception:
             pass
 
-        tokens_to_subscribe = list(
-            all_tokens
-        )
-
-        # ==========================================================
-        # ON TICKS
-        # ==========================================================
-
-        def on_ticks(
-            ws,
-            ticks,
-        ):
-            """
-            Keep this callback lightweight.
-
-            It validates/dispatches data and returns.
-            Heavy strategy evaluation is NEVER performed here.
-            """
+        def on_ticks(ws, ticks):
+            tick_batch = ticks if isinstance(ticks, list) else [ticks]
 
             with self._lock:
                 if callback_generation != self._stream_generation:
                     logger.debug(
-                        "[MarketStreamManager] Ignoring stale callback "
-                        "from generation %s; current=%s",
+                        "[MarketStreamManager] Ignoring stale callback from generation %s; current=%s",
                         callback_generation,
                         self._stream_generation,
                     )
                     return
+                self.tick_count += len(tick_batch)
+                self._ticks_received_count += len(tick_batch)
 
-                self.tick_count += (
-                    len(ticks)
-                    if isinstance(
-                        ticks,
-                        list,
-                    )
-                    else 1
-                )
-
-            tick_batch = (
-                ticks
-                if isinstance(
-                    ticks,
-                    list,
-                )
-                else [ticks]
-            )
-
-            cash_ticks: List[
-                dict
-            ] = []
-
+            cash_ticks: List[dict] = []
             accepted_tick_count = 0
             latest_exchange_timestamp = None
-
-            # Tracks freshness of the REQUIRED stock-equity feed only.
-            # Deliberately NOT updated by futures or index ticks.
             latest_equity_timestamp = None
 
             for tick in tick_batch:
-
-                if not isinstance(
-                    tick,
-                    dict,
-                ):
+                if not isinstance(tick, dict):
                     continue
-
-                raw_token = tick.get(
-                    "instrument_token"
-                )
 
                 try:
-                    tok = int(
-                        raw_token
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                ):
+                    tok = int(tick.get("instrument_token"))
+                except (TypeError, ValueError):
                     continue
 
-                exchange_timestamp = (
-                    self._extract_exchange_timestamp(
-                        tick
-                    )
-                )
+                exchange_timestamp = self._extract_exchange_timestamp(tick)
 
                 if exchange_timestamp is None:
                     continue
 
                 with self._lock:
+                    if callback_generation != self._stream_generation:
+                        return
                     previous_tick_ts = (
                         self._last_accepted_tick_timestamp_by_token.get(tok)
                     )
@@ -1802,10 +1508,9 @@ class MarketStreamManager:
                         previous_tick_ts is not None
                         and exchange_timestamp < previous_tick_ts
                     ):
+                        self._ticks_out_of_order_count += 1
                         logger.warning(
-                            "[MarketStreamManager] Dropping "
-                            "out-of-order tick "
-                            "token=%s ts=%s previous=%s",
+                            "[MarketStreamManager] Dropping out-of-order tick token=%s ts=%s previous=%s",
                             tok,
                             exchange_timestamp,
                             previous_tick_ts,
@@ -1815,122 +1520,50 @@ class MarketStreamManager:
                         exchange_timestamp
                     )
 
-                # ==================================================
-                # FUTURES TICK
-                # ==================================================
-
-                if (
-                    tok
-                    in self.futures_token_to_symbol
-                ):
-                    fut_sym = (
-                        self
-                        .futures_token_to_symbol[
-                            tok
-                        ]
+                if tok in resolved_futures_token_to_symbol:
+                    ssf_context_store.update_futures(
+                        symbol=resolved_futures_token_to_symbol[tok],
+                        fut_ltp=tick.get("last_price"),
+                        fut_oi=tick.get("oi"),
+                        timestamp=exchange_timestamp,
                     )
-
-                    fut_ltp = tick.get(
-                        "last_price"
-                    )
-
-                    fut_oi = tick.get(
-                        "oi"
-                    )
-
+                    accepted_tick_count += 1
                     if (
-                        exchange_timestamp
-                        is not None
+                        latest_exchange_timestamp is None
+                        or exchange_timestamp > latest_exchange_timestamp
                     ):
-                        ssf_context_store.update_futures(
-                            symbol=fut_sym,
-                            fut_ltp=fut_ltp,
-                            fut_oi=fut_oi,
-                            timestamp=(
-                                exchange_timestamp
-                            ),
-                        )
-                        accepted_tick_count += 1
-                        if (
-                            latest_exchange_timestamp is None
-                            or exchange_timestamp > latest_exchange_timestamp
-                        ):
-                            latest_exchange_timestamp = exchange_timestamp
-
-                    else:
-                        logger.debug(
-                            "[MarketStreamManager] Ignoring "
-                            "futures context update because "
-                            "exchange timestamp is missing. "
-                            "token=%s",
-                            tok,
-                        )
-
+                        latest_exchange_timestamp = exchange_timestamp
                     continue
 
-                # ==================================================
-                # SECTOR INDEX TICK
-                # ==================================================
-
-                if (
-                    tok
-                    in self.index_token_to_symbol
-                ):
+                if tok in resolved_index_token_to_symbol:
+                    ssf_one_minute_runtime.on_tick(tick)
+                    accepted_tick_count += 1
                     if (
-                        exchange_timestamp
-                        is not None
+                        latest_exchange_timestamp is None
+                        or exchange_timestamp > latest_exchange_timestamp
                     ):
-                        ssf_one_minute_runtime.on_tick(
-                            tick
-                        )
-                        accepted_tick_count += 1
-                        if (
-                            latest_exchange_timestamp is None
-                            or exchange_timestamp > latest_exchange_timestamp
-                        ):
-                            latest_exchange_timestamp = exchange_timestamp
-
-                    # Index ticks must NEVER be appended to cash_ticks
+                        latest_exchange_timestamp = exchange_timestamp
                     continue
 
-                # ==================================================
-                # CASH STOCK TICK
-                # ==================================================
+                sym = resolved_token_to_symbol.get(tok)
+                last_price = tick.get("last_price")
 
-                sym = (
-                    self.token_to_symbol.get(
-                        tok
-                    )
-                )
-
-                last_price = (
-                    tick.get(
-                        "last_price"
-                    )
-                )
-
-                if (
-                    sym is None
-                    or last_price is None
-                    or exchange_timestamp is None
-                ):
+                if sym is None or last_price is None:
                     self._ticks_rejected_count += 1
                     continue
 
                 try:
-                    price = float(
-                        last_price
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                ):
+                    price = float(last_price)
+                except (TypeError, ValueError):
                     self._ticks_invalid_count += 1
                     continue
 
                 if not math.isfinite(price) or price <= 0:
                     self._ticks_invalid_count += 1
                     continue
+
+                if callback_generation != self._stream_generation:
+                    return
 
                 accepted_tick_count += 1
                 if (
@@ -1939,65 +1572,29 @@ class MarketStreamManager:
                 ):
                     latest_exchange_timestamp = exchange_timestamp
 
-                # This is a genuine individual cash-stock tick (not
-                # futures, not an index) — it is the only thing
-                # allowed to advance equity-feed freshness.
                 if (
                     latest_equity_timestamp is None
                     or exchange_timestamp > latest_equity_timestamp
                 ):
                     latest_equity_timestamp = exchange_timestamp
 
-                # --------------------------------------------------
-                # Detect partial first candle.
-                # Must happen BEFORE aggregator.process_ticks().
-                # --------------------------------------------------
                 self._record_first_observed_candle(
                     symbol=sym,
-                    exchange_timestamp=(
-                        exchange_timestamp
-                    ),
-                    timeframe_minutes=(
-                        timeframe_minutes
-                    ),
+                    exchange_timestamp=exchange_timestamp,
+                    timeframe_minutes=timeframe_minutes,
+                    generation=callback_generation,
                 )
 
-                # --------------------------------------------------
-                # FIX: record the freshest REAL cash LTP directly
-                # into LiveSignalEngine.
-                # --------------------------------------------------
-                #
-                # IMPORTANT:
-                # Use the exchange timestamp.
-                # Do NOT replace it with now_ist().
-                #
                 live_signal_engine.record_tick_price(
                     symbol=sym,
                     price=price,
-                    timestamp=(
-                        exchange_timestamp
-                    ),
+                    timestamp=exchange_timestamp,
                 )
 
-                # Prefer authoritative Kite day OHLC and session volume.
                 ohlc = tick.get("ohlc") or {}
-
-                def _safe_positive_float(value):
-                    try:
-                        parsed = float(value)
-                    except (TypeError, ValueError):
-                        return None
-                    return parsed if parsed > 0 else None
-
-                day_open = _safe_positive_float(
-                    ohlc.get("open")
-                )
-                day_high = _safe_positive_float(
-                    ohlc.get("high")
-                )
-                day_low = _safe_positive_float(
-                    ohlc.get("low")
-                )
+                day_open = _safe_positive_float(ohlc.get("open"))
+                day_high = _safe_positive_float(ohlc.get("high"))
+                day_low = _safe_positive_float(ohlc.get("low"))
                 raw_session_volume = tick.get("volume_traded")
                 try:
                     session_volume = (
@@ -2020,20 +1617,13 @@ class MarketStreamManager:
                     session_volume=session_volume,
                 )
 
-                # --------------------------------------------------
-                # Real cash tick also feeds SSF runtime.
-                # --------------------------------------------------
-                ssf_one_minute_runtime.on_tick(
-                    tick
-                )
+                ssf_one_minute_runtime.on_tick(tick)
 
-                cash_ticks.append(
-                    tick
-                )
+                cash_ticks.append(tick)
 
-            # ======================================================
-            # 15:30 IST SESSION OUTCOME FINALIZATION
-            # ======================================================
+            if callback_generation != self._stream_generation:
+                return
+
             if (
                 latest_equity_timestamp is not None
                 and latest_equity_timestamp.time() >= time(15, 30)
@@ -2042,7 +1632,10 @@ class MarketStreamManager:
                 today_str = latest_equity_timestamp.strftime("%Y-%m-%d")
                 should_finalize = False
                 with self._lock:
-                    if self._session_finalized_date != today_str:
+                    if (
+                        callback_generation == self._stream_generation
+                        and self._session_finalized_date != today_str
+                    ):
                         self._session_finalized_date = today_str
                         should_finalize = True
                 if should_finalize:
@@ -2061,209 +1654,133 @@ class MarketStreamManager:
                         try:
                             self.volume_profile_engine.save_session_profiles()
                         except Exception as vp_fin_exc:
-                            logger.debug("[MarketStreamManager] VolumeProfile session save error: %s", vp_fin_exc)
+                            logger.debug(
+                                "[MarketStreamManager] VolumeProfile session save error: %s",
+                                vp_fin_exc,
+                            )
                     except Exception as fin_exc:
-                        logger.debug("[MarketStreamManager] 15:30 session finalization error: %s", fin_exc)
+                        logger.debug(
+                            "[MarketStreamManager] 15:30 session finalization error: %s",
+                            fin_exc,
+                        )
 
             if cash_ticks:
                 try:
                     self.volume_profile_engine.process_ticks(
                         cash_ticks,
-                        self.token_to_symbol,
+                        resolved_token_to_symbol,
                     )
                 except Exception:
                     logger.exception(
-                        "[MarketStreamManager] Error processing "
-                        "cash ticks in VolumeProfileEngine"
+                        "[MarketStreamManager] Error processing cash ticks in VolumeProfileEngine"
                     )
 
-            if (
-                self.aggregator
-                and cash_ticks
-            ):
+                if callback_generation != self._stream_generation:
+                    return
+
                 try:
-                    self.aggregator.process_ticks(
-                        cash_ticks
-                    )
+                    aggregator.process_ticks(cash_ticks)
                 except Exception:
                     logger.exception(
-                        "[MarketStreamManager] Error processing "
-                        "cash ticks in CandleAggregator"
+                        "[MarketStreamManager] Error processing cash ticks in CandleAggregator"
                     )
 
-            if latest_equity_timestamp is not None:
-                with self._lock:
-                    self.last_equity_tick_time = (
-                        latest_equity_timestamp
-                    )
-
-            if accepted_tick_count > 0 and latest_exchange_timestamp is not None:
-                with self._lock:
+            with self._lock:
+                if callback_generation != self._stream_generation:
+                    return
+                self._ticks_accepted_count += accepted_tick_count
+                if latest_equity_timestamp is not None:
+                    self.last_equity_tick_time = latest_equity_timestamp
+                if (
+                    accepted_tick_count > 0
+                    and latest_exchange_timestamp is not None
+                ):
                     self.last_tick_time = latest_exchange_timestamp
 
-        # ==========================================================
-        # CONNECTION CALLBACKS
-        # ==========================================================
-
-        def on_connect(
-            ws,
-            response,
-        ):
+        def on_connect(ws, response):
             with self._lock:
                 if callback_generation != self._stream_generation:
                     logger.debug(
-                        "[MarketStreamManager] Ignoring stale callback "
-                        "from generation %s; current=%s",
+                        "[MarketStreamManager] Ignoring stale callback from generation %s; current=%s",
                         callback_generation,
                         self._stream_generation,
                     )
                     return
 
-                self.state = (
-                    StreamState.CONNECTED
-                )
-
-                self.last_connect_time = (
-                    now_ist()
-                )
-
+                self.state = StreamState.CONNECTED
+                self.last_connect_time = now_ist()
                 self.last_error = None
-
-                gap_detected = (
-                    self._awaiting_gap_recovery
-                )
-
+                gap_detected = self._awaiting_gap_recovery
                 self._awaiting_gap_recovery = False
 
-            ws.subscribe(
-                tokens_to_subscribe
-            )
-
-            ws.set_mode(
-                ws.MODE_FULL,
-                tokens_to_subscribe,
-            )
+            ws.subscribe(tokens_to_subscribe)
+            ws.set_mode(ws.MODE_FULL, tokens_to_subscribe)
 
             logger.info(
-                "[MarketStreamManager] KiteTicker connected "
-                "in MODE_FULL — subscribed %d instruments "
-                "(%d cash, %d futures, %d indices).",
-                len(
-                    tokens_to_subscribe
-                ),
-                len(
-                    self.token_to_symbol
-                ),
-                len(
-                    self.futures_token_to_symbol
-                ),
-                len(
-                    self.index_token_to_symbol
-                ),
+                "[MarketStreamManager] KiteTicker connected in MODE_FULL — subscribed %d instruments (%d cash, %d futures, %d indices).",
+                len(tokens_to_subscribe),
+                len(resolved_token_to_symbol),
+                len(resolved_futures_token_to_symbol),
+                len(resolved_index_token_to_symbol),
             )
 
-            # ------------------------------------------------------
-            # CONNECTION GAP RECOVERY
-            # ------------------------------------------------------
-            # This connect follows a real disconnect (not the
-            # stream's initial connect). Ticks were missed for an
-            # unknown duration while the real market kept moving, so:
-            #
-            # 1. Discard every symbol's in-progress candle so a
-            #    gap-spanning candle is never finalized as if the
-            #    stream had been continuous.
-            # 2. Clear cumulative-volume baselines so the next tick
-            #    re-baselines instead of dumping the whole outage's
-            #    market volume into one candle.
-            # 3. Re-arm the existing "first observed candle" partial
-            #    protection for every symbol, so each symbol's first
-            #    post-gap candle is treated exactly like a fresh
-            #    stream start (ignored + backfilled from real Kite
-            #    historical data) instead of being evaluated as a
-            #    normal live candle.
-            # ------------------------------------------------------
             if gap_detected:
                 logger.warning(
-                    "[MarketStreamManager] Reconnected after a "
-                    "stream gap. Discarding in-progress candles and "
-                    "volume baselines to avoid misattributing "
-                    "missed-tick volume or data."
+                    "[MarketStreamManager] Reconnected after a stream gap. Discarding in-progress candles and volume baselines to avoid misattributing missed-tick volume or data."
                 )
 
-                if self.aggregator is not None:
-                    try:
-                        self.aggregator.handle_connection_gap()
-                    except Exception:
-                        logger.exception(
-                            "[MarketStreamManager] Error recovering "
-                            "aggregator state after connection gap."
-                        )
+                self._mark_all_history_stale(callback_generation)
+
+                try:
+                    aggregator.handle_connection_gap()
+                except Exception:
+                    logger.exception(
+                        "[MarketStreamManager] Error recovering aggregator state after connection gap."
+                    )
 
                 try:
                     self.volume_profile_engine.handle_connection_gap()
                 except Exception:
                     logger.exception(
-                        "[MarketStreamManager] Error recovering "
-                        "volume profile state after connection gap."
+                        "[MarketStreamManager] Error recovering volume profile state after connection gap."
                     )
 
                 with self._lock:
-                    self._first_observed_candle.clear()
+                    if callback_generation == self._stream_generation:
+                        self._first_observed_candle.clear()
 
-        def on_close(
-            ws,
-            code,
-            reason,
-        ):
+        def on_close(ws, code, reason):
             with self._lock:
                 if callback_generation != self._stream_generation:
                     logger.debug(
-                        "[MarketStreamManager] Ignoring stale callback "
-                        "from generation %s; current=%s",
+                        "[MarketStreamManager] Ignoring stale callback from generation %s; current=%s",
                         callback_generation,
                         self._stream_generation,
                     )
                     return
 
-                self.state = (
-                    StreamState.DISCONNECTED
-                )
-
-                self.last_disconnect_time = (
-                    now_ist()
-                )
-
-                # Any candle/volume state from here forward may span
-                # a gap once the stream reconnects.
+                self.state = StreamState.DISCONNECTED
+                self.last_disconnect_time = now_ist()
                 self._awaiting_gap_recovery = True
 
             logger.warning(
-                "[MarketStreamManager] KiteTicker closed: "
-                "code=%s reason=%s",
+                "[MarketStreamManager] KiteTicker closed: code=%s reason=%s",
                 code,
                 reason,
             )
 
-        def on_error(
-            ws,
-            code,
-            reason,
-        ):
+        def on_error(ws, code, reason):
             error_text = f"code={code} reason={reason}"
             with self._lock:
                 if callback_generation != self._stream_generation:
                     logger.debug(
-                        "[MarketStreamManager] Ignoring stale callback "
-                        "from generation %s; current=%s",
+                        "[MarketStreamManager] Ignoring stale callback from generation %s; current=%s",
                         callback_generation,
                         self._stream_generation,
                     )
                     return
 
-                self.state = (
-                    StreamState.ERROR
-                )
-
+                self.state = StreamState.ERROR
                 self.last_error = error_text
 
             logger.error(
@@ -2271,7 +1788,6 @@ class MarketStreamManager:
                 error_text,
             )
 
-            # Authentication failures must invalidate the cached client.
             try:
                 from backend.broker.kite_adapter import get_active_kite_with_diagnostics
 
@@ -2289,39 +1805,28 @@ class MarketStreamManager:
                     "[MarketStreamManager] Failed to revalidate Kite session after stream error."
                 )
 
-        def on_reconnect(
-            ws,
-            attempts_count,
-        ):
+        def on_reconnect(ws, attempts_count):
             with self._lock:
                 if callback_generation != self._stream_generation:
                     logger.debug(
-                        "[MarketStreamManager] Ignoring stale callback "
-                        "from generation %s; current=%s",
+                        "[MarketStreamManager] Ignoring stale callback from generation %s; current=%s",
                         callback_generation,
                         self._stream_generation,
                     )
                     return
 
-                self.state = (
-                    StreamState.RECONNECTING
-                )
+                self.state = StreamState.RECONNECTING
 
             logger.info(
-                "[MarketStreamManager] KiteTicker reconnecting "
-                "(attempt %s)...",
+                "[MarketStreamManager] KiteTicker reconnecting (attempt %s)...",
                 attempts_count,
             )
 
-        def on_noreconnect(
-            ws,
-        ):
+        def on_noreconnect(ws):
             with self._lock:
                 if callback_generation != self._stream_generation:
                     return
-                self.state = (
-                    StreamState.ERROR
-                )
+                self.state = StreamState.ERROR
                 self.last_error = (
                     "KiteTicker reconnection attempts exhausted. Stream disconnected."
                 )
@@ -2329,10 +1834,6 @@ class MarketStreamManager:
             logger.error(
                 "[MarketStreamManager] KiteTicker on_noreconnect: reconnection exhausted."
             )
-
-        # ==========================================================
-        # REGISTER CALLBACKS
-        # ==========================================================
 
         kws.on_ticks = on_ticks
         kws.on_connect = on_connect
@@ -2347,133 +1848,81 @@ class MarketStreamManager:
                     kws.close()
                 except Exception:
                     pass
-                return {
-                    "status": "STALE_START",
-                }
+                return {"status": "STALE_START"}
 
-            self.token_to_symbol = dict(
-                resolved_token_to_symbol
-            )
-            self.futures_token_to_symbol = dict(
-                resolved_futures_token_to_symbol
-            )
-            self.index_token_to_symbol = dict(
-                resolved_index_token_to_symbol
-            )
-            self.subscribed_token_count = len(
-                tokens_to_subscribe
-            )
+            self.token_to_symbol = dict(resolved_token_to_symbol)
+            self.symbol_to_token = dict(resolved_symbol_to_token)
+            self.futures_token_to_symbol = dict(resolved_futures_token_to_symbol)
+            self.index_token_to_symbol = dict(resolved_index_token_to_symbol)
+            self.subscribed_token_count = len(tokens_to_subscribe)
             self.state = StreamState.CONNECTING
             self.last_error = None
             self.aggregator = aggregator
             self.kws = kws
 
-            # Reset live state for this stream.
-            live_market_state.reset()
-            live_market_state.set_token_map(
-                self.token_to_symbol
-            )
+            with self._history_lock:
+                self._history_state = {
+                    sym: HistoryState.HISTORY_LOADING
+                    for sym in resolved_token_to_symbol.values()
+                }
+                self._history_epoch = {}
 
-        # Start evaluation/history workers outside the lock.
+            live_market_state.reset()
+            live_market_state.set_token_map(self.token_to_symbol)
+
         self._ensure_background_workers_started()
 
-        # Initialize SSF one-minute runtime outside the lock.
         ssf_one_minute_runtime.initialize(
-            symbols=list(
-                self.token_to_symbol.values()
-            ),
+            symbols=list(resolved_token_to_symbol.values()),
             kite_client=kite_client,
             seed_history=False,
         )
 
         self._ssf_seed_thread = threading.Thread(
             target=self._seed_ssf_history_background,
-            args=(
-                kite_client,
-                generation,
-            ),
+            args=(kite_client, generation),
             name="ssf-history-seed",
             daemon=True,
         )
         self._ssf_seed_thread.start()
 
-        # ==========================================================
-        # HISTORICAL WARM-UP
-        # ==========================================================
-
         warmup_thread = threading.Thread(
             target=self._warm_historical_state,
-            args=(
-                dict(
-                    self.token_to_symbol
-                ),
-                kite_client,
-                generation,
-            ),
+            args=(dict(resolved_token_to_symbol), kite_client, generation),
             name="kite-history-warmup",
             daemon=True,
         )
-
         warmup_thread.start()
 
-        # ==========================================================
-        # CONNECT
-        # ==========================================================
-
-        kws.connect(
-            threaded=True
-        )
+        kws.connect(threaded=True)
 
         logger.info(
-            "[MarketStreamManager] KiteTicker stream "
-            "connecting in background."
+            "[MarketStreamManager] KiteTicker stream connecting in background."
         )
 
         return {
             "status": "CONNECTING",
-            "subscribed_tokens": len(
-                tokens_to_subscribe
-            ),
-            "symbols_count": len(
-                self.token_to_symbol
-            ),
-            "evaluation_workers": (
-                self._evaluation_worker_count
-            ),
-            "evaluation_queue_size": (
-                self._evaluation_queue.qsize()
-            ),
+            "subscribed_tokens": len(tokens_to_subscribe),
+            "symbols_count": len(resolved_token_to_symbol),
+            "evaluation_workers": self._evaluation_worker_count,
+            "evaluation_queue_size": self._evaluation_queue.qsize(),
         }
 
-    # ==================================================================
-    # STOP
-    # ==================================================================
-
     def _stop_internal(self) -> None:
-        """
-        Stop the current WebSocket generation.
-
-        Caller must hold self._lock.
-        """
-
-        # Invalidate queued/background work belonging to this stream.
         self._stream_generation += 1
         self._last_accepted_tick_timestamp_by_token.clear()
 
         with self._history_lock:
-            self._history_ready_symbols.clear()
+            self._history_state.clear()
+            self._history_epoch.clear()
 
         self._first_observed_candle.clear()
-
-        # A full stop is not a "gap" to recover from on the next start —
-        # start_stream() always begins with fresh aggregator/state.
         self._awaiting_gap_recovery = False
 
         self._drain_evaluation_queue()
-
         self._drain_history_refresh_queue()
+        self._drain_book_state()
 
-        # 1. Close WebSocket first so no new ticks arrive
         if self.kws is not None:
             try:
                 self.kws.close()
@@ -2484,7 +1933,6 @@ class MarketStreamManager:
                 )
             self.kws = None
 
-        # 2. Capture latest valid market prices BEFORE resetting state
         latest_prices = {}
         try:
             latest_prices = {
@@ -2495,7 +1943,6 @@ class MarketStreamManager:
         except Exception:
             pass
 
-        # 3. Finalize open signal outcomes in DB using captured prices
         try:
             today_str = now_ist().strftime("%Y-%m-%d")
             db_manager.finalize_session_signals(
@@ -2504,27 +1951,23 @@ class MarketStreamManager:
                 current_prices=latest_prices,
             )
         except Exception as fin_exc:
-            logger.debug("[MarketStreamManager] Session finalization error: %s", fin_exc)
+            logger.debug(
+                "[MarketStreamManager] Session finalization error: %s",
+                fin_exc,
+            )
 
-        # 4. Stop SSF runtime safely.
         try:
             ssf_one_minute_runtime.stop()
         except Exception:
-            logger.exception(
-                "[MarketStreamManager] Error stopping "
-                "SSF 1m runtime"
-            )
+            logger.exception("[MarketStreamManager] Error stopping SSF 1m runtime")
 
-        # 5. Reset signal engine state.
         try:
             live_signal_engine.reset()
         except Exception:
             logger.exception(
-                "[MarketStreamManager] Error resetting "
-                "live signal engine"
+                "[MarketStreamManager] Error resetting live signal engine"
             )
 
-        # 6. Reset live market state
         try:
             live_market_state.reset()
         except Exception:
@@ -2534,41 +1977,18 @@ class MarketStreamManager:
 
         self.futures_token_to_symbol.clear()
         self.index_token_to_symbol.clear()
-
         self.token_to_symbol.clear()
-
+        self.symbol_to_token.clear()
         self.subscribed_token_count = 0
-
         self.aggregator = None
 
-        # Close WebSocket.
-        if self.kws is not None:
-            try:
-                self.kws.close()
-            except Exception as exc:
-                logger.warning(
-                    "[MarketStreamManager] Error closing KiteTicker: %s",
-                    exc,
-                )
-
-            self.kws = None
-
-        self.state = (
-            StreamState.STOPPED
-        )
-
-        self.last_disconnect_time = (
-            now_ist()
-        )
+        self.state = StreamState.STOPPED
+        self.last_disconnect_time = now_ist()
         self._release_process_stream_lock()
 
-    def stop_stream(
-        self,
-    ) -> Dict[str, Any]:
-
+    def stop_stream(self) -> Dict[str, Any]:
         with self._lock:
             self._stop_internal()
-
             return {
                 "status": "STOPPED",
                 "state": self.state.value,
@@ -2587,20 +2007,10 @@ class MarketStreamManager:
             timeframe_minutes=timeframe_minutes,
         )
 
-    # ==================================================================
-    # STATUS
-    # ==================================================================
-
-    def get_status(
-        self,
-    ) -> Dict[str, Any]:
-
+    def get_status(self) -> Dict[str, Any]:
         with self._lock:
-
             is_connected = (
-                self.state
-                == StreamState.CONNECTED
-                and self.kws is not None
+                self.state == StreamState.CONNECTED and self.kws is not None
             )
 
             last_tick_age_seconds = None
@@ -2610,10 +2020,7 @@ class MarketStreamManager:
                 if aware_last_tick is not None:
                     last_tick_age_seconds = max(
                         0.0,
-                        (
-                            now_ist()
-                            - aware_last_tick
-                        ).total_seconds(),
+                        (now_ist() - aware_last_tick).total_seconds(),
                     )
 
             last_equity_tick_age_seconds = None
@@ -2623,128 +2030,78 @@ class MarketStreamManager:
                 if aware_last_equity is not None:
                     last_equity_tick_age_seconds = max(
                         0.0,
-                        (
-                            now_ist()
-                            - aware_last_equity
-                        ).total_seconds(),
+                        (now_ist() - aware_last_equity).total_seconds(),
                     )
 
+            with self._history_lock:
+                history_counts = {state: 0 for state in HistoryState}
+                for state in self._history_state.values():
+                    history_counts[state] += 1
+
+            with self._evaluation_queue_lock:
+                pending_evaluation_count = len(self._pending_evaluations)
+
             return {
-                "state": (
-                    self.state.value
-                ),
-
-                "connected": (
-                    is_connected
-                ),
-
-                "subscribed_token_count": (
-                    self.subscribed_token_count
-                ),
-
-                "tick_count": (
-                    self.tick_count
-                ),
-
-                "candle_count": (
-                    self.candle_count
-                ),
-
+                "state": self.state.value,
+                "connected": is_connected,
+                "subscribed_token_count": self.subscribed_token_count,
+                "tick_count": self.tick_count,
+                "candle_count": self.candle_count,
                 "last_tick_time": (
                     self.last_tick_time.isoformat()
                     if self.last_tick_time
                     else None
                 ),
-
                 "last_tick_age_seconds": (
-                    round(
-                        last_tick_age_seconds,
-                        3,
-                    )
+                    round(last_tick_age_seconds, 3)
                     if last_tick_age_seconds is not None
                     else None
                 ),
-
-                # Authoritative freshness of the REQUIRED stock-equity
-                # feed (cash-stock ticks only — never futures or index
-                # ticks). Consumers that gate on "is market data fresh"
-                # must use this pair, not the general last_tick_* pair
-                # above, which can stay warm purely from futures/index
-                # activity while the actual stock universe is stale.
                 "last_equity_tick_time": (
                     self.last_equity_tick_time.isoformat()
                     if self.last_equity_tick_time
                     else None
                 ),
-
                 "last_equity_tick_age_seconds": (
-                    round(
-                        last_equity_tick_age_seconds,
-                        3,
-                    )
+                    round(last_equity_tick_age_seconds, 3)
                     if last_equity_tick_age_seconds is not None
                     else None
                 ),
-
                 "last_connect_time": (
                     self.last_connect_time.isoformat()
                     if self.last_connect_time
                     else None
                 ),
-
                 "last_disconnect_time": (
                     self.last_disconnect_time.isoformat()
                     if self.last_disconnect_time
                     else None
                 ),
-
-                "last_error": (
-                    self.last_error
-                ),
-
-                "evaluation_workers": (
-                    self._evaluation_worker_count
-                ),
-
-                "evaluation_queue_size": (
-                    self._evaluation_queue.qsize()
-                ),
-
-                "evaluation_inflight": (
-                    self._evaluation_inflight
-                ),
-
-                "evaluation_enqueued_count": (
-                    self._evaluation_enqueued_count
-                ),
-
-                "evaluation_coalesced_count": (
-                    self._evaluation_coalesced_count
-                ),
-
-                "evaluation_dropped_count": (
-                    self._evaluation_dropped_count
-                ),
-
+                "last_error": self.last_error,
+                "evaluation_workers": self._evaluation_worker_count,
+                "evaluation_queue_size": self._evaluation_queue.qsize(),
+                "evaluation_pending_count": pending_evaluation_count,
+                "evaluation_inflight": self._evaluation_inflight,
+                "evaluation_enqueued_count": self._evaluation_enqueued_count,
+                "evaluation_coalesced_count": self._evaluation_coalesced_count,
+                "evaluation_dropped_count": self._evaluation_dropped_count,
+                "evaluation_stale_dropped_count": self._evaluation_stale_dropped_count,
                 "last_evaluation_time": (
                     self._last_evaluation_time.isoformat()
                     if self._last_evaluation_time
                     else None
                 ),
-
-                "last_evaluation_error": (
-                    self._last_evaluation_error
-                ),
-
-                "history_ready_count": len(self._history_ready_symbols),
+                "last_evaluation_error": self._last_evaluation_error,
+                "history_ready_count": history_counts[HistoryState.HISTORY_READY],
+                "history_loading_count": history_counts[HistoryState.HISTORY_LOADING],
+                "history_stale_count": history_counts[HistoryState.HISTORY_STALE],
+                "history_failed_count": history_counts[HistoryState.HISTORY_FAILED],
                 "history_refresh_queue_size": self._history_refresh_queue.qsize(),
-
                 "ticks_received_count": self._ticks_received_count,
                 "ticks_accepted_count": self._ticks_accepted_count,
                 "ticks_rejected_count": self._ticks_rejected_count,
                 "ticks_invalid_count": self._ticks_invalid_count,
                 "ticks_out_of_order_count": self._ticks_out_of_order_count,
-
                 "l5_received_count": self._l5_received_count,
                 "l5_processed_count": self._l5_processed_count,
                 "l5_replaced_count": self._l5_replaced_count,
@@ -2767,6 +2124,4 @@ class MarketStreamManager:
         )
 
 
-market_stream_manager = (
-    MarketStreamManager()
-)
+market_stream_manager = MarketStreamManager()

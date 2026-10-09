@@ -620,62 +620,6 @@ class BufferedDualEMAStrategy(BaseStrategy):
     # RISK / PRICE VALIDATION
     # ------------------------------------------------------------------
 
-    def _max_allowed_risk(
-        self,
-        entry_price: float,
-    ) -> float:
-        """
-        Maximum allowed price distance between entry and initial stop.
-
-        Equities:
-            use percentage-based cap when available.
-
-        Futures:
-            use configured absolute max_risk_cap.
-        """
-        entry_price = float(
-            entry_price
-        )
-
-        if entry_price <= 0:
-            return 0.0
-
-        tick = max(
-            float(
-                getattr(
-                    self.instrument,
-                    "tick_size",
-                    0.05,
-                )
-            ),
-            1e-8,
-        )
-
-        if (
-            self.instrument.instrument_type
-            == InstrumentType.EQUITY
-        ):
-            pct = self.instrument.equity_orb_max_risk_pct
-            risk_pct = float(pct) if (pct is not None and pct > 0) else 0.0040
-
-            return max(
-                entry_price * risk_pct,
-                tick,
-            )
-
-        cap = float(
-            getattr(
-                self.instrument,
-                "max_risk_cap",
-                0.0,
-            )
-        )
-
-        return max(
-            cap,
-            tick,
-        )
-
     def _tick_round(
         self,
         price: float,
@@ -704,20 +648,11 @@ class BufferedDualEMAStrategy(BaseStrategy):
         entry: float,
         stop: float,
     ) -> bool:
-        """Reject trades whose actual stop distance exceeds the cap."""
         risk = abs(
             float(entry)
             - float(stop)
         )
-
-        cap = self._max_allowed_risk(
-            entry
-        )
-
-        return (
-            risk > 0
-            and risk <= cap
-        )
+        return risk > 0
 
     def _valid_long(
         self,

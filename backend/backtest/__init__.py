@@ -6,7 +6,6 @@ from backend.backtest.strategy_backtester import (
     EventDrivenBacktester,
     ExecutionPolicy,
     PositionSizer,
-    RiskManager,
     StrategyBacktester,
     TransactionCostCalculator,
 )
@@ -16,7 +15,6 @@ __all__ = [
     "EventDrivenBacktester",
     "ExecutionPolicy",
     "PositionSizer",
-    "RiskManager",
     "CostBreakdown",
     "TransactionCostCalculator",
     "PairBacktester",

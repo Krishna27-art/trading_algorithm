@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from backend.backtest.strategy_backtester import EventDrivenBacktester, ExecutionPolicy
-from backend.config.settings import AppSettings, InstrumentConfig, RiskConfig, StrategyConfig
+from backend.config.settings import AppSettings, InstrumentConfig, StrategyConfig
 from backend.strategy.orb_strategy import ORBCalculator
 from backend.indicators.vwap import calculate_session_vwap
 
@@ -67,7 +67,6 @@ def backtest_env():
         max_orb_range=150.0,
     )
     settings = AppSettings(
-        risk=RiskConfig(initial_capital=500_000.0, risk_per_trade_pct=1.0, max_trades_per_day=2),
         strategy=StrategyConfig(),
     )
     engine = EventDrivenBacktester(

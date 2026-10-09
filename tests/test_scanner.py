@@ -130,7 +130,6 @@ def test_scanner_instrument_config_factory():
         assert cfg.tick_size == 0.05
         assert cfg.min_orb_range > 0
         assert cfg.max_orb_range > cfg.min_orb_range
-        assert cfg.max_risk_cap > 0
 
 
 def test_create_instrument_config_for_equity():
@@ -143,10 +142,9 @@ def test_create_instrument_config_for_equity():
     assert cfg.symbol == "RELIANCE"
     assert cfg.instrument_token == 738561
     assert cfg.instrument_type == InstrumentType.EQUITY
-    # Scaled from price 3000: min_orb = 5.1, max_orb = 18.0, max_risk = 12.0
+    # Scaled from price 3000: min_orb = 5.1, max_orb = 18.0
     assert cfg.min_orb_range == 5.1
     assert cfg.max_orb_range == 18.0
-    assert cfg.max_risk_cap == 12.0
 
 
 def test_fastapi_scanner_and_multi_symbol_endpoints(monkeypatch):

@@ -3,8 +3,8 @@ Generic Strategy-Agnostic Event-Driven Backtester.
 
 EventDrivenBacktester (event_engine.py) has the ORB+VWAP rules hardcoded
 directly into its bar loop — it can't backtest anything else. This engine
-does the same job (bar-by-bar simulation, zero look-ahead, real position
-sizing, real transaction costs, the daily loss kill-switch) but delegates
+does the same job (bar-by-bar simulation, zero look-ahead,
+real transaction costs) but delegates
 all entry/exit decisions to a `BaseStrategy` instance via on_candle()/on_tick(),
 the same interface the live ExecutionEngine already uses. Any strategy
 written against strategy/base_strategy.py — CPRRegimeBreakoutStrategy,
@@ -15,10 +15,6 @@ It also calls strategy.seed_context() once per session with a trailing
 window of prior days' bars, before reset_session() — so strategies that need
 cross-day context (CPR's prior-day pivots, Dual-EMA's SMA200/EMA warm-up)
 get it, and strategies that don't (ORB) just ignore it.
-
-Fix 2.5: RiskManager is now the single source of truth for the daily kill-
-switch and per-symbol trade-limit logic instead of being re-implemented
-inline here.
 
 Fix 2.4: DB write path wired — trades are persisted to SQLite on entry and
 exit via DatabaseManager.
@@ -41,7 +37,7 @@ from enum import Enum
 from typing import Tuple
 
 from backend.backtest.performance import PerformanceAnalyzer, PerformanceReport
-from backend.config.settings import AppSettings, InstrumentConfig, InstrumentType, RiskConfig, TransactionCostConfig, settings
+from backend.config.settings import AppSettings, InstrumentConfig, InstrumentType, TransactionCostConfig, settings
 from backend.database.db import DatabaseManager, ExitReason, OrderDirection, TradeRecord
 from backend.indicators.vwap import calculate_session_vwap
 from backend.monitoring.logger import logger
@@ -114,144 +110,30 @@ class TransactionCostCalculator:
 
 
 class PositionSizer:
-    def __init__(self, risk_config: RiskConfig = settings.risk):
-        self.risk_config = risk_config
+    def __init__(self):
+        pass
 
     def calculate_order_quantity(
         self,
-        capital: float,
-        stop_distance: float,
-        instrument: InstrumentConfig,
+        capital: float = 1000000.0,
+        stop_distance: float = 0.0,
+        instrument: Optional[InstrumentConfig] = None,
         or_width: Optional[float] = None,
         available_margin: Optional[float] = None,
         estimated_price: Optional[float] = None,
         enforce_max_risk_cap: bool = False,
     ) -> int:
-        if stop_distance <= 0 or capital <= 0:
-            return 0
-
-        risk_budget = capital * self.risk_config.risk_per_trade_pct
-
-        if enforce_max_risk_cap and instrument.max_risk_cap and stop_distance > instrument.max_risk_cap:
-            logger.warning(
-                f"Stop distance {stop_distance:.2f} exceeds instrument maximum risk cap "
-                f"{instrument.max_risk_cap:.2f}. Trade rejected."
-            )
-            return 0
-
-        raw_units = risk_budget / stop_distance
-
+        if instrument is None:
+            return 1
         if instrument.instrument_type == InstrumentType.FUTURES:
-            lots = math.floor(raw_units / instrument.lot_size)
-            if lots < 1:
-                logger.info(
-                    f"Risk budget ₹{risk_budget:,.2f} cannot afford 1 contract lot "
-                    f"({instrument.lot_size} units) at {stop_distance:.2f} stop distance."
-                )
-                return 0
-            final_quantity = lots * instrument.lot_size
-        else:
-            final_quantity = int(math.floor(raw_units))
-            if final_quantity < 1:
-                return 0
-
-        if available_margin is not None and self.risk_config.enforce_margin_check:
-            if estimated_price is None or estimated_price <= 0:
-                logger.warning("Margin check enforced but estimated_price is unavailable; failing closed to 0.")
-                return 0
-            margin_per_unit = estimated_price * (0.12 if instrument.instrument_type == InstrumentType.FUTURES else 0.20)
-            required_margin = final_quantity * margin_per_unit
-            if required_margin > available_margin:
-                max_allowed_units = int(available_margin / margin_per_unit)
-                if instrument.instrument_type == InstrumentType.FUTURES:
-                    max_allowed_units = math.floor(max_allowed_units / instrument.lot_size) * instrument.lot_size
-                final_quantity = max(max_allowed_units, 0)
-                logger.warning(f"Position size clamped to {final_quantity} due to available margin limits.")
-
-        return final_quantity
-
-
-class RiskManager:
-    def __init__(self, risk_config: RiskConfig = settings.risk, max_portfolio_daily_trades: int = 10):
-        self.config = risk_config
-        self.max_portfolio_daily_trades = max_portfolio_daily_trades
-        self.daily_trades_count: dict = {}
-        self.daily_realized_pnl: float = 0.0
-        self.daily_unrealized_pnl: float = 0.0
-        self.kill_switch_active: bool = False
-        self.current_trading_date: Optional[date] = None
-
-    def reset_daily_state(self, current_date: date):
-        self.current_trading_date = current_date
-        self.daily_trades_count.clear()
-        self.daily_realized_pnl = 0.0
-        self.daily_unrealized_pnl = 0.0
-        self.kill_switch_active = False
-        logger.info(f"Risk state reset for trading session {current_date}.")
-
-    def update_pnl(self, realized_pnl_delta: float = 0.0, current_unrealized_pnl: float = 0.0, capital: float = 1000000.0) -> bool:
-        self.daily_realized_pnl += realized_pnl_delta
-        self.daily_unrealized_pnl = current_unrealized_pnl
-        total_daily_loss = -(self.daily_realized_pnl + self.daily_unrealized_pnl)
-        max_allowed_loss = capital * self.config.max_daily_loss_pct
-
-        if total_daily_loss >= max_allowed_loss and not self.kill_switch_active:
-            self.kill_switch_active = True
-            logger.critical(
-                f"[CIRCUIT BREAKER ACTIVATED] Cumulative portfolio daily loss ₹{total_daily_loss:,.2f} "
-                f"reached/exceeded 2.0% threshold (₹{max_allowed_loss:,.2f}). Engaging hard software kill-switch!"
-            )
-            return True
-
-        return self.kill_switch_active
-
-    def validate_pre_trade(
-        self,
-        symbol: str,
-        current_time: time,
-        quantity: int,
-        capital: float,
-        has_open_position: bool = False,
-    ) -> Tuple[bool, Optional[str]]:
-        if self.kill_switch_active:
-            return False, "REJECTED: Daily portfolio kill-switch is active."
-
-        total_trades_done = sum(self.daily_trades_count.values())
-        if total_trades_done >= self.max_portfolio_daily_trades:
-            return (
-                False,
-                f"REJECTED: Daily trade limit reached for portfolio ({total_trades_done}/{self.max_portfolio_daily_trades}).",
-            )
-
-        trades_done = self.daily_trades_count.get(symbol, 0)
-        if trades_done >= 1:
-            return False, f"REJECTED: Daily trade limit reached for {symbol} ({trades_done}/1)."
-
-        if has_open_position and not self.config.allow_averaging:
-            return False, "REJECTED: Adding to existing position / averaging down is strictly prohibited."
-
-        if quantity <= 0:
-            return False, "REJECTED: Computed position size is 0 (risk or margin check failed)."
-
-        if current_time < time(9, 45) or current_time > time(13, 30):
-            return False, f"REJECTED: Current time {current_time} outside entry window (09:45–13:30 IST)."
-
-        return True, None
-
-    def record_trade_executed(self, symbol: str):
-        self.daily_trades_count[symbol] = self.daily_trades_count.get(symbol, 0) + 1
-        total_trades = sum(self.daily_trades_count.values())
-        logger.info(
-            f"Trade registered for {symbol}. Symbol trades: {self.daily_trades_count[symbol]} | "
-            f"Total portfolio session trades: {total_trades}/{self.max_portfolio_daily_trades}."
-        )
+            return max(1, instrument.lot_size)
+        return 1
 
 
 class ExecutionPolicy(str, Enum):
     CONSERVATIVE = "CONSERVATIVE"
     OPTIMISTIC = "OPTIMISTIC"
     REALISTIC = "REALISTIC"
-
 
 
 class StrategyBacktester:
@@ -278,7 +160,7 @@ class StrategyBacktester:
         self.strategy_factory = strategy_factory
         self.instrument = instrument
         self.settings = app_settings
-        self.position_sizer = PositionSizer(app_settings.risk)
+        self.position_sizer = PositionSizer()
         self.cost_calculator = TransactionCostCalculator(app_settings.costs)
         self.context_lookback_days = context_lookback_days
         self.persist_trades = persist_trades
@@ -307,7 +189,7 @@ class StrategyBacktester:
         """
         Bar-by-bar backtest simulation.
 
-        pretrain_df (Fix 2.2): if supplied, strategy.seed_context() is called
+        pretrain_df: if supplied, strategy.seed_context() is called
         with this DataFrame BEFORE processing any bar from df_15m. Used by
         RollingWalkForwardValidator to warm-up strategy state from the full
         train window without leaking future bars.
@@ -326,7 +208,6 @@ class StrategyBacktester:
         all_trades: List[dict] = []
         db = self._get_db()
 
-        # Fix 2.2: warm-up strategy with pre-training data before the test window
         if pretrain_df is not None and not pretrain_df.empty:
             pt = pretrain_df.copy()
             if "datetime" not in pt.columns and isinstance(pt.index, pd.DatetimeIndex):
@@ -335,20 +216,13 @@ class StrategyBacktester:
             pt.sort_values("datetime", inplace=True)
             strategy.seed_context(pt)
 
-        # Fix 2.5: instantiate RiskManager as the single kill-switch authority
-        risk_manager = RiskManager(self.settings.risk, max_portfolio_daily_trades=1)
-
         for idx, (session_date, day_df) in enumerate(days):
             day_df = day_df.copy().reset_index(drop=True)
             if len(day_df) < 3:
                 continue
 
-            # Fix 2.5: reset RiskManager state for the new session
-            risk_manager.reset_daily_state(session_date)
-
             # Cross-day context from df_15m (in addition to any pretrain_df already supplied)
             if idx > 0 and pretrain_df is None:
-                # Only apply internal lookback when there's no external pretrain window.
                 start = max(0, idx - self.context_lookback_days)
                 lookback_df = pd.concat([d for _, d in days[start:idx]], ignore_index=True)
                 strategy.seed_context(lookback_df)
@@ -359,7 +233,6 @@ class StrategyBacktester:
 
             position = 0
             trade_record: Optional[dict] = None
-            daily_realized_pnl = 0.0
 
             for i in range(len(day_df)):
                 row = day_df.iloc[i]
@@ -369,10 +242,6 @@ class StrategyBacktester:
                 }
                 vwap = row["vwap"]
 
-                # Fix 2.5: delegate kill-switch check to RiskManager
-                if risk_manager.kill_switch_active:
-                    break
-
                 signal = strategy.on_candle(candle, vwap)
                 if signal is None:
                     continue
@@ -380,11 +249,7 @@ class StrategyBacktester:
                 if signal.action == SignalAction.EXIT and position != 0 and trade_record is not None:
                     self._close_position(trade_record, signal.price, signal.timestamp, signal.reason, all_trades)
                     pnl_delta = trade_record["pnl_net"]
-                    daily_realized_pnl += pnl_delta
                     current_capital += pnl_delta
-                    # Fix 2.5: update RiskManager with realized P&L
-                    risk_manager.update_pnl(realized_pnl_delta=pnl_delta, capital=current_capital)
-                    # Fix 2.4: persist trade exit to DB
                     if db:
                         self._db_persist_trade(db, trade_record, closed=True)
                     strategy.register_trade_exit()
@@ -399,16 +264,7 @@ class StrategyBacktester:
                         stop_distance=stop_distance,
                         instrument=self.instrument,
                     )
-
-                    # Fix 2.5: delegate pre-trade validation to RiskManager
-                    approved, rejection_reason = risk_manager.validate_pre_trade(
-                        symbol=self.instrument.symbol,
-                        current_time=candle["datetime"].time() if hasattr(candle["datetime"], "time") else candle["datetime"],
-                        quantity=qty,
-                        capital=current_capital,
-                        has_open_position=(position != 0),
-                    )
-                    if not approved:
+                    if qty <= 0:
                         continue
 
                     direction = "BUY" if signal.action == SignalAction.BUY else "SELL"
@@ -425,9 +281,6 @@ class StrategyBacktester:
                         "initial_target": signal.target,
                         "entry_reason": signal.reason,
                     }
-                    # Fix 2.5: record executed trade in RiskManager
-                    risk_manager.record_trade_executed(self.instrument.symbol)
-                    # Fix 2.4: persist trade entry to DB
                     if db:
                         self._db_persist_trade(db, trade_record, closed=False)
                     strategy.register_trade_entry(
@@ -441,7 +294,6 @@ class StrategyBacktester:
                 last_bar = day_df.iloc[-1]
                 self._close_position(trade_record, last_bar["close"], last_bar["datetime"], "SESSION_CLOSE", all_trades)
                 current_capital += trade_record["pnl_net"]
-                # Fix 2.4: persist session-close exit
                 if db:
                     self._db_persist_trade(db, trade_record, closed=True)
                 strategy.register_trade_exit()

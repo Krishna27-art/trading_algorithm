@@ -484,8 +484,35 @@ function KeyInsights({ candidates }) {
     (candidate) => candidate.consensus?.direction === 'DIVERGENT',
   )
 
-  // Only real LONG/SHORT consensus is eligible; NEUTRAL, DIVERGENT,
-  // UNAVAILABLE and ERROR must never be shown as "strongest consensus".
+  // Tally state counts across all strategies
+  let totalLongVotes = 0
+  let totalShortVotes = 0
+  let waitingCount = 0
+  let notApplicableCount = 0
+  let unavailableCount = 0
+  let staleCount = 0
+  let noTradeCount = 0
+  let errorCount = 0
+
+  for (const c of candidates) {
+    const preds = c.predictions || {}
+    for (const pred of Object.values(preds)) {
+      if (!pred) continue
+      const d = pred.direction
+      const s = String(pred.status || '').toUpperCase()
+      if (d === 'LONG' || d === 'BUY') totalLongVotes++
+      else if (d === 'SHORT' || d === 'SELL') totalShortVotes++
+
+      if (s === 'WAITING' || s === 'MONITORING' || s === 'BUFFER_ZONE') waitingCount++
+      else if (s === 'NOT_APPLICABLE') notApplicableCount++
+      else if (s === 'UNAVAILABLE') unavailableCount++
+      else if (s === 'STALE') staleCount++
+      else if (s === 'NO_TRADE') noTradeCount++
+      else if (s === 'ERROR') errorCount++
+    }
+  }
+
+  // Only real LONG/SHORT consensus is eligible
   const directionalCandidates = candidates.filter(
     (candidate) =>
       candidate.consensus?.direction === 'LONG' ||
@@ -518,12 +545,44 @@ function KeyInsights({ candidates }) {
     { key: 'strongest', label: 'Strongest consensus', candidate: strongest, tone: 'accent' },
   ].filter((item) => item.candidate)
 
-  if (items.length === 0 && divergent.length === 0) {
-    return null
-  }
-
   return (
     <div className="space-y-3">
+      {/* Strategy State Summary Bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+        <div className="rounded-lg border border-[var(--positive)]/30 bg-[var(--positive-dim)]/40 p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--positive)]">Long Votes</p>
+          <p className="text-sm font-bold font-num text-[var(--positive)]">{totalLongVotes}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--negative)]/30 bg-[var(--negative-dim)]/40 p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--negative)]">Short Votes</p>
+          <p className="text-sm font-bold font-num text-[var(--negative)]">{totalShortVotes}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-white/[0.02] p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--text-faint)]">No Trade</p>
+          <p className="text-sm font-bold font-num text-[var(--text-dim)]">{noTradeCount}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-dim)]/40 p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--accent)]">Waiting</p>
+          <p className="text-sm font-bold font-num text-[var(--accent)]">{waitingCount}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-white/[0.02] p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--text-faint)]">Not Applicable</p>
+          <p className="text-sm font-bold font-num text-[var(--text-faint)]">{notApplicableCount}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-dim)]/40 p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--warning)]">Unavailable</p>
+          <p className="text-sm font-bold font-num text-[var(--warning)]">{unavailableCount}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-dim)]/40 p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-[var(--warning)]">Stale</p>
+          <p className="text-sm font-bold font-num text-[var(--warning)]">{staleCount}</p>
+        </div>
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-2 text-center">
+          <p className="text-[10px] uppercase font-semibold text-red-400">Error</p>
+          <p className="text-sm font-bold font-num text-red-400">{errorCount}</p>
+        </div>
+      </div>
+
       {items.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {items.map(({ key, label, candidate, tone }) => (
@@ -965,22 +1024,26 @@ function MiniStat({ label, value, tone }) {
 }
 
 function dirTone(direction, status) {
-  if (direction === 'LONG') return 'positive'
-  if (direction === 'SHORT') return 'negative'
+  const d = String(direction || '').toUpperCase()
+  const s = String(status || '').toUpperCase()
 
-  if (
-    status === 'WAITING' ||
-    status === 'MONITORING' ||
-    status === 'BUFFER_ZONE'
-  ) {
+  if (d === 'LONG' || d === 'BUY') return 'positive'
+  if (d === 'SHORT' || d === 'SELL') return 'negative'
+
+  if (s === 'WAITING' || s === 'MONITORING' || s === 'BUFFER_ZONE') {
     return 'accent'
   }
 
-  if (
-    status === 'UNAVAILABLE' ||
-    status === 'ERROR'
-  ) {
+  if (s === 'NOT_APPLICABLE') {
+    return 'muted'
+  }
+
+  if (s === 'UNAVAILABLE' || s === 'STALE') {
     return 'warning'
+  }
+
+  if (s === 'ERROR') {
+    return 'negative'
   }
 
   return 'neutral'
@@ -1001,6 +1064,10 @@ function chipTone(tone) {
 
   if (tone === 'warning') {
     return 'text-[var(--warning)] bg-[var(--warning-dim)] border-[var(--warning)]/30'
+  }
+
+  if (tone === 'muted') {
+    return 'text-[var(--text-faint)] bg-white/[0.02] border-[var(--border)]'
   }
 
   return 'text-[var(--text-dim)] bg-white/[0.04] border-[var(--border-strong)]'

@@ -50,7 +50,6 @@ def _install_stubs():
         AppSettings,
         InstrumentConfig,
         InstrumentType,
-        RiskConfig,
         StrategyConfig,
         TransactionCostConfig,
     )
@@ -64,18 +63,17 @@ def _install_stubs():
         kite_api_key="k", kite_api_secret="x",
         active_strategy="cpr",
         base_dir=ROOT, db_path=ROOT / "nope.db",
+        initial_capital=1000000.0,
         instruments=[SimpleNamespace(
             symbol="NIFTY", exchange="NSE", lot_size=75, instrument_token=None,
-            max_risk_cap=None, instrument_type=SimpleNamespace(value="INDEX"))],
+            instrument_type=SimpleNamespace(value="INDEX"))],
         strategy=SimpleNamespace(risk_reward_ratio=2.0, breakeven_r_multiple=1.0),
-        risk=SimpleNamespace(initial_capital=100000.0),
     )
     _mod("config")
     _mod("backend.config.settings",
          settings=settings,
          InstrumentConfig=InstrumentConfig,
          StrategyConfig=StrategyConfig,
-         RiskConfig=RiskConfig,
          InstrumentType=InstrumentType,
          TransactionCostConfig=TransactionCostConfig,
          AppSettings=AppSettings)

@@ -126,6 +126,14 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
+            # Schema versioning table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Trade journal table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS trades (
@@ -156,7 +164,6 @@ class DatabaseManager:
                 notes TEXT
             );
             """)
-
 
             # Signal journal table
             cursor.execute("""
@@ -204,7 +211,23 @@ class DatabaseManager:
                 kill_switch_triggered INTEGER DEFAULT 0
             );
             """)
+
+            # Run safe migrations for existing tables
+            self._apply_migrations(cursor)
             conn.commit()
+
+    def _apply_migrations(self, cursor: sqlite3.Cursor):
+        """Applies schema migrations safely without recreating existing tables."""
+        cursor.execute("SELECT version FROM schema_migrations")
+        applied = {row[0] for row in cursor.fetchall()}
+
+        # Migration v1: ensure candle_timestamp in signal_events
+        if "v1_candle_timestamp" not in applied:
+            cursor.execute("PRAGMA table_info(signal_events)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "candle_timestamp" not in cols:
+                cursor.execute("ALTER TABLE signal_events ADD COLUMN candle_timestamp TIMESTAMP")
+            cursor.execute("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v1_candle_timestamp')")
 
     def record_trade_entry(self, trade: TradeRecord):
         with self._get_connection() as conn:

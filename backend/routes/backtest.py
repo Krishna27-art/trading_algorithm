@@ -198,7 +198,7 @@ def _run_one(key: str, inst, kite, df):
             peer_context=peer_ctx,
             app_settings=settings,
         )
-        return backtester.run(df, initial_capital=settings.risk.initial_capital)
+        return backtester.run(df, initial_capital=settings.initial_capital)
 
     from backend.backtest.strategy_backtester import StrategyBacktester
 
@@ -208,7 +208,7 @@ def _run_one(key: str, inst, kite, df):
         app_settings=settings,
         persist_trades=False,
     )
-    return backtester.run(df, initial_capital=settings.risk.initial_capital)
+    return backtester.run(df, initial_capital=settings.initial_capital)
 
 
 def _serialize_rounded(rep) -> dict:
@@ -333,8 +333,8 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
             peer_context=peer_ctx,
             app_settings=settings,
         )
-        trades = backtester.generate_trades(df, initial_capital=settings.risk.initial_capital)
-        report = PerformanceAnalyzer.generate_report(trades, initial_capital=settings.risk.initial_capital)
+        trades = backtester.generate_trades(df, initial_capital=settings.initial_capital)
+        report = PerformanceAnalyzer.generate_report(trades, initial_capital=settings.initial_capital)
 
         target_gross = sum(float(t.get("target_gross_pnl", 0)) for t in trades)
         hedge_gross = sum(float(t.get("hedge_gross_pnl", 0)) for t in trades)

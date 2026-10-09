@@ -190,33 +190,6 @@ class IntradayORBStrategy(BaseStrategy):
     def register_trade_exit(self):
         super().register_trade_exit()
 
-    def _max_allowed_risk(self, entry_price: float) -> float:
-        """
-        Return the maximum permitted stop distance.
-
-        Equities use an explicitly configured percentage-of-entry cap.
-        Futures/index instruments use the configured absolute point cap.
-        """
-        tick = max(float(self.instrument.tick_size), 1e-8)
-
-        if self.instrument.instrument_type == InstrumentType.EQUITY:
-            pct = self.instrument.equity_orb_max_risk_pct
-
-            if pct is not None and pct > 0:
-                return max(entry_price * float(pct), tick)
-
-            cap = float(self.instrument.max_risk_cap)
-            if cap > 0:
-                return max(cap, tick)
-
-            return max(entry_price * 0.015, tick)
-
-        cap = float(self.instrument.max_risk_cap)
-
-        if cap <= 0:
-            return 0.0
-
-        return max(cap, tick)
 
     def _calculate_opening_range(self) -> Optional[OpeningRange]:
         if not self.history_today:
@@ -256,18 +229,8 @@ class IntradayORBStrategy(BaseStrategy):
         if close > self.orb.high and close > float(vwap):
             stop = float(self.orb.low)
             raw_risk = close - stop
-            max_allowed_risk = self._max_allowed_risk(close)
 
-            # Do NOT shrink target-side risk while leaving the real stop far
-            # away. If the required stop distance exceeds the hard cap, skip
-            # the trade entirely.
             if raw_risk <= 0:
-                return None
-            if raw_risk > max_allowed_risk:
-                logger.info(
-                    f"[{self.symbol}] ORB LONG rejected: risk {raw_risk:.2f} "
-                    f"> allowed {max_allowed_risk:.2f}."
-                )
                 return None
 
             target = close + self.config.risk_reward_ratio * raw_risk
@@ -286,15 +249,8 @@ class IntradayORBStrategy(BaseStrategy):
         if close < self.orb.low and close < float(vwap):
             stop = float(self.orb.high)
             raw_risk = stop - close
-            max_allowed_risk = self._max_allowed_risk(close)
 
             if raw_risk <= 0:
-                return None
-            if raw_risk > max_allowed_risk:
-                logger.info(
-                    f"[{self.symbol}] ORB SHORT rejected: risk {raw_risk:.2f} "
-                    f"> allowed {max_allowed_risk:.2f}."
-                )
                 return None
 
             target = close - self.config.risk_reward_ratio * raw_risk

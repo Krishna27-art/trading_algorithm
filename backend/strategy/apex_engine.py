@@ -784,23 +784,6 @@ class ApexAivemStrategy(BaseStrategy):
     # Risk / levels
     # -----------------------------------------------------------------
 
-    def _max_allowed_stop_distance(self, entry: float) -> float:
-        entry = float(entry)
-        tick = max(float(getattr(self.instrument, "tick_size", 0.05)), 1e-8)
-
-        cap = _safe_float(getattr(self.instrument, "max_risk_cap", None))
-        if cap is not None and cap > 0:
-            return max(cap, tick)
-
-        # Conservative equity fallback if an instrument configuration did
-        # not supply a cap.
-        if self.instrument.instrument_type == InstrumentType.EQUITY:
-            pct = _safe_float(getattr(self.instrument, "equity_orb_max_risk_pct", None))
-            if pct and pct > 0:
-                return max(entry * pct, tick)
-
-        return float("inf")
-
     def _round_to_tick(self, price: float) -> float:
         tick = float(getattr(self.instrument, "tick_size", 0.05))
         if tick <= 0:
@@ -815,9 +798,6 @@ class ApexAivemStrategy(BaseStrategy):
     ) -> Optional[tuple[float, float, float]]:
         raw_risk = self.cfg.stop_atr_mult * atr
         if raw_risk <= 0:
-            return None
-
-        if raw_risk > self._max_allowed_stop_distance(entry):
             return None
 
         stop = (

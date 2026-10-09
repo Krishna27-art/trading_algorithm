@@ -17,6 +17,7 @@ Fixes vs. the previous implementation (which was duplicated in two places):
 
 import copy
 import logging
+import math
 import threading
 from datetime import timedelta
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -65,12 +66,14 @@ def _canonical_strategy(name: str) -> Optional[str]:
     return None
 
 
-def _safe_pf(pf: Optional[float]) -> Optional[float]:
+def _safe_pf(pf: Optional[float]) -> Tuple[Optional[float], str]:
     if pf is None:
-        return None
-    if pf == float("inf") or pf != pf:
-        return 99.9
-    return pf
+        return None, "UNDEFINED"
+    if pf == float("inf"):
+        return None, "INFINITE_NO_LOSSES"
+    if math.isnan(pf) or pf != pf:
+        return None, "UNDEFINED"
+    return round(float(pf), 2), "CALCULATED"
 
 
 def _make_factory(key: str, inst, kite) -> Callable[[], Any]:
@@ -108,25 +111,41 @@ def _make_factory(key: str, inst, kite) -> Callable[[], Any]:
     raise HTTPException(status_code=400, detail=f"Unknown strategy '{key}'.")
 
 
-def _resolve_instrument(symbol: str, kite):
-    """Returns (instrument_config, token_or_None). Never fabricates a token."""
-    from backend.config.settings import settings
+def _resolve_instrument(symbol: str, kite, instrument_type: Optional[str] = None):
+    from backend.config.settings import InstrumentType, settings
     from backend.config.universe import create_instrument_config_for_equity, resolve_universe_tokens
     from backend.data.instrument_resolver import instrument_resolver
 
-    if symbol and symbol != "NIFTY":
-        token = instrument_resolver.resolve_token(symbol, exchange="NSE", kite_client=kite)
+    clean_sym = (symbol or "NIFTY").strip().upper()
+    if clean_sym not in ("NIFTY", "NIFTY 50", "BANKNIFTY"):
+        token = instrument_resolver.resolve_token(clean_sym, exchange="NSE", kite_client=kite)
         if not token:
-            token = resolve_universe_tokens().get(symbol)
-        inst = create_instrument_config_for_equity(symbol, token)
+            token = resolve_universe_tokens().get(clean_sym)
+        inst = create_instrument_config_for_equity(clean_sym, token)
         return inst, token or None
 
-    inst = copy.deepcopy(settings.instruments[0])  # never mutate shared settings
-    token = instrument_resolver.resolve_token("NIFTY", exchange="NSE", kite_client=kite)
+    if instrument_type == "FUTURES":
+        fut = instrument_resolver.find_nearest_single_stock_future(clean_sym, kite_client=kite)
+        if fut is not None:
+            lot = instrument_resolver.resolve_lot_size(clean_sym, exchange="NFO", instrument_type="FUT", kite_client=kite) or 75
+            inst = copy.deepcopy(settings.instruments[0])
+            inst.symbol = fut["tradingsymbol"]
+            inst.exchange = "NFO"
+            inst.instrument_type = InstrumentType.FUTURES
+            inst.lot_size = lot
+            inst.instrument_token = fut["instrument_token"]
+            return inst, fut["instrument_token"]
+
+    inst = copy.deepcopy(settings.instruments[0])
+    inst.symbol = clean_sym
+    inst.exchange = "NSE"
+    inst.instrument_type = InstrumentType.INDEX
+    inst.lot_size = 1
+    token = instrument_resolver.resolve_token(clean_sym, exchange="NSE", kite_client=kite)
     if token is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="NIFTY instrument token unavailable from Kite.",
+            detail=f"{clean_sym} instrument token unavailable from Kite.",
         )
     inst.instrument_token = token
     return inst, token
@@ -212,7 +231,7 @@ def _run_one(key: str, inst, kite, df):
 
 
 def _serialize_rounded(rep) -> dict:
-    pf = _safe_pf(rep.profit_factor)
+    pf_val, pf_status = _safe_pf(rep.profit_factor)
     return {
         "total_trades": rep.total_trades,
         "long_trades": rep.long_trades,
@@ -223,7 +242,8 @@ def _serialize_rounded(rep) -> dict:
         "gross_pnl": round(rep.gross_pnl, 2),
         "total_transaction_costs": round(rep.total_transaction_costs, 2),
         "net_pnl": round(rep.net_pnl, 2),
-        "profit_factor": round(pf, 2) if pf is not None else 0.0,
+        "profit_factor": pf_val,
+        "profit_factor_status": pf_status,
         "sharpe_ratio": round(rep.sharpe_ratio, 2),
         "cagr_pct": round(rep.cagr_pct, 1),
         "max_drawdown_pct": round(rep.max_drawdown_pct, 1),
@@ -251,17 +271,19 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
     for key in RESEARCH_STRATEGIES:
         rep = reports[key]
         name, aliases = STRATEGIES[key]
-        pf = _safe_pf(rep.profit_factor)
+        pf_val, pf_status = _safe_pf(rep.profit_factor)
         comparison.append({
             "strategy": name,
             "strategy_id": key,
             "trades": rep.total_trades,
             "win_rate": round(rep.win_rate_pct, 1),
-            "profit_factor": round(pf, 2) if pf is not None else 0.0,
+            "profit_factor": pf_val,
+            "profit_factor_status": pf_status,
             "sharpe": round(rep.sharpe_ratio, 2),
             "max_drawdown": round(rep.max_drawdown_pct, 1),
             "net_pnl": round(rep.net_pnl, 2),
             "state": "ACTIVE" if active == key or active in aliases else "STANDBY",
+            "execution_note": "REGIME_ONLY: Order book depth absent" if key == "ssf_l5_srm" else None,
         })
 
     return {

@@ -135,7 +135,26 @@ class PairBacktester:
         initial_capital: float = 1000000.0,
     ) -> PerformanceReport:
         trades = self.generate_trades(df_15m, initial_capital=initial_capital)
-        return PerformanceAnalyzer.generate_report(trades, initial_capital=initial_capital)
+        backtest_start_date = None
+        backtest_end_date = None
+        all_trading_dates = None
+        if df_15m is not None and not df_15m.empty:
+            if "datetime" in df_15m.columns:
+                dts = pd.to_datetime(df_15m["datetime"])
+                backtest_start_date = dts.min()
+                backtest_end_date = dts.max()
+                all_trading_dates = sorted(dts.dt.date.unique().tolist())
+            elif isinstance(df_15m.index, pd.DatetimeIndex):
+                backtest_start_date = df_15m.index.min()
+                backtest_end_date = df_15m.index.max()
+                all_trading_dates = sorted(df_15m.index.date.unique().tolist())
+        return PerformanceAnalyzer.generate_report(
+            trades,
+            initial_capital=initial_capital,
+            backtest_start_date=backtest_start_date,
+            backtest_end_date=backtest_end_date,
+            all_trading_dates=all_trading_dates,
+        )
 
     def generate_trades(
         self,

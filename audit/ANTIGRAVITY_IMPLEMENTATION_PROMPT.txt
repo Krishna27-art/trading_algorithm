@@ -1,0 +1,38 @@
+TASK: Implement the repairs specified in FILE_BY_FILE_FIX_INSTRUCTIONS.md for repository Krishna27-art/trading_algorithm.
+
+MANDATORY FIRST STEPS
+1. Read the entire fix-instructions report.
+2. Inspect the actual current working tree and current Git commit. The report's line numbers refer to commit c6a2a58a1937c97ed711ff259f97421b1170d977 and may have shifted. Search for the named functions; never blindly edit by old line number.
+3. Produce a concise plan grouped into MODIFY / DELETE / CREATE, then implement in priority order. Do not stop after reporting issues.
+
+NON-NEGOTIABLE PROJECT RULES
+- This is a real-market-data, signal-only system. User executes manually.
+- Do not add order placement, modification, cancellation, GTT, paper trading, simulated market feeds, synthetic price/volume/depth, fake tokens, proxy stocks or fabricated indicators.
+- If required data is missing, stale, malformed, mismatched or unverified, fail closed with UNAVAILABLE/degraded/no-signal. Never manufacture a substitute.
+- Do not reintroduce the removed live risk module or live risk-control architecture. RT-26 concerns offline backtest semantics only.
+- Do not create extra .md reports, summaries, or audit files in the repository. Modify only relevant existing source/config/test files; updating the existing README.md is allowed only for RT-18.
+- Do not change unrelated strategies or add a competing signal pipeline.
+- Never run tests that can stop the user's real Kite stream or delete/alter their configured token, database, or live cache. Mock side effects and use temporary test paths.
+
+IMPLEMENTATION REQUIREMENTS
+- For each RT ID, follow its exact MODIFY / DELETE / CREATE / test instructions and acceptance condition.
+- Prefer minimal changes in the canonical data flow. Check every caller before removing a helper or argument.
+- Before modifying tracked DB/cache artifacts, preserve local user data; untrack rather than delete local runtime files blindly.
+- Never expose secrets in browser assets, logs, test output, or generated files.
+- Do not invent source code when an existing helper or model can be safely reused.
+
+VALIDATION
+1. Run relevant focused tests for each repaired area.
+2. Run the full test suite and frontend build only when dependencies/environment are available and the tests are isolated from real sessions.
+3. State exact test commands and outcomes; do not claim tests passed if they were not run.
+4. Review git diff and confirm no order execution, synthetic production fallback, secrets, unintended DB/cache deletion, or unrelated edits were introduced.
+
+FINAL RESPONSE FORMAT
+For each RT ID:
+- Status: FIXED / PARTIALLY FIXED / NOT FIXED
+- Files and exact lines changed
+- What changed and why
+- Tests run and actual results
+- Remaining blockers
+
+Finish with a list of all files modified, deleted, and created. If any finding cannot be safely fixed, explain the specific blocker and leave the relevant code fail-closed; do not hide or silently skip it.

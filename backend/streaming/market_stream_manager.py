@@ -154,6 +154,7 @@ class MarketStreamManager:
 
         self.kws: Optional[Any] = None
         self.aggregator: Optional[MultiSymbolCandleAggregator] = None
+        self.index_aggregator: Optional[MultiSymbolCandleAggregator] = None
         self.volume_profile_engine: VolumeProfileEngine = VolumeProfileEngine()
 
         self.futures_token_to_symbol: Dict[int, str] = {}
@@ -228,6 +229,7 @@ class MarketStreamManager:
         self._book_queue = queue.Queue(maxsize=L5_QUEUE_SIZE)
         self._book_lock = threading.Lock()
         self._pending_book_snapshots: Dict[str, Tuple[int, Any]] = {}
+        self._dirty_book_symbols: Set[str] = set()
         self._book_worker_started = False
         self._book_worker_thread: Optional[threading.Thread] = None
 
@@ -236,6 +238,7 @@ class MarketStreamManager:
         self._flush_worker_started = False
         self._flush_worker_thread: Optional[threading.Thread] = None
         self._process_lock_fd: Optional[int] = None
+        self._stop_event = threading.Event()
 
     def _acquire_process_stream_lock(self) -> None:
         if self._process_lock_fd is not None:
@@ -286,6 +289,7 @@ class MarketStreamManager:
         return max(1, min(value, MAX_EVALUATION_WORKERS))
 
     def _ensure_background_workers_started(self) -> None:
+        self._stop_event.clear()
         if not self._evaluation_workers_started:
             self._evaluation_workers_started = True
             for index in range(self._evaluation_worker_count):
@@ -325,8 +329,9 @@ class MarketStreamManager:
             self._flush_worker_thread.start()
 
     def _flush_worker_loop(self) -> None:
-        while True:
-            _time.sleep(1.0)
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(timeout=1.0):
+                break
             agg = self.aggregator
             if agg is not None:
                 try:
@@ -334,6 +339,15 @@ class MarketStreamManager:
                 except Exception:
                     logger.debug(
                         "[MarketStreamManager] Periodic candle flush error",
+                        exc_info=True,
+                    )
+            idx_agg = self.index_aggregator
+            if idx_agg is not None:
+                try:
+                    idx_agg.flush_due_candles()
+                except Exception:
+                    logger.debug(
+                        "[MarketStreamManager] Periodic index candle flush error",
                         exc_info=True,
                     )
 
@@ -445,6 +459,12 @@ class MarketStreamManager:
             if generation != self._stream_generation:
                 return None
             with self._history_lock:
+                current = self._history_state.get(symbol)
+                if current == HistoryState.HISTORY_READY and state in (
+                    HistoryState.HISTORY_LOADING,
+                    HistoryState.HISTORY_FAILED,
+                ):
+                    return current
                 final_state = state
                 if (
                     state == HistoryState.HISTORY_READY
@@ -734,11 +754,20 @@ class MarketStreamManager:
                 _time.sleep(HISTORY_WARMUP_RETRY_DELAY_SECONDS)
 
     def _book_worker_loop(self) -> None:
-        while True:
-            symbol = self._book_queue.get()
+        while not self._stop_event.is_set():
+            try:
+                symbol = self._book_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
             try:
                 with self._book_lock:
                     entry = self._pending_book_snapshots.pop(symbol, None)
+                    if self._dirty_book_symbols:
+                        next_sym = self._dirty_book_symbols.pop()
+                        try:
+                            self._book_queue.put_nowait(next_sym)
+                        except queue.Full:
+                            self._dirty_book_symbols.add(next_sym)
 
                 if entry is not None:
                     entry_generation, snapshot = entry
@@ -756,6 +785,7 @@ class MarketStreamManager:
     def _drain_book_state(self) -> None:
         with self._book_lock:
             self._pending_book_snapshots.clear()
+            self._dirty_book_symbols.clear()
 
     def _seed_ssf_history_background(
         self,
@@ -816,8 +846,11 @@ class MarketStreamManager:
             return True
 
     def _history_refresh_worker_loop(self) -> None:
-        while True:
-            item = self._history_refresh_queue.get()
+        while not self._stop_event.is_set():
+            try:
+                item = self._history_refresh_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
 
             generation = None
             symbol = None
@@ -999,8 +1032,11 @@ class MarketStreamManager:
                 self._evaluation_inflight = max(0, self._evaluation_inflight - 1)
 
     def _evaluation_worker_loop(self) -> None:
-        while True:
-            symbol = self._evaluation_queue.get()
+        while not self._stop_event.is_set():
+            try:
+                symbol = self._evaluation_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
 
             try:
                 with self._evaluation_queue_lock:
@@ -1067,19 +1103,6 @@ class MarketStreamManager:
         if timeframe_minutes <= 0:
             raise ValueError("timeframe_minutes must be > 0")
 
-        with self._lock:
-            if self.kws is not None:
-                self._stop_internal()
-
-            self._acquire_process_stream_lock()
-            self._stream_generation += 1
-            generation = self._stream_generation
-
-            self._first_observed_candle.clear()
-            self._drain_evaluation_queue()
-            self._drain_history_refresh_queue()
-            self._drain_book_state()
-
         if kite_client is None:
             kite_client = get_active_kite()
 
@@ -1090,6 +1113,26 @@ class MarketStreamManager:
                     "No active Zerodha Kite client available. "
                     "Please authenticate via Kite Connect."
                 )
+            raise RuntimeError(self.last_error)
+
+        session = get_saved_session()
+
+        if not session:
+            with self._lock:
+                self.state = StreamState.ERROR
+                self.last_error = (
+                    "No active Zerodha Kite session found. "
+                    "Please authenticate via Kite login."
+                )
+            raise RuntimeError(self.last_error)
+
+        api_key = session.get("api_key")
+        access_token = session.get("access_token")
+
+        if not api_key or not access_token:
+            with self._lock:
+                self.state = StreamState.ERROR
+                self.last_error = "Invalid session credentials."
             raise RuntimeError(self.last_error)
 
         if not token_to_symbol:
@@ -1163,26 +1206,42 @@ class MarketStreamManager:
                 )
             raise ValueError(self.last_error)
 
-        session = get_saved_session()
+        with self._lock:
+            if self.kws is not None:
+                self._stop_internal()
 
-        if not session:
+            self._acquire_process_stream_lock()
+            self._stream_generation += 1
+            generation = self._stream_generation
+
+            self._first_observed_candle.clear()
+            self._drain_evaluation_queue()
+            self._drain_history_refresh_queue()
+            self._drain_book_state()
+
+        try:
+            return self._start_stream_impl(
+                token_to_symbol=token_to_symbol,
+                kite_client=kite_client,
+                timeframe_minutes=timeframe_minutes,
+                generation=generation,
+                api_key=api_key,
+                access_token=access_token,
+            )
+        except Exception:
             with self._lock:
-                self.state = StreamState.ERROR
-                self.last_error = (
-                    "No active Zerodha Kite session found. "
-                    "Please authenticate via Kite login."
-                )
-            raise RuntimeError(self.last_error)
+                self._stop_internal()
+            raise
 
-        api_key = session.get("api_key")
-        access_token = session.get("access_token")
-
-        if not api_key or not access_token:
-            with self._lock:
-                self.state = StreamState.ERROR
-                self.last_error = "Invalid session credentials."
-            raise RuntimeError(self.last_error)
-
+    def _start_stream_impl(
+        self,
+        token_to_symbol: Dict[int, str],
+        kite_client: Any,
+        timeframe_minutes: int,
+        generation: int,
+        api_key: str,
+        access_token: str,
+    ) -> Dict[str, Any]:
         resolved_token_to_symbol = dict(token_to_symbol)
         resolved_symbol_to_token = {
             sym: tok for tok, sym in resolved_token_to_symbol.items()
@@ -1451,6 +1510,15 @@ class MarketStreamManager:
             on_book_update=_on_book_update,
         )
 
+        index_aggregator = None
+        if resolved_index_token_to_symbol:
+            index_aggregator = MultiSymbolCandleAggregator(
+                token_to_symbol_map=resolved_index_token_to_symbol,
+                timeframe_minutes=timeframe_minutes,
+                on_candle_close=_on_candle_close,
+                require_vwap_for_callback=False,
+            )
+
         try:
             from kiteconnect import KiteTicker
         except ImportError:
@@ -1480,6 +1548,7 @@ class MarketStreamManager:
                 self._ticks_received_count += len(tick_batch)
 
             cash_ticks: List[dict] = []
+            index_ticks: List[dict] = []
             accepted_tick_count = 0
             latest_exchange_timestamp = None
             latest_equity_timestamp = None
@@ -1543,6 +1612,7 @@ class MarketStreamManager:
                         or exchange_timestamp > latest_exchange_timestamp
                     ):
                         latest_exchange_timestamp = exchange_timestamp
+                    index_ticks.append(tick)
                     continue
 
                 sym = resolved_token_to_symbol.get(tok)
@@ -1685,6 +1755,15 @@ class MarketStreamManager:
                         "[MarketStreamManager] Error processing cash ticks in CandleAggregator"
                     )
 
+            if index_ticks and index_aggregator is not None:
+                if callback_generation == self._stream_generation:
+                    try:
+                        index_aggregator.process_ticks(index_ticks)
+                    except Exception:
+                        logger.exception(
+                            "[MarketStreamManager] Error processing index ticks in IndexCandleAggregator"
+                        )
+
             with self._lock:
                 if callback_generation != self._stream_generation:
                     return
@@ -1737,6 +1816,14 @@ class MarketStreamManager:
                     logger.exception(
                         "[MarketStreamManager] Error recovering aggregator state after connection gap."
                     )
+
+                if index_aggregator is not None:
+                    try:
+                        index_aggregator.handle_connection_gap()
+                    except Exception:
+                        logger.exception(
+                            "[MarketStreamManager] Error recovering index aggregator state after connection gap."
+                        )
 
                 try:
                     self.volume_profile_engine.handle_connection_gap()
@@ -1858,6 +1945,7 @@ class MarketStreamManager:
             self.state = StreamState.CONNECTING
             self.last_error = None
             self.aggregator = aggregator
+            self.index_aggregator = index_aggregator
             self.kws = kws
 
             with self._history_lock:
@@ -1923,6 +2011,28 @@ class MarketStreamManager:
         self._drain_history_refresh_queue()
         self._drain_book_state()
 
+        self._stop_event.set()
+        for t in self._evaluation_worker_threads:
+            if t.is_alive():
+                t.join(timeout=0.5)
+        self._evaluation_worker_threads.clear()
+        self._evaluation_workers_started = False
+
+        if self._history_refresh_thread and self._history_refresh_thread.is_alive():
+            self._history_refresh_thread.join(timeout=0.5)
+        self._history_refresh_thread = None
+        self._history_refresh_worker_started = False
+
+        if self._book_worker_thread and self._book_worker_thread.is_alive():
+            self._book_worker_thread.join(timeout=0.5)
+        self._book_worker_thread = None
+        self._book_worker_started = False
+
+        if self._flush_worker_thread and self._flush_worker_thread.is_alive():
+            self._flush_worker_thread.join(timeout=0.5)
+        self._flush_worker_thread = None
+        self._flush_worker_started = False
+
         if self.kws is not None:
             try:
                 self.kws.close()
@@ -1981,6 +2091,7 @@ class MarketStreamManager:
         self.symbol_to_token.clear()
         self.subscribed_token_count = 0
         self.aggregator = None
+        self.index_aggregator = None
 
         self.state = StreamState.STOPPED
         self.last_disconnect_time = now_ist()
@@ -2018,9 +2129,8 @@ class MarketStreamManager:
             if self.last_tick_time is not None:
                 aware_last_tick = to_ist_aware(self.last_tick_time)
                 if aware_last_tick is not None:
-                    last_tick_age_seconds = max(
-                        0.0,
-                        (now_ist() - aware_last_tick).total_seconds(),
+                    last_tick_age_seconds = (
+                        (now_ist() - aware_last_tick).total_seconds()
                     )
 
             last_equity_tick_age_seconds = None
@@ -2028,9 +2138,8 @@ class MarketStreamManager:
             if self.last_equity_tick_time is not None:
                 aware_last_equity = to_ist_aware(self.last_equity_tick_time)
                 if aware_last_equity is not None:
-                    last_equity_tick_age_seconds = max(
-                        0.0,
-                        (now_ist() - aware_last_equity).total_seconds(),
+                    last_equity_tick_age_seconds = (
+                        (now_ist() - aware_last_equity).total_seconds()
                     )
 
             with self._history_lock:

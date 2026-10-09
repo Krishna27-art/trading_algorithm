@@ -234,8 +234,8 @@ export default function LiveSignalsPage({ isAuthenticated }) {
     setStreamError(null)
 
     try {
-      await apiPost('/api/stream/start', {}, { requireSecret: true })
-      setStreamAction('started')
+      const startRes = await apiPost('/api/stream/start', {}, { requireSecret: true })
+      setStreamAction(startRes?.state === 'CONNECTED' ? 'connected' : 'connecting')
       await status.refresh()
     } catch (error) {
       setStreamAction('error')
@@ -262,7 +262,8 @@ export default function LiveSignalsPage({ isAuthenticated }) {
   const isConnecting =
     streamState === 'CONNECTING' ||
     streamState === 'RECONNECTING' ||
-    streamAction === 'starting'
+    streamAction === 'starting' ||
+    streamAction === 'connecting'
 
   const secretError =
     isAuthenticated && !hasSharedSecret()

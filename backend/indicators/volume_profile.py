@@ -85,6 +85,7 @@ class SingleStockVolumeProfile:
         self.profile: Dict[float, int] = {}
         self.total_observed_volume: int = 0
         self.last_cumulative_volume: Optional[int] = None
+        self.first_tick_time: Optional[datetime] = None
         self.last_trade_time: Optional[datetime] = None
         self.status: str = "INITIALIZING"
         self.gap_detected: bool = False
@@ -116,6 +117,8 @@ class SingleStockVolumeProfile:
         if cum_vol < 0:
             return False
 
+        if self.first_tick_time is None:
+            self.first_tick_time = timestamp
         if self.last_cumulative_volume is None:
             self.last_cumulative_volume = cum_vol
             self.last_trade_time = timestamp
@@ -248,13 +251,23 @@ class SingleStockVolumeProfile:
             {"price": p, "volume": v}
             for p, v in sorted(self.profile.items())
         ]
+        is_complete = (
+            not self.gap_detected
+            and self.total_observed_volume > 0
+            and self.first_tick_time is not None
+            and self.first_tick_time.time() <= time(9, 16)
+            and self.last_trade_time is not None
+            and self.last_trade_time.time() >= time(15, 29)
+        )
         return {
             "symbol": self.symbol,
             "instrument_token": self.instrument_token,
             "exchange": "NSE",
             "trading_date": self.session_date.isoformat(),
+            "first_tick_time": self.first_tick_time.isoformat() if self.first_tick_time else None,
+            "last_trade_time": self.last_trade_time.isoformat() if self.last_trade_time else None,
             "tick_size": self.tick_size,
-            "status": "COMPLETE" if not self.gap_detected and self.total_observed_volume > 0 else self.status,
+            "status": "COMPLETE" if is_complete else self.status,
             "source": "KITE_WEBSOCKET_OBSERVED",
             "profile_method": "OBSERVED_TICK_INCREMENTAL",
             "total_observed_volume": self.total_observed_volume,
@@ -336,12 +349,19 @@ class VolumeProfileEngine:
         timestamp: datetime,
     ) -> bool:
         sym = symbol.strip().upper()
+        tick_date = timestamp.date()
         profile = self.profiles.get(sym)
+        if profile is not None and profile.session_date != tick_date:
+            if profile.total_observed_volume > 0:
+                self.save_session_profiles()
+            profile = None
         if profile is None:
+            ts = self.get_tick_size(sym)
             profile = self.register_instrument(
                 symbol=sym,
                 instrument_token=instrument_token,
-                session_date=timestamp.date(),
+                session_date=tick_date,
+                tick_size=ts,
             )
         return profile.process_tick(
             price=price,
@@ -526,12 +546,15 @@ class VolumeProfileEngine:
 
         total_vol = int(data.get("total_observed_volume", 0))
         tick_sz = float(data.get("tick_size", self.get_tick_size(sym)))
+        st = str(data.get("status", "UNAVAILABLE"))
+        gap = bool(data.get("gap_detected", False))
+        is_allowed = (st == "COMPLETE" and not gap)
 
         facts = VolumeProfileFacts(
             symbol=sym,
             instrument_token=instrument_token,
             session_date=prev_session,
-            status=data.get("status", "COMPLETE"),
+            status=st,
             source=data.get("source", "KITE_WEBSOCKET_OBSERVED"),
             profile_method=data.get("profile_method", "OBSERVED_TICK_INCREMENTAL"),
             tick_size=tick_sz,
@@ -539,7 +562,7 @@ class VolumeProfileEngine:
             poc=f_poc,
             vah=f_vah,
             val=f_val,
-            is_vp_allowed=True,
+            is_vp_allowed=is_allowed,
         )
         self.previous_profiles[sym] = facts
         return facts

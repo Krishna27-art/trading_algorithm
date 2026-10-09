@@ -11,10 +11,7 @@ export class ApiError extends Error {
   }
 }
 
-// Shared secret required by the backend for sensitive actions
-// (logout, stream start/stop). Kept in session memory / sessionStorage.
-const envSecret = typeof import.meta !== 'undefined' && import.meta.env ? (import.meta.env.VITE_APP_SHARED_SECRET || null) : null
-let sharedSecret = typeof window !== 'undefined' ? (sessionStorage.getItem('app_shared_secret') || envSecret) : envSecret
+let sharedSecret = typeof window !== 'undefined' ? sessionStorage.getItem('app_shared_secret') : null
 
 export function setSharedSecret(value) {
   sharedSecret = value || null

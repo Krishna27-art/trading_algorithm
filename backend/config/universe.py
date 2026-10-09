@@ -43,6 +43,9 @@ def get_universe(
         except Exception as e:
             logger.warning(f"Failed to read membership history from {csv_path}: {e}")
 
+    if as_of is not None and as_of < date.today():
+        raise ValueError(f"Historical universe membership unavailable for as_of={as_of}")
+
     fallback = sorted(r.symbol for r in StockUniverse().large_cap_100)
     return fallback
 

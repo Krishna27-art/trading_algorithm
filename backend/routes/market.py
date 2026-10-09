@@ -136,6 +136,13 @@ def get_market_prices() -> Dict[str, Any]:
         # resolution failed, fail clearly for this symbol instead of
         # silently substituting a different mapping.
         token = token_map.get(sym)
+        if token is None and isinstance(q_data, dict) and q_data.get("instrument_token") is not None:
+            try:
+                tok_val = int(q_data["instrument_token"])
+                if tok_val > 0:
+                    token = tok_val
+            except (TypeError, ValueError):
+                token = None
         if token is None:
             reason = failed_symbols.get(
                 sym, "instrument token not resolved via authoritative universe mapping"

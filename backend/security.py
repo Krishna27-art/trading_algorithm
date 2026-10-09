@@ -16,10 +16,15 @@ from backend.config.settings import settings
 def verify_shared_secret(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Secret")):
     """Validates presence and correctness of shared secret token for sensitive actions."""
     expected_secret = settings.app_shared_secret
-    if not expected_secret:
+    if not expected_secret or expected_secret.strip() in {
+        "CHANGE_ME_GENERATE_A_REAL_SECRET",
+        "changeme",
+        "secret",
+        "your_secret_here",
+    }:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Server misconfigured: APP_SHARED_SECRET not set in .env",
+            detail="Server misconfigured: Insecure or placeholder APP_SHARED_SECRET.",
         )
     # hmac.compare_digest() raises TypeError on non-ASCII *str* input, which
     # turned a malformed header into an HTTP 500. Compare as UTF-8 bytes.

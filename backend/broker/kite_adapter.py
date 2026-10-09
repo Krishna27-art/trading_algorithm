@@ -383,6 +383,9 @@ def clear_session() -> None:
         _cached_kite = None
         kite_broker_adapter.disconnect()
 
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
     token_file = settings.token_file
 
     if not token_file.exists():

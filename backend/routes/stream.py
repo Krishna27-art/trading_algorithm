@@ -111,8 +111,10 @@ def start_stream() -> Dict[str, Any]:
     """Start the KiteTicker stream with authoritative universe tokens."""
     try:
         result = market_stream_manager.start_stream(token_to_symbol=None)
+        state_val = str(result.get("state") or result.get("status") or "CONNECTING")
         return {
-            "status": "started",
+            "status": state_val,
+            "state": state_val,
             "subscribed_tokens": result.get("subscribed_tokens", 0),
             "symbols_count": result.get("symbols_count", 0),
         }

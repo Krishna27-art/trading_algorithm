@@ -489,12 +489,16 @@ class StockUniverseScanner:
             return None
 
         try:
-            df, _ = (
+            df, meta = (
                 HistoricalDataLoader
                 .load_cached_data_with_validation(
                     cache_path
                 )
             )
+
+            if meta is not None and meta.get("symbol"):
+                if str(meta.get("symbol", "")).strip().upper() != str(symbol).strip().upper():
+                    return None
 
             if df is None or df.empty:
                 return None

@@ -939,7 +939,7 @@ class PredictionService:
         """WAITING (never a guess) when required prior-session history is not usable."""
         if len(prep.days) < 2:
             return SingleStrategyPrediction(
-                STATE_WAITING,
+                STATE_UNAVAILABLE,
                 reason=f"Historical warmup incomplete: {what} requires prior-session history.",
             )
         if full_history and not prep.warmup_complete:

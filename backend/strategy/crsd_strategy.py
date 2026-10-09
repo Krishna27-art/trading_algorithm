@@ -305,6 +305,7 @@ def build_crsd_context(
             from backend.data.historical_loader import (
                 HistoricalDataLoader,
             )
+            from backend.data.time_utils import now_ist_naive
 
             latest_required_timestamp = (
                 HistoricalDataLoader

@@ -154,10 +154,9 @@ class MarketCalendar:
     def is_trading_day(d: date) -> bool:
         if d.weekday() >= 5:
             return False
-        year_holidays = HOLIDAYS_BY_YEAR.get(d.year)
-        if year_holidays is not None:
-            return d not in year_holidays
-        return True
+        if d.year not in HOLIDAYS_BY_YEAR:
+            raise ValueError(f"CALENDAR_UNAVAILABLE: No verified trading calendar coverage for year {d.year}")
+        return d not in HOLIDAYS_BY_YEAR[d.year]
 
     @staticmethod
     def is_blackout_date(d: date) -> bool:

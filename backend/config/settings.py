@@ -17,6 +17,7 @@ DEFAULT_NIFTY_LOT_SIZE: int = 75
 class InstrumentType(str, Enum):
     FUTURES = "FUTURES"
     EQUITY = "EQUITY"
+    INDEX = "INDEX"
 
 
 class InstrumentConfig(BaseModel):

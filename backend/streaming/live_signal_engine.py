@@ -374,14 +374,22 @@ class LiveSignalEngine:
         if isinstance(predictions, dict):
             updated: Dict[str, Any] = {}
             for key, value in predictions.items():
-                if isinstance(value, dict) and "data_freshness" in value:
+                if isinstance(value, dict):
                     value = dict(value)
-                    value["data_freshness"] = self._refresh_freshness_block(
-                        value.get("data_freshness"),
-                        as_of,
-                    )
+                    if "data_freshness" in value:
+                        fb = self._refresh_freshness_block(value.get("data_freshness"), as_of)
+                        value["data_freshness"] = fb
+                        value["freshness"] = fb
+                        if fb.get("status") != "FRESH":
+                            value["status"] = "UNAVAILABLE"
+                            value["direction"] = None
+                            value["entry"] = None
+                            value["stop_loss"] = None
+                            value["target"] = None
+                            value["reason"] = f"Stale strategy result withheld: {fb.get('status')}"
                 updated[key] = value
             refreshed["predictions"] = updated
+            refreshed["consensus"] = prediction_service.calculate_consensus(updated)
         return refreshed
 
     @staticmethod

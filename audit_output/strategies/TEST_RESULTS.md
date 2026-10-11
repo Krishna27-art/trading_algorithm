@@ -24,7 +24,9 @@ File: tests/test_strategy_timing_regressions.py
 2. Checks Sector Impulse maps a 09:30 candle-open timestamp to 09:45 completion time.
 3. Checks CRSD maps a 09:30 candle-open timestamp to 09:45 completion time.
 4. Checks a missing SSF persistent runtime returns UNAVAILABLE without creating a fresh instance.
-5. Checks an identical BookSnapshot is ignored while changed contents with the same timestamp are processed.
+5. Confirms Sector Impulse peer-context feature lookup still receives the raw candle-open timestamp.
+6. Confirms CRSD peer-context ingestion still receives the raw candle-open timestamp.
+7. Checks an identical BookSnapshot is ignored while changed contents with the same timestamp are processed.
 
 These are regression-test definitions only. They are not passing test results until executed in the repository environment.
 

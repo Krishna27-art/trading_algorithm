@@ -2561,13 +2561,6 @@ class PredictionService:
         # report a misleading "no trade" instead of "cannot evaluate".
         strategy = ssf_strategy
         if strategy is None:
-            try:
-                from backend.strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
-                strategy = SsfL5SrmStrategy(inst, self.settings.strategy, signal_only=True)
-            except Exception:
-                strategy = None
-
-        if strategy is None:
             return SingleStrategyPrediction(
                 STATE_UNAVAILABLE,
                 reason="SSF-L5-SRM requires its persistent runtime from the stream manager; none was supplied.",

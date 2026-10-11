@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,61 @@ def test_crsd_candle_open_maps_to_completion_time():
     assert strategy._event_timestamp(datetime(2025, 1, 6, 9, 30)) == datetime(
         2025, 1, 6, 9, 45
     )
+
+
+
+def test_sector_impulse_uses_raw_open_time_for_context_lookup(monkeypatch):
+    strategy = SectorImpulseStrategy(
+        _instrument(),
+        StrategyConfig(candle_timeframe_minutes=15),
+        ctx=None,
+    )
+    strategy.current_date = date(2025, 1, 6)
+    strategy.model = {}
+    observed = []
+    monkeypatch.setattr(
+        strategy,
+        "_features",
+        lambda candle: observed.append(candle["datetime"]) or None,
+    )
+    candle = {
+        "datetime": datetime(2025, 1, 6, 9, 30),
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 1000,
+    }
+
+    assert strategy.on_candle(candle, vwap=100.0) is None
+    assert observed == [datetime(2025, 1, 6, 9, 30)]
+
+
+def test_crsd_uses_raw_open_time_for_peer_context_lookup(monkeypatch):
+    strategy = CRSDStrategy(
+        _instrument(),
+        StrategyConfig(candle_timeframe_minutes=15),
+        ctx=None,
+    )
+    strategy.current_date = date(2025, 1, 6)
+    strategy.model = {}
+    observed = []
+    monkeypatch.setattr(
+        strategy,
+        "_ingest",
+        lambda candle: observed.append(candle["datetime"]) or None,
+    )
+    candle = {
+        "datetime": datetime(2025, 1, 6, 9, 30),
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 1000,
+    }
+
+    assert strategy.on_candle(candle, vwap=100.0) is None
+    assert observed == [datetime(2025, 1, 6, 9, 30)]
 
 
 def test_ssf_missing_persistent_runtime_returns_unavailable(monkeypatch):

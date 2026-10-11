@@ -22,7 +22,9 @@ File: tests/test_strategy_timing_regressions.py
 2. Sector Impulse completion timestamp conversion.
 3. CRSD completion timestamp conversion.
 4. Missing SSF persistent runtime returns UNAVAILABLE.
-5. An identical SSF snapshot is ignored, but changed same-timestamp depth is consumed.
+5. Sector Impulse continues to use the raw candle-open time for peer-context lookup.
+6. CRSD continues to use the raw candle-open time for peer-context lookup.
+7. An identical SSF snapshot is ignored, but changed same-timestamp depth is consumed.
 
 **Execution status:** Tests were added remotely but have not been run in this environment. No passing status is claimed. The existing suite, Python compile/import checks, live Kite test and historical performance test remain unexecuted.
 

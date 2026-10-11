@@ -308,6 +308,12 @@ class SsfL5SrmStrategy(BaseStrategy):
 
     # --------------------------------------------------------------- signals
     def on_book_update(self, s: BookSnapshot) -> Optional[StrategySignal]:
+        # The live candle evaluator may revisit the last book snapshot after
+        # the L5 worker has already consumed it. Skip only exact repeats:
+        # multiple genuine depth updates can share a coarse exchange timestamp.
+        if self._prev is not None and s == self._prev:
+            return None
+
         f = self._features(s)
         self._prev = s
         if f is None:

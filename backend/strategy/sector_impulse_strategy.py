@@ -326,7 +326,7 @@ class SectorImpulseStrategy(BaseStrategy):
         else:
             if hi >= self.stop_loss: return mk(self.stop_loss, "STOP_LOSS")
             if lo <= self.target: return mk(self.target, "PROFIT_TARGET")
-        if candle["datetime"].time() >= self.p.session_end:
+        if ts.time() >= self.p.session_end:
             return mk(price, "TIME_SQUARE_OFF")
         if self.entry_bar >= 0 and self.model:
             held = len(self.today_bars) - 1 - self.entry_bar

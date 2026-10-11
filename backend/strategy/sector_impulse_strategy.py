@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -66,6 +66,25 @@ def _ridge(X: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
     return np.linalg.solve(X.T @ X + lam * np.eye(X.shape[1]), X.T @ y)
 
 
+def _normalize_ist_naive(value: Any) -> datetime:
+    """Normalize candle timestamps to naive Asia/Kolkata time."""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+    return ts.to_pydatetime()
+
+
+def _session_rolling_sum(values: pd.Series, window: int) -> pd.Series:
+    """Rolling sum that never bridges separate trading sessions."""
+    if window <= 0:
+        raise ValueError("window must be > 0")
+    if values.empty:
+        return values.copy()
+    return values.groupby(values.index.date, sort=False).transform(
+        lambda session: session.rolling(window=window, min_periods=window).sum()
+    )
+
+
 def _last_monthly_weekday(d: date, weekday: int) -> date:
     nxt = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
     last = nxt - timedelta(days=1)
@@ -79,12 +98,14 @@ class SectorImpulseStrategy(BaseStrategy):
         strategy_config: StrategyConfig = settings.strategy,
         ctx: Optional[PeerContext] = None,
         sit: Optional[SITConfig] = None,
+        candle_timestamps_are_open: bool = True,
     ):
         super().__init__(instrument.symbol)
         self.instrument = instrument
         self.config = strategy_config
         self.ctx = ctx
         self.p = sit or SITConfig()
+        self.candle_timestamps_are_open = bool(candle_timestamps_are_open)
 
         self.warm_history = pd.DataFrame(columns=["datetime", "close"])
         self.today_bars: List[dict] = []
@@ -94,6 +115,16 @@ class SectorImpulseStrategy(BaseStrategy):
         self.entry_bar: int = -1
         self.entry_impulse: float = 0.0
         self.entry_dir: int = 0
+
+    def _event_timestamp(self, raw_timestamp: Any) -> datetime:
+        """Map a candle-open timestamp to its completion/event timestamp."""
+        ts = _normalize_ist_naive(raw_timestamp)
+        if self.candle_timestamps_are_open:
+            minutes = int(getattr(self.config, "candle_timeframe_minutes", 15))
+            if minutes <= 0:
+                raise ValueError("candle_timeframe_minutes must be > 0")
+            ts += pd.Timedelta(minutes=minutes).to_pytimedelta()
+        return ts
 
     # ------------------------------------------------------------------ fit
     def seed_context(self, historical_bars: pd.DataFrame) -> None:
@@ -146,17 +177,34 @@ class SectorImpulseStrategy(BaseStrategy):
         res_l = pd.Series(rets["leader"].values - X @ beta_l, index=rets.index)
         res_i = pd.Series(rets["own"].values - X @ beta_i, index=rets.index)
 
-        # lead-lag: corr(res_l[t-k], res_i[t]), stability across two halves
+        # Lead-lag observations must remain inside each session. Global shift
+        # would join yesterday's final return to today's first return.
+        ret_days = rets.index.date
         best_k, best_rho, stable = 0, 0.0, False
-        half = len(res_l) // 2
         for k in range(1, self.p.lag_max + 1):
-            a, b = res_l.shift(k), res_i
-            m = a.notna()
-            rho = float(np.corrcoef(a[m], b[m])[0, 1])
-            r1 = float(np.corrcoef(a[m].iloc[:half], b[m].iloc[:half])[0, 1])
-            r2 = float(np.corrcoef(a[m].iloc[half:], b[m].iloc[half:])[0, 1])
-            ok = np.sign(r1) == np.sign(r2) == np.sign(rho) and min(abs(r1), abs(r2)) >= self.p.min_rho / 2
-            if abs(rho) > abs(best_rho):
+            a = res_l.groupby(ret_days, sort=False).shift(k)
+            pair = pd.concat(
+                [a.rename("leader"), res_i.rename("own")],
+                axis=1,
+            ).dropna()
+            if len(pair) < 6:
+                continue
+            rho = float(np.corrcoef(pair["leader"], pair["own"])[0, 1])
+            half = len(pair) // 2
+            if half < 3 or len(pair) - half < 3:
+                continue
+            r1 = float(np.corrcoef(
+                pair["leader"].iloc[:half], pair["own"].iloc[:half]
+            )[0, 1])
+            r2 = float(np.corrcoef(
+                pair["leader"].iloc[half:], pair["own"].iloc[half:]
+            )[0, 1])
+            ok = (
+                np.isfinite(rho) and np.isfinite(r1) and np.isfinite(r2)
+                and np.sign(r1) == np.sign(r2) == np.sign(rho)
+                and min(abs(r1), abs(r2)) >= self.p.min_rho / 2
+            )
+            if np.isfinite(rho) and abs(rho) > abs(best_rho):
                 best_k, best_rho, stable = k, rho, bool(ok)
         if not stable or abs(best_rho) < self.p.min_rho:
             self.disabled_reason = f"pair_ineligible(rho={best_rho:.3f},k={best_k})"
@@ -164,14 +212,15 @@ class SectorImpulseStrategy(BaseStrategy):
 
         h = self.p.horizon_bars
         tod = rets.index.strftime("%H:%M")
-        rh_l = res_l.rolling(h).sum().dropna()
-        rh_i = res_i.rolling(h).sum().dropna()
+        rh_l = _session_rolling_sum(res_l, h).dropna()
+        rh_i = _session_rolling_sum(res_i, h).dropna()
         sig_l = rh_l.groupby(rh_l.index.strftime("%H:%M")).std()
         sig_i = rh_i.groupby(rh_i.index.strftime("%H:%M")).std()
         lv = np.log1p(vol.clip(lower=0))
         lv_med = lv.groupby(tod).median()
         lv_mad = (lv - lv.groupby(tod).transform("median")).abs().groupby(tod).median().replace(0, np.nan)
-        mkt_sig = rets["market"].rolling(h).sum().std()
+        rh_market = _session_rolling_sum(rets["market"], h).dropna()
+        mkt_sig = float(rh_market.std())
 
         self.model = dict(
             beta_l=beta_l, beta_i=beta_i, k=best_k, rho=best_rho,
@@ -212,17 +261,27 @@ class SectorImpulseStrategy(BaseStrategy):
 
     # --------------------------------------------------------------- signals
     def on_candle(self, candle: dict, vwap: float) -> Optional[StrategySignal]:
-        self.today_bars.append(candle)
-        ts, price, t = candle["datetime"], candle["close"], candle["datetime"].time()
+        raw_candle = dict(candle)
+        raw_timestamp = _normalize_ist_naive(candle["datetime"])
+        raw_candle["datetime"] = raw_timestamp
+        event_timestamp = self._event_timestamp(raw_timestamp)
+        price = float(candle["close"])
+        t = event_timestamp.time()
+
+        # Context lookups stay keyed by the source candle-open timestamp.
+        # Schedule/exit logic and output signals use completion time.
+        if self.current_date is None or event_timestamp.date() != self.current_date:
+            self.reset_session(event_timestamp.date())
+        self.today_bars.append(raw_candle)
 
         if self.position != 0:
-            return self._manage(candle)
+            return self._manage(raw_candle, event_timestamp=event_timestamp)
         if self.model is None or self.trades_today >= self.p.max_trades_per_day:
             return None
         if not (self.p.entry_start <= t <= self.p.entry_end):
             return None
 
-        f = self._features(candle)
+        f = self._features(raw_candle)
         if f is None or abs(f["mkt_z"]) > self.p.panic_market_z:
             return None
         if abs(f["Z_L"]) < self.p.z_leader_thr or f["V_z"] < self.p.vz_thr:
@@ -246,13 +305,18 @@ class SectorImpulseStrategy(BaseStrategy):
         self.entry_impulse, self.entry_dir = f["r_l"], d
         return StrategySignal(
             action=SignalAction.BUY if d == 1 else SignalAction.SELL,
-            symbol=self.symbol, timestamp=ts, price=price,
+            symbol=self.symbol, timestamp=event_timestamp, price=price,
             stop_loss=price - d * risk, target=price + d * reward,
             reason=f"SIT gap={G*1e4:.1f}bps Z_L={f['Z_L']:.2f} V_z={f['V_z']:.2f} k={self.model['k']}",
         )
 
-    def _manage(self, candle: dict) -> Optional[StrategySignal]:
-        ts, hi, lo, price = candle["datetime"], candle["high"], candle["low"], candle["close"]
+    def _manage(
+        self,
+        candle: dict,
+        event_timestamp: Optional[datetime] = None,
+    ) -> Optional[StrategySignal]:
+        ts = event_timestamp or self._event_timestamp(candle["datetime"])
+        hi, lo, price = candle["high"], candle["low"], candle["close"]
         mk = lambda px, why: StrategySignal(action=SignalAction.EXIT, symbol=self.symbol,
                                             timestamp=ts, price=px, reason=why)
         if self.position == 1:
@@ -261,7 +325,7 @@ class SectorImpulseStrategy(BaseStrategy):
         else:
             if hi >= self.stop_loss: return mk(self.stop_loss, "STOP_LOSS")
             if lo <= self.target: return mk(self.target, "PROFIT_TARGET")
-        if candle["datetime"].time() >= self.p.session_end:
+        if ts.time() >= self.p.session_end:
             return mk(price, "TIME_SQUARE_OFF")
         if self.entry_bar >= 0 and self.model:
             held = len(self.today_bars) - 1 - self.entry_bar

@@ -271,14 +271,9 @@ class SectorImpulseStrategy(BaseStrategy):
 
         # Context lookups remain keyed by the source candle-open timestamp;
         # trading schedules and published signal timestamps use completion time.
+        if self.current_date is None or event_timestamp.date() != self.current_date:
+            self.reset_session(event_timestamp.date())
         self.today_bars.append(raw_candle)
-
-        if self.current_date is None:
-            self.reset_session(event_timestamp.date())
-            self.today_bars.append(raw_candle)
-        elif event_timestamp.date() != self.current_date:
-            self.reset_session(event_timestamp.date())
-            self.today_bars.append(raw_candle)
 
         if self.position != 0:
             return self._manage(raw_candle, event_timestamp=event_timestamp)

@@ -82,3 +82,18 @@
 ## Limitations
 
 The source baseline was reviewed, but no local checkout, runtime tests, live feed or historical backtest was available. Other code may still contain defects; no claim of exhaustive market validation or zero remaining bugs is made.
+
+## Resolution status on review branch
+
+The following source changes were subsequently made on audit/strategy-production-review-2026-10-12. This status does not change the original-code evidence recorded above:
+
+| Original finding | Source change | Test / validation status |
+|---|---|---|
+| 1. Sector Impulse cross-session lag and rolling contamination | Fixed by session-grouped lag and rolling calculations in backend/strategy/sector_impulse_strategy.py. | Regression test added; not executed. |
+| 2. Sector Impulse event-time handling | Fixed by deriving a completion timestamp while retaining raw time for context lookup. | Timestamp and raw-context regression tests added; not executed. |
+| 3. CRSD event-time handling | Fixed by separating event time from raw peer-context timestamp. | Timestamp and raw-context regression tests added; not executed. |
+| 4. SSF blank runtime fallback | Fixed by returning UNAVAILABLE when the persistent runtime is absent. | Regression test added; not executed. |
+| 5. CRSD nested f-string compatibility | Fixed by avoiding a nested f-string in the z_cs display expression. | Compile/import check not run. |
+| 6. Duplicate SSF snapshot consumption | Exact-equality guard added before feature mutation; changed same-timestamp snapshots remain processable. | Regression test added; not executed. |
+
+Seven regression tests have been committed to tests/test_strategy_timing_regressions.py. The environment did not provide a working local checkout/test runner; none should be described as passing. No test result, runtime result or market-performance result is inferred from source edits alone.

@@ -486,12 +486,14 @@ class CRSDStrategy(BaseStrategy):
         strategy_config: StrategyConfig = settings.strategy,
         ctx: Optional[CRSDPeerContext] = None,
         crsd: Optional[CRSDConfig] = None,
+        candle_timestamps_are_open: bool = True,
     ):
         super().__init__(instrument.symbol)
         self.instrument = instrument
         self.config = strategy_config
         self.ctx = ctx
         self.p = crsd or settings.crsd
+        self.candle_timestamps_are_open = bool(candle_timestamps_are_open)
 
         self.warm_history = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
         self.today_bars: List[dict] = []
@@ -510,6 +512,19 @@ class CRSDStrategy(BaseStrategy):
         self._conf_sign: int = 0
         self._liq_shock_n: int = 0
         self._init_stream_state()
+
+    def _event_timestamp(self, raw_timestamp: Any) -> datetime:
+        """Return bar completion time while retaining raw time for peer lookup."""
+        ts = pd.Timestamp(raw_timestamp)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+        event_ts = ts.to_pydatetime()
+        if self.candle_timestamps_are_open:
+            minutes = int(getattr(self.config, "candle_timeframe_minutes", 15))
+            if minutes <= 0:
+                raise ValueError("candle_timeframe_minutes must be > 0")
+            event_ts += timedelta(minutes=minutes)
+        return event_ts
 
     def seed_context(self, historical_bars: pd.DataFrame) -> None:
         required_cols = [
@@ -1095,12 +1110,22 @@ class CRSDStrategy(BaseStrategy):
 
     # ---------------------------------------------------------------- signals
     def on_candle(self, candle: dict, vwap: float) -> Optional[StrategySignal]:
-        self.today_bars.append(candle)
-        ts, price, t = candle["datetime"], float(candle["close"]), candle["datetime"].time()
-        st = self._ingest(candle) if self.model is not None else None
+        # Keep the source candle-open time for exact peer/index context matching.
+        # Use a separate completion time for schedules and public signal time.
+        raw_ts = pd.Timestamp(candle["datetime"])
+        if raw_ts.tzinfo is not None:
+            raw_ts = raw_ts.tz_convert("Asia/Kolkata").tz_localize(None)
+        raw_candle = dict(candle)
+        raw_candle["datetime"] = raw_ts.to_pydatetime()
+        event_ts = self._event_timestamp(raw_candle["datetime"])
+        event_candle = dict(raw_candle)
+        event_candle["datetime"] = event_ts
+        self.today_bars.append(raw_candle)
+        price, t = float(raw_candle["close"]), event_ts.time()
+        st = self._ingest(raw_candle) if self.model is not None else None
 
         if self.position != 0:
-            return self._manage(candle, st)
+            return self._manage(event_candle, st)
         if self.model is None or self.trades_today >= self.p.max_trades_per_day:
             return None
         if self.daily_pnl_bps <= -self.p.daily_dd_limit_bps:
@@ -1150,17 +1175,17 @@ class CRSDStrategy(BaseStrategy):
         self.hedge_legs = {m["syms"][k]: float(-d * m["lam"] * m["w"][k]) for k in m["sel"]}
         self.hedge_notional_weights = dict(self.hedge_legs)
         self._entry = dict(bar=len(self.today_bars) - 1, D0=st["D"], z0=z, dir_spread=-sign,
-                           ts=ts, entry_price=price)
+                           ts=event_ts, entry_price=price)
         legs = ",".join(f"{s}:{v:+.2f}" for s, v in self.hedge_legs.items())
         return StrategySignal(
             action=SignalAction.BUY if d == 1 else SignalAction.SELL,
             symbol=self.symbol,
-            timestamp=ts,
+            timestamp=event_ts,
             price=price,
             stop_loss=price - d * risk,
             target=price + d * reward,
             hedge_legs=dict(self.hedge_legs),
-            reason=(f"CRSD z={z:.2f} z_cs={'na' if st['z_cs'] is None else f'{st['z_cs']:.2f}'} "
+            reason=(f"CRSD z={z:.2f} z_cs={('na' if st['z_cs'] is None else format(st['z_cs'], '.2f'))} "
                     f"edge={edge_ret * 1e4:.1f}bps cp={st['cp_recent']:.2f} stress={st['stress']:.2f} "
                     f"scale={self.risk_scale} hedge[{legs}]"),
         )

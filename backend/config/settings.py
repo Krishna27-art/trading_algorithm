@@ -255,6 +255,8 @@ class CRSDConfig(BaseModel):
     tail_quantile: float = 0.99
     leg_stop_mult: float = 2.0                 # price stop on the unhedged leg = mult x spread stop
     min_target_bps: float = 3.0
+    strategy_loss_cap_bps: float = 60.0
+    daily_dd_limit_bps: float = 100.0
     max_trades_per_day: int = 2
 
     # ---- session

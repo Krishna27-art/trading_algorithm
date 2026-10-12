@@ -65,7 +65,11 @@ class PairPositionSizer:
                 risk_scale=risk_scale,
             )
 
-        target_qty = 100
+        if target_stop_distance > 0 and capital > 0:
+            target_risk = (capital * 0.01) * risk_scale
+            target_qty = max(1, int(target_risk / target_stop_distance))
+        else:
+            target_qty = 100
         target_notional = target_qty * target_price
 
         hedge_quantities: Dict[str, int] = {}

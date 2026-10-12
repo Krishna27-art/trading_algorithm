@@ -127,12 +127,19 @@ def _resolve_instrument(symbol: str, kite, instrument_type: Optional[str] = None
     if instrument_type == "FUTURES":
         fut = instrument_resolver.find_nearest_single_stock_future(clean_sym, kite_client=kite)
         if fut is not None:
-            lot = instrument_resolver.resolve_lot_size(clean_sym, exchange="NFO", instrument_type="FUT", kite_client=kite) or 75
+            lot = instrument_resolver.resolve_lot_size(clean_sym, exchange="NFO", instrument_type="FUT", kite_client=kite)
+            if lot is None or lot <= 0:
+                lot = fut.get("lot_size")
+            if lot is None or lot <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Unable to resolve verified futures lot size for {clean_sym} from Kite instrument master.",
+                )
             inst = copy.deepcopy(settings.instruments[0])
             inst.symbol = fut["tradingsymbol"]
             inst.exchange = "NFO"
             inst.instrument_type = InstrumentType.FUTURES
-            inst.lot_size = lot
+            inst.lot_size = int(lot)
             inst.instrument_token = fut["instrument_token"]
             return inst, fut["instrument_token"]
 
@@ -162,7 +169,14 @@ def _load_history(inst, token, days: int, kite, auth_err: Optional[str]):
 
     if cache_path.exists():
         try:
-            df, _ = HistoricalDataLoader.load_cached_data_with_validation(cache_path)
+            df, meta = HistoricalDataLoader.load_cached_data_with_validation(cache_path)
+            if meta is not None:
+                cached_sym = str(meta.get("symbol", "")).strip().upper()
+                cached_tok = meta.get("instrument_token")
+                if cached_sym and cached_sym != str(inst.symbol).strip().upper():
+                    df = None
+                elif token and cached_tok and int(cached_tok) != int(token):
+                    df = None
         except Exception as e:
             logger.info("Cached data invalid or unreadable for %s: %s", inst.symbol, e)
             df = None

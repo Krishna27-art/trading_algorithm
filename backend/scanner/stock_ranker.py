@@ -496,9 +496,11 @@ class StockUniverseScanner:
                 )
             )
 
-            if meta is not None and meta.get("symbol"):
-                if str(meta.get("symbol", "")).strip().upper() != str(symbol).strip().upper():
-                    return None
+            if meta is None or not meta.get("symbol"):
+                return None
+
+            if str(meta.get("symbol", "")).strip().upper() != str(symbol).strip().upper():
+                return None
 
             if df is None or df.empty:
                 return None

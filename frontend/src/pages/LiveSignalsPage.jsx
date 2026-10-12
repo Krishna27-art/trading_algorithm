@@ -206,11 +206,13 @@ export default function LiveSignalsPage({ isAuthenticated }) {
   }, [signals.data, market.data, marketFeedFresh])
 
   const visible = useMemo(() => {
-    if (filter === 'all') return candidates
+    if (filter === 'all') {
+      return candidates.filter(hasActiveSignal)
+    }
 
     return candidates.filter((candidate) => {
       const pred = candidate.predictions?.[filter]
-      return pred && pred.status !== 'UNAVAILABLE'
+      return isStrategySignal(pred)
     })
   }, [candidates, filter])
 
@@ -433,35 +435,31 @@ export default function LiveSignalsPage({ isAuthenticated }) {
             </div>
           </Card>
 
-          {!hasSignals ? (
+          <KeyInsights candidates={candidates} />
+
+          {visible.length === 0 ? (
             <Card>
               <EmptyState
-                label="No completed live signals yet."
-                hint="The system only evaluates completed 15-minute candles. No signal is generated from a forming candle."
-              />
-            </Card>
-          ) : visible.length === 0 ? (
-            <Card>
-              <EmptyState
-                label={`No ${labelFor(filter)} signals currently available.`}
+                label={
+                  filter === 'all'
+                    ? 'No active signals currently available.'
+                    : `No ${labelFor(filter)} signals currently available.`
+                }
+                hint="Waiting for strategy entry conditions on completed 15-minute candles. Only active Long and Short signals will be displayed."
               />
             </Card>
           ) : (
-            <>
-              <KeyInsights candidates={candidates} />
-
-              <div className="space-y-3">
-                {visible.map((candidate) => (
-                  <SignalRow
-                    key={candidate.symbol}
-                    candidate={candidate}
-                    filter={filter}
-                    expanded={expanded.has(candidate.symbol)}
-                    onToggle={() => toggle(candidate.symbol)}
-                  />
-                ))}
-              </div>
-            </>
+            <div className="space-y-3">
+              {visible.map((candidate) => (
+                <SignalRow
+                  key={candidate.symbol}
+                  candidate={candidate}
+                  filter={filter}
+                  expanded={expanded.has(candidate.symbol)}
+                  onToggle={() => toggle(candidate.symbol)}
+                />
+              ))}
+            </div>
           )}
         </>
       )}
@@ -1132,4 +1130,31 @@ function labelFor(key) {
       crsd: 'CRSD',
     }[key] || key
   )
+}
+
+function isStrategySignal(pred) {
+  if (!pred) return false
+  const d = String(pred.direction || '').toUpperCase()
+  const s = String(pred.status || '').toUpperCase()
+  const a = String(pred.action || '').toUpperCase()
+  return (
+    d === 'LONG' ||
+    d === 'SHORT' ||
+    d === 'BUY' ||
+    d === 'SELL' ||
+    a === 'BUY' ||
+    a === 'SELL' ||
+    s === 'BUY' ||
+    s === 'SELL' ||
+    s === 'SIGNAL'
+  )
+}
+
+function hasActiveSignal(candidate) {
+  const dir = String(candidate.consensus?.direction || '').toUpperCase()
+  if (dir === 'LONG' || dir === 'SHORT' || dir === 'BUY' || dir === 'SELL') {
+    return true
+  }
+  const preds = Object.values(candidate.predictions || {})
+  return preds.some(isStrategySignal)
 }

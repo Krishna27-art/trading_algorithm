@@ -225,8 +225,22 @@ class IntradayORBStrategy(BaseStrategy):
         if not (self.config.entry_start <= bar_time <= self.config.entry_end):
             return None
 
-        # LONG
-        if close > self.orb.high and close > float(vwap):
+        tick = max(float(getattr(self.instrument, "tick_size", 0.05)), 1e-6)
+        buffer = max(close * 0.0002, tick)
+
+        candle_vol = candle.get("volume")
+        if candle_vol is not None and float(candle_vol) > 0 and len(self.history_today) >= 2:
+            orb_volumes = [
+                float(c.get("volume", 0))
+                for c in self.history_today[:2]
+                if c.get("volume") is not None and float(c.get("volume", 0)) > 0
+            ]
+            if orb_volumes:
+                avg_orb_vol = sum(orb_volumes) / len(orb_volumes)
+                if float(candle_vol) < 0.70 * avg_orb_vol:
+                    return None
+
+        if close > (self.orb.high + buffer) and close > float(vwap):
             stop = float(self.orb.low)
             raw_risk = close - stop
 
@@ -245,8 +259,7 @@ class IntradayORBStrategy(BaseStrategy):
                 reason="ORB_LONG_BREAKOUT",
             )
 
-        # SHORT
-        if close < self.orb.low and close < float(vwap):
+        if close < (self.orb.low - buffer) and close < float(vwap):
             stop = float(self.orb.high)
             raw_risk = stop - close
 

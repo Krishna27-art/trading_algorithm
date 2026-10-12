@@ -126,7 +126,19 @@ class PositionSizer:
         if instrument is None:
             return 1
         if instrument.instrument_type == InstrumentType.FUTURES:
-            return max(1, instrument.lot_size)
+            lot = max(1, instrument.lot_size)
+            if stop_distance > 0 and capital > 0:
+                risk_budget = capital * 0.01 if enforce_max_risk_cap else capital * 0.02
+                contracts = max(1, int(risk_budget / (stop_distance * lot)))
+                return contracts * lot
+            return lot
+        if stop_distance > 0 and capital > 0:
+            risk_budget = capital * 0.01 if enforce_max_risk_cap else capital * 0.02
+            qty = max(1, int(risk_budget / stop_distance))
+            if estimated_price and estimated_price > 0 and available_margin and available_margin > 0:
+                max_affordable = max(1, int(available_margin / estimated_price))
+                qty = min(qty, max_affordable)
+            return qty
         return 1
 
 

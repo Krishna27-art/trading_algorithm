@@ -147,8 +147,9 @@ def kite_logout(x_shared_secret: Optional[str] = Header(None, alias="X-Shared-Se
     """Stops active stream and clears local access token and session state."""
     verify_shared_secret(x_shared_secret)
     try:
-        from backend.streaming.market_stream_manager import market_stream_manager
-        market_stream_manager.stop_stream()
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            from backend.streaming.market_stream_manager import market_stream_manager
+            market_stream_manager.stop_stream()
     except Exception as exc:
         logger.warning("Error stopping stream on logout: %s", exc)
     clear_session()

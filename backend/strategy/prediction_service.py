@@ -589,6 +589,8 @@ class PredictionService:
         self._aou_runtimes_lock = Lock()
         self._crsd_runtimes: Dict[str, _StrategyRuntime] = {}
         self._crsd_runtimes_lock = Lock()
+        self._ssf_runtimes: Dict[str, Any] = {}
+        self._ssf_runtimes_lock = Lock()
 
         # Deterministic replay cache (ORB / CPR / Dual-EMA only).
         self._replay_cache: "OrderedDict[Tuple[Any, ...], _ReplayOutcome]" = OrderedDict()
@@ -1719,6 +1721,15 @@ class PredictionService:
                 ltp, source_ts, None,
             )
 
+        active_ssf_strategy = ssf_strategy
+        if active_ssf_strategy is None and book_snapshot is not None and hasattr(self, "_ssf_runtimes"):
+            with self._ssf_runtimes_lock:
+                key = str(inst.symbol).strip().upper()
+                if key not in self._ssf_runtimes:
+                    from backend.strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
+                    self._ssf_runtimes[key] = SsfL5SrmStrategy(inst, self.settings.strategy, signal_only=True)
+                active_ssf_strategy = self._ssf_runtimes[key]
+
         evaluators: Tuple[Tuple[str, str, Callable[[], SingleStrategyPrediction]], ...] = (
             ("orb", "ORB", lambda: self._evaluate_orb(inst, prep, ltp)),
             ("cpr", "CPR", lambda: self._evaluate_cpr(inst, prep, ltp)),
@@ -1747,7 +1758,7 @@ class PredictionService:
                 lambda: self._evaluate_ssf_l5_srm(
                     inst, prep, ltp,
                     book_snapshot=book_snapshot,
-                    ssf_strategy=ssf_strategy,
+                    ssf_strategy=active_ssf_strategy,
                     ssf_applicable=ssf_applicable,
                 ),
             ),

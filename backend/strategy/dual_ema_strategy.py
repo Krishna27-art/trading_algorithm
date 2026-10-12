@@ -574,6 +574,7 @@ class BufferedDualEMAStrategy(BaseStrategy):
         ):
             return None, previous
 
+        self._indicator_tail = indicators.tail(5).copy()
         return current, previous
 
     def latest_indicators(
@@ -804,24 +805,28 @@ class BufferedDualEMAStrategy(BaseStrategy):
                 previous["ema21"]
             )
 
+            recent_cross_long = False
+            recent_cross_short = False
+            tail = getattr(self, "_indicator_tail", None)
+            if tail is not None and len(tail) >= 3:
+                p2 = tail.iloc[-3]
+                p1 = tail.iloc[-2]
+                if not pd.isna(p2.get("ema9")) and not pd.isna(p2.get("ema21")):
+                    p2_ema9, p2_ema21 = float(p2["ema9"]), float(p2["ema21"])
+                    p1_ema9, p1_ema21 = float(p1["ema9"]), float(p1["ema21"])
+                    if p2_ema9 <= p2_ema21 and p1_ema9 <= (p1_ema21 + buffer) and ema9 > (ema21 + buffer):
+                        recent_cross_long = True
+                    if p2_ema9 >= p2_ema21 and p1_ema9 >= (p1_ema21 - buffer) and ema9 < (ema21 - buffer):
+                        recent_cross_short = True
+
             cross_long = (
-                prev_ema9
-                <= prev_ema21
-                and ema9
-                > (
-                    ema21
-                    + buffer
-                )
+                (prev_ema9 <= prev_ema21 and ema9 > (ema21 + buffer))
+                or recent_cross_long
             )
 
             cross_short = (
-                prev_ema9
-                >= prev_ema21
-                and ema9
-                < (
-                    ema21
-                    - buffer
-                )
+                (prev_ema9 >= prev_ema21 and ema9 < (ema21 - buffer))
+                or recent_cross_short
             )
 
         if self.require_crossover:

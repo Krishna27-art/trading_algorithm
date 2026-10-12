@@ -353,7 +353,7 @@ class VolumeProfileEngine:
         profile = self.profiles.get(sym)
         if profile is not None and profile.session_date != tick_date:
             if profile.total_observed_volume > 0:
-                self.save_session_profiles()
+                self.save_single_profile(profile)
             profile = None
         if profile is None:
             ts = self.get_tick_size(sym)
@@ -406,22 +406,27 @@ class VolumeProfileEngine:
                 processed += 1
         return processed
 
-    def save_session_profiles(self) -> None:
+    def save_single_profile(self, prof: SingleStockVolumeProfile) -> None:
+        if prof.total_observed_volume <= 0:
+            return
+        filename = f"{prof.symbol}_{prof.session_date.isoformat()}.json"
+        target = self.cache_dir / filename
+        tmp = self.cache_dir / f"{filename}.tmp"
+        data = prof.to_snapshot_dict()
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except Exception as exc:
+            logger.error("Failed to save volume profile for %s: %s", prof.symbol, exc)
+
+    def save_session_profiles(self, target_date: Optional[date] = None) -> None:
         for sym, prof in self.profiles.items():
-            if prof.total_observed_volume <= 0:
+            if target_date is not None and prof.session_date != target_date:
                 continue
-            filename = f"{sym}_{prof.session_date.isoformat()}.json"
-            target = self.cache_dir / filename
-            tmp = self.cache_dir / f"{filename}.tmp"
-            data = prof.to_snapshot_dict()
-            try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, target)
-            except Exception as exc:
-                logger.error("Failed to save volume profile for %s: %s", sym, exc)
+            self.save_single_profile(prof)
 
     def load_previous_session_profile(
         self,

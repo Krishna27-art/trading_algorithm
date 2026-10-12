@@ -1501,7 +1501,8 @@ class MarketStreamManager:
             try:
                 self._book_queue.put_nowait(symbol)
             except queue.Full:
-                pass
+                with self._book_lock:
+                    self._dirty_book_symbols.add(symbol)
 
         aggregator = MultiSymbolCandleAggregator(
             token_to_symbol_map=resolved_token_to_symbol,

@@ -1128,7 +1128,8 @@ class CRSDStrategy(BaseStrategy):
             return self._manage(event_candle, st)
         if self.model is None or self.trades_today >= self.p.max_trades_per_day:
             return None
-        if self.daily_pnl_bps <= -self.p.daily_dd_limit_bps:
+        daily_dd = getattr(self.p, "daily_dd_limit_bps", 100.0)
+        if self.daily_pnl_bps <= -daily_dd:
             return None
         if not (self.p.entry_start <= t <= self.p.entry_end):
             return None
@@ -1230,7 +1231,8 @@ class CRSDStrategy(BaseStrategy):
                 return mk(price, "SPREAD_STOP", pnl_bps)
 
             # Strategy loss cap
-            if pnl_bps <= -p.strategy_loss_cap_bps:
+            loss_cap = getattr(p, "strategy_loss_cap_bps", 60.0)
+            if pnl_bps <= -loss_cap:
                 return mk(price, "LOSS_CAP", pnl_bps)
 
             # Regime break / liquidity shocks
@@ -1247,14 +1249,14 @@ class CRSDStrategy(BaseStrategy):
 
         # 3. Emergency fallback if peer context state is temporarily unready
         if self.position == 1:
-            if lo <= self.stop_loss:
+            if self.stop_loss > 0 and lo <= self.stop_loss:
                 return mk(self.stop_loss, "STOP_LOSS")
-            if hi >= self.target:
+            if self.target > 0 and hi >= self.target:
                 return mk(self.target, "PROFIT_TARGET")
-        else:
-            if hi >= self.stop_loss:
+        elif self.position == -1:
+            if self.stop_loss > 0 and hi >= self.stop_loss:
                 return mk(self.stop_loss, "STOP_LOSS")
-            if lo <= self.target:
+            if self.target > 0 and lo <= self.target:
                 return mk(self.target, "PROFIT_TARGET")
 
         return None

@@ -221,10 +221,19 @@ class SectorImpulseStrategy(BaseStrategy):
         lv_mad = (lv - lv.groupby(tod).transform("median")).abs().groupby(tod).median().replace(0, np.nan)
         rh_market = _session_rolling_sum(rets["market"], h).dropna()
         mkt_sig = float(rh_market.std())
+        sig_l_all = float(rh_l.std())
+        sig_i_all = float(rh_i.std())
+        if not (
+            np.isfinite(sig_l_all) and sig_l_all > 1e-9
+            and np.isfinite(sig_i_all) and sig_i_all > 1e-9
+            and np.isfinite(mkt_sig) and mkt_sig > 1e-9
+        ):
+            self.disabled_reason = "degenerate_volatility"
+            return
 
         self.model = dict(
             beta_l=beta_l, beta_i=beta_i, k=best_k, rho=best_rho,
-            sig_l=sig_l, sig_i=sig_i, sig_l_all=float(rh_l.std()), sig_i_all=float(rh_i.std()),
+            sig_l=sig_l, sig_i=sig_i, sig_l_all=sig_l_all, sig_i_all=sig_i_all,
             lv_med=lv_med, lv_mad=lv_mad, mkt_sig=float(mkt_sig),
         )
         self.disabled_reason = ""

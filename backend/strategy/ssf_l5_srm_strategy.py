@@ -202,7 +202,7 @@ class SsfL5SrmStrategy(BaseStrategy):
         self._mids.append(mid)
 
         mlofi = 0.0
-        if self._prev is not None and len(self._prev.bids) >= 5:
+        if self._prev is not None and min(len(s.bids), len(s.asks), len(self._prev.bids), len(self._prev.asks)) >= 5:
             for n in range(5):
                 w = math.exp(-self.p.level_decay * n)
                 mlofi += w * self._ofi_level(s.bids[n], s.asks[n], self._prev.bids[n], self._prev.asks[n])

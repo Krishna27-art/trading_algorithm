@@ -924,8 +924,10 @@ class ApexAivemStrategy(BaseStrategy):
         tick = max(float(self.instrument.tick_size), 1e-8)
 
         candle_range = max(high - low, tick)
-        upper_wick_ratio = max(0.0, (high - close) / candle_range)
-        lower_wick_ratio = max(0.0, (close - low) / candle_range)
+        upper_wick = high - max(open_price, close)
+        lower_wick = min(open_price, close) - low
+        upper_wick_ratio = max(0.0, upper_wick / candle_range)
+        lower_wick_ratio = max(0.0, lower_wick / candle_range)
 
         vwap = _safe_float(self.last_analysis.get("vwap"))
         # vwap is supplied separately into on_candle, so this key is inserted

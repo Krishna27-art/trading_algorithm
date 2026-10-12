@@ -395,6 +395,7 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
     def _generate_entry_signal(
         self,
         candle: dict,
+        vwap: Optional[float] = None,
     ) -> Optional[StrategySignal]:
         if self.pivots is None:
             return None
@@ -427,16 +428,17 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
         close = float(candle["close"])
         high = float(candle["high"])
         low = float(candle["low"])
-
-        # --------------------------------------------------------------
-        # NARROW = breakout
-        # --------------------------------------------------------------
-
+        tick_size = max(float(getattr(self.instrument, "tick_size", 0.05)), 1e-6)
         if self.regime == Regime.NARROW:
-            # LONG: close above the top of the normalized CPR range.
-            if close > cpr_top:
+            vwap_long_ok = (vwap is None or float(vwap) <= 0 or close >= float(vwap))
+            if close > cpr_top and vwap_long_ok:
                 stop = p
-                target = p + prior_range
+                candidate_target = max(
+                    p + prior_range,
+                    cpr_top + (close - stop),
+                    float(self.pivots.get("R1", 0.0)),
+                )
+                target = candidate_target if candidate_target > (close + tick_size) else close + 2.0 * (close - stop)
                 risk = close - stop
 
                 if not self._valid_long_trade(close, stop, target):
@@ -460,10 +462,15 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
                     reason="CPR_NARROW_BREAKOUT_LONG",
                 )
 
-            # SHORT: close below the bottom of the normalized CPR range.
-            if close < cpr_bottom:
+            vwap_short_ok = (vwap is None or float(vwap) <= 0 or close <= float(vwap))
+            if close < cpr_bottom and vwap_short_ok:
                 stop = p
-                target = p - prior_range
+                candidate_target = min(
+                    p - prior_range,
+                    cpr_bottom - (stop - close),
+                    float(self.pivots.get("S1", 1e9)),
+                )
+                target = candidate_target if candidate_target < (close - tick_size) else close - 2.0 * (stop - close)
                 risk = stop - close
 
                 if not self._valid_short_trade(close, stop, target):
@@ -489,17 +496,11 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
 
             return None
 
-        # --------------------------------------------------------------
-        # WIDE = mean reversion
-        # --------------------------------------------------------------
-
         if self.regime == Regime.WIDE:
-            # LONG:
-            # Price probes the lower CPR boundary but closes back above it.
             if low <= cpr_bottom and close > cpr_bottom:
                 distance_from_p = abs(p - cpr_bottom)
 
-                stop = cpr_bottom - distance_from_p
+                stop = min(cpr_bottom - distance_from_p, low - tick_size)
                 target = cpr_top
                 risk = close - stop
 
@@ -524,12 +525,10 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
                     reason="CPR_WIDE_FADE_LONG_AT_BOTTOM",
                 )
 
-            # SHORT:
-            # Price probes the upper CPR boundary but closes back below it.
             if high >= cpr_top and close < cpr_top:
                 distance_from_p = abs(cpr_top - p)
 
-                stop = cpr_top + distance_from_p
+                stop = max(cpr_top + distance_from_p, high + tick_size)
                 target = cpr_bottom
                 risk = stop - close
 
@@ -632,7 +631,10 @@ class CPRRegimeBreakoutStrategy(BaseStrategy):
         # 3. Generate new entry
         # --------------------------------------------------------------
 
-        return self._generate_entry_signal(working_candle)
+        return self._generate_entry_signal(
+            working_candle,
+            vwap=float(vwap),
+        )
 
     # ------------------------------------------------------------------
     # Tick processing

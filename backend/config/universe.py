@@ -155,7 +155,7 @@ class StockUniverse:
                 seen_symbols.add(sym)
 
             if is_duplicate:
-                continue  # Skip duplicate — keep only the first occurrence
+                continue
 
             if not name:
                 validation_errors.append(f"Stock '{sym or idx}' missing required field 'name'.")
@@ -170,6 +170,9 @@ class StockUniverse:
 
             if cat not in ("large", "mid", "small"):
                 validation_errors.append(f"Stock '{sym}' invalid 'category': '{cat}'. Must be 'large', 'mid', or 'small'.")
+
+            if not sym or not name or rank_int <= 0 or cat not in ("large", "mid", "small"):
+                continue
 
             records.append(StockRecord(symbol=sym, name=name, market_cap_rank=rank_int, category=cat))
 

@@ -911,6 +911,7 @@ class LiveSignalEngine:
             crsd_ctx = self._crsd_runtime.get_context(
                 symbol,
                 kite_client=kite_client,
+                as_of=candle_timestamp,
             )
 
             peer_ctx = None
@@ -920,7 +921,8 @@ class LiveSignalEngine:
                 peer_ctx = SectorPeerManager.build_peer_context(
                     symbol,
                     kite_client=kite_client,
-                    allow_network_fetch=False,
+                    allow_network_fetch=kite_client is not None,
+                    as_of=candle_timestamp,
                 )
             except Exception as peer_exc:
                 logger.debug(

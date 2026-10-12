@@ -2,11 +2,11 @@
   "symbol": "BHARATFORG",
   "instrument_token": 108033,
   "interval": "15minute",
-  "start_date": "2026-08-21",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:48:55.309955+05:30",
-  "latest_completed_candle": "2026-10-08T11:30:00",
-  "candle_count": 778,
-  "trading_days": 33
+  "downloaded_timestamp": "2026-10-12T10:30:52.891495+05:30",
+  "latest_completed_candle": "2026-10-12T10:15:00",
+  "candle_count": 701,
+  "trading_days": 30
 }

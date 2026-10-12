@@ -2,11 +2,11 @@
   "symbol": "ICICIGI",
   "instrument_token": 5573121,
   "interval": "15minute",
-  "start_date": "2026-08-21",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:33:01.232683+05:30",
-  "latest_completed_candle": "2026-10-08T11:15:00",
-  "candle_count": 777,
-  "trading_days": 33
+  "downloaded_timestamp": "2026-10-12T10:33:19.096319+05:30",
+  "latest_completed_candle": "2026-10-12T10:15:00",
+  "candle_count": 701,
+  "trading_days": 30
 }

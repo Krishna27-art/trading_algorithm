@@ -2,11 +2,11 @@
   "symbol": "HDFCLIFE",
   "instrument_token": 119553,
   "interval": "15minute",
-  "start_date": "2026-09-15",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:49:13.150520+05:30",
-  "latest_completed_candle": "2026-10-08T11:30:00",
-  "candle_count": 253,
-  "trading_days": 12
+  "downloaded_timestamp": "2026-10-12T10:23:22.163042+05:30",
+  "latest_completed_candle": "2026-10-12T10:00:00",
+  "candle_count": 700,
+  "trading_days": 30
 }

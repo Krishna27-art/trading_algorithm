@@ -280,6 +280,7 @@ def build_crsd_context(
     cache_dir: Optional[Path] = None,
     kite_client: Optional[Any] = None,
     days: int = 45,
+    as_of: Optional[datetime] = None,
 ) -> Optional[CRSDPeerContext]:
     """
     Build a context from cached 15m CSVs (data/cache/<SYM>_15m.csv), optionally
@@ -307,10 +308,11 @@ def build_crsd_context(
             )
             from backend.data.time_utils import now_ist_naive
 
+            target_time = as_of if as_of is not None else now_ist_naive()
             latest_required_timestamp = (
                 HistoricalDataLoader
                 .get_latest_completed_candle_start(
-                    now_ist_naive()
+                    target_time
                 )
             )
         except Exception as exc:

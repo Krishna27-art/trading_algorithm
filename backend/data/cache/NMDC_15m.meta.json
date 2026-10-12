@@ -2,11 +2,11 @@
   "symbol": "NMDC",
   "instrument_token": 3924993,
   "interval": "15minute",
-  "start_date": "2026-08-17",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:49:59.112232+05:30",
-  "latest_completed_candle": "2026-10-08T11:30:00",
-  "candle_count": 802,
-  "trading_days": 34
+  "downloaded_timestamp": "2026-10-12T10:31:34.804307+05:30",
+  "latest_completed_candle": "2026-10-12T10:15:00",
+  "candle_count": 701,
+  "trading_days": 30
 }

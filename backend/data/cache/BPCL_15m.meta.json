@@ -2,11 +2,11 @@
   "symbol": "BPCL",
   "instrument_token": 134657,
   "interval": "15minute",
-  "start_date": "2026-09-15",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:50:17.038455+05:30",
-  "latest_completed_candle": "2026-10-08T11:30:00",
-  "candle_count": 210,
-  "trading_days": 10
+  "downloaded_timestamp": "2026-10-12T10:33:59.384279+05:30",
+  "latest_completed_candle": "2026-10-12T10:15:00",
+  "candle_count": 701,
+  "trading_days": 30
 }

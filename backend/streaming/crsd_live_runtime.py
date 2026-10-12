@@ -41,22 +41,21 @@ class CRSDLiveRuntime:
         self,
         symbol: str,
         kite_client: Optional[Any] = None,
+        as_of: Optional[datetime] = None,
     ) -> Optional[CRSDPeerContext]:
-        """Return or lazily construct the CRSDPeerContext for a symbol."""
         clean = symbol.strip().upper()
         with self._lock:
             if clean in self._contexts:
                 return self._contexts[clean]
 
-        # Build context using authoritative SectorPeerManager
         ctx = build_crsd_context(
             symbol=clean,
             cache_dir=self.cache_dir,
             kite_client=kite_client,
+            as_of=as_of,
         )
         if ctx is not None:
             with self._lock:
-                # Double-check in case another thread initialized it in parallel
                 if clean in self._contexts:
                     return self._contexts[clean]
                 self._contexts[clean] = ctx

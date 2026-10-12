@@ -2,11 +2,11 @@
   "symbol": "TMPV",
   "instrument_token": 884737,
   "interval": "15minute",
-  "start_date": "2026-08-17",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:34:59.734511+05:30",
-  "latest_completed_candle": "2026-10-08T11:15:00",
-  "candle_count": 815,
-  "trading_days": 35
+  "downloaded_timestamp": "2026-10-12T10:15:46.795796+05:30",
+  "latest_completed_candle": "2026-10-12T10:00:00",
+  "candle_count": 700,
+  "trading_days": 30
 }

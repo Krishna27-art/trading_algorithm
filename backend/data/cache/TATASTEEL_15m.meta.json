@@ -2,11 +2,11 @@
   "symbol": "TATASTEEL",
   "instrument_token": 895745,
   "interval": "15minute",
-  "start_date": "2026-08-21",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:26:37.704179+05:30",
-  "latest_completed_candle": "2026-10-08T11:00:00",
-  "candle_count": 776,
-  "trading_days": 33
+  "downloaded_timestamp": "2026-10-12T10:21:26.463665+05:30",
+  "latest_completed_candle": "2026-10-12T10:00:00",
+  "candle_count": 700,
+  "trading_days": 30
 }

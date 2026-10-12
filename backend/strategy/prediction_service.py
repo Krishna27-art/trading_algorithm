@@ -1474,12 +1474,15 @@ class PredictionService:
             date_col = next((c for c in ("datetime", "date", "timestamp") if c in vix_df.columns), None)
             if date_col is None:
                 return None
-            as_of = _normalize_ist_naive(vix_df[date_col].iloc[-1])
-            if as_of is None or (now.date() - as_of.date()).days > self.MAX_CACHED_VIX_AGE_DAYS:
+            target_date = now.date() if hasattr(now, "date") else now
+            dates = pd.to_datetime(vix_df[date_col]).dt.date
+            valid_df = vix_df[dates <= target_date]
+            if valid_df.empty:
                 return None
-            if (now.date() - as_of.date()).days < 0:
+            as_of_date = dates[dates <= target_date].iloc[-1]
+            if (target_date - as_of_date).days > self.MAX_CACHED_VIX_AGE_DAYS or (target_date - as_of_date).days < 0:
                 return None
-            return _positive_number(vix_df["close"].iloc[-1])
+            return _positive_number(valid_df["close"].iloc[-1])
         except Exception:
             return None
 
@@ -1490,13 +1493,10 @@ class PredictionService:
         kite_client: Optional[Any] = None,
         live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
         peer_context: Optional[Any] = None,
+        as_of: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
-        """
-        Build APEX's live context. Returns None (=> UNAVAILABLE) when the
-        REQUIRED input (India VIX) cannot be sourced fresh. No default VIX is
-        ever substituted.
-        """
         now = now_ist_naive()
+        target_time = as_of if as_of is not None else now
 
         india_vix: Optional[float] = None
         vix_source: Optional[str] = None
@@ -1510,7 +1510,29 @@ class PredictionService:
             elif raw_vix is not None:
                 logger.warning(f"[PredictionService] Live India VIX rejected: {why}")
         if india_vix is None:
-            india_vix = self._load_cached_vix(now)
+            try:
+                from backend.streaming.live_market_state import live_market_state
+                vix_st = live_market_state.get_symbol_state("INDIA VIX") or live_market_state.get_symbol_state("INDIAVIX")
+                if vix_st and vix_st.ltp and vix_st.last_tick_time:
+                    india_vix, why = self._quote_price((vix_st.ltp, vix_st.last_tick_time), now, self.MAX_VIX_QUOTE_AGE_SECONDS)
+                    if india_vix is not None:
+                        vix_source = "live"
+            except Exception:
+                pass
+        if india_vix is None and kite_client is not None:
+            try:
+                vix_quote = kite_client.quote(["NSE:INDIA VIX"])
+                q = vix_quote.get("NSE:INDIA VIX", {})
+                if q:
+                    px = q.get("last_price")
+                    ts = q.get("timestamp") or q.get("last_trade_time") or now
+                    india_vix, why = self._quote_price((px, ts), now, self.MAX_VIX_QUOTE_AGE_SECONDS)
+                    if india_vix is not None:
+                        vix_source = "live"
+            except Exception as exc:
+                logger.debug(f"[PredictionService] Live Kite VIX quote fetch failed: {exc}")
+        if india_vix is None:
+            india_vix = self._load_cached_vix(target_time)
             if india_vix is not None:
                 vix_source = "cached_daily_close"
         if india_vix is None:
@@ -1526,7 +1548,7 @@ class PredictionService:
 
         return {
             "india_vix": india_vix,
-            "calendar_blackout": False,   # no calendar source wired here; unchanged upstream assumption
+            "calendar_blackout": False,
             "gift_nifty_gap": None,
             "sector_rs": sector_rs,
             "market_rs": market_rs,
@@ -2243,6 +2265,7 @@ class PredictionService:
             kite_client=kite_client,
             live_ltp_by_symbol=live_ltp_by_symbol,
             peer_context=peer_context,
+            as_of=prep.latest_candle_time,
         )
         if apex_context is None:
             return SingleStrategyPrediction(
@@ -2317,6 +2340,8 @@ class PredictionService:
                     symbol=inst.symbol,
                     cache_dir=self.cache_dir,
                     kite_client=kite_client,
+                    allow_network_fetch=kite_client is not None,
+                    as_of=prep.latest_candle_time,
                 )
             except Exception as exc:
                 build_error = exc
@@ -2419,6 +2444,7 @@ class PredictionService:
                     symbol=inst.symbol,
                     cache_dir=self.cache_dir,
                     kite_client=kite_client,
+                    as_of=prep.latest_candle_time,
                 )
             except Exception as exc:
                 return SingleStrategyPrediction(
@@ -2458,7 +2484,7 @@ class PredictionService:
                 self._drop_runtime(self._crsd_runtimes, self._crsd_runtimes_lock, key, rt)
                 raise
             signal = copy.copy(rt.current_signal) if rt.current_signal is not None else None
-            return self._crsd_prediction(inst, rt.strategy, signal, live_ltp_by_symbol)
+            return self._crsd_prediction(inst, rt.strategy, signal, live_ltp_by_symbol, kite_client=kite_client)
 
     def _crsd_prediction(
         self,
@@ -2466,6 +2492,7 @@ class PredictionService:
         strategy: Any,
         current_signal: Optional[StrategySignal],
         live_ltp_by_symbol: Optional[Dict[str, Any]],
+        kite_client: Optional[Any] = None,
     ) -> SingleStrategyPrediction:
         model = getattr(strategy, "model", None)
         levels: Dict[str, Any] = {}
@@ -2497,7 +2524,6 @@ class PredictionService:
             )
 
         if current_signal is not None and current_signal.action in (SignalAction.BUY, SignalAction.SELL):
-            # CRSD is a pair strategy. A fresh, timestamped live hedge quote is mandatory.
             hedge_legs = getattr(strategy, "hedge_legs", {}) or {}
             if not hedge_legs:
                 return unavailable("CRSD generated a directional candidate without a validated hedge basket.")
@@ -2507,6 +2533,16 @@ class PredictionService:
             for hedge_sym in hedge_legs:
                 raw_h = live_ltp_by_symbol.get(hedge_sym) if live_ltp_by_symbol else None
                 h_price, why = self._quote_price(raw_h, now, self.MAX_HEDGE_QUOTE_AGE_SECONDS)
+                if h_price is None and kite_client is not None:
+                    try:
+                        q_data = kite_client.quote(["NSE:" + hedge_sym])
+                        q = q_data.get("NSE:" + hedge_sym, {})
+                        if q:
+                            px = q.get("last_price")
+                            ts = q.get("timestamp") or q.get("last_trade_time") or now
+                            h_price, why = self._quote_price((px, ts), now, self.MAX_HEDGE_QUOTE_AGE_SECONDS)
+                    except Exception:
+                        pass
                 if h_price is None:
                     return unavailable(f"CRSD live hedge price unavailable for {hedge_sym}: {why}.")
                 validated_hedge_prices[hedge_sym] = h_price

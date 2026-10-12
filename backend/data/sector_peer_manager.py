@@ -191,6 +191,9 @@ class SectorPeerManager:
             )
             return None
 
+        if sym in {"NIFTY", "NIFTY 50", "NIFTY50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "INDIA VIX", "INDIAVIX"} or sym.startswith("NIFTY ") or sym.startswith("NIFTY_") or sym.endswith("INDEX"):
+            return None
+
         if not matches:
             if DEFAULT_SECTOR is not None:
                 return DEFAULT_SECTOR
@@ -357,6 +360,7 @@ class SectorPeerManager:
         cache_dir: Optional[Path] = None,
         kite_client: Optional[Any] = None,
         allow_network_fetch: bool = False,
+        as_of: Optional[datetime] = None,
     ) -> PeerContextResult:
         from backend.data.historical_loader import HistoricalDataLoader
         from backend.data.models import PeerContext
@@ -384,9 +388,10 @@ class SectorPeerManager:
             logger.debug("Cannot build PeerContext for %s: %s", symbol, exc)
             return unavailable(f"no sector classification for {symbol}")
 
+        target_time = as_of if as_of is not None else now_ist_naive()
         try:
             required = _normalize_ist_naive(
-                HistoricalDataLoader.get_latest_completed_candle_start(now_ist_naive())
+                HistoricalDataLoader.get_latest_completed_candle_start(target_time)
             )
         except Exception as exc:
             return unavailable(f"required completed-candle timestamp could not be determined ({exc})")
@@ -451,12 +456,14 @@ class SectorPeerManager:
         kite_client: Optional[Any] = None,
         allow_network_fetch: bool = False,
         raise_on_unavailable: bool = False,
+        as_of: Optional[datetime] = None,
     ) -> Optional[PeerContext]:
         result = cls.build_peer_context_with_status(
             symbol,
             cache_dir=cache_dir,
             kite_client=kite_client,
             allow_network_fetch=allow_network_fetch,
+            as_of=as_of,
         )
         if result.status == PEER_STATUS_AVAILABLE:
             return result.context

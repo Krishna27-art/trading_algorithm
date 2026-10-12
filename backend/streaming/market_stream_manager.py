@@ -1339,6 +1339,27 @@ class MarketStreamManager:
                 exc,
             )
 
+        try:
+            vix_tok = (
+                instrument_resolver.resolve_token(
+                    "INDIA VIX",
+                    exchange="NSE",
+                    kite_client=kite_client,
+                )
+                or instrument_resolver.resolve_token(
+                    "INDIAVIX",
+                    exchange="NSE",
+                    kite_client=kite_client,
+                )
+            )
+            if vix_tok:
+                resolved_index_token_to_symbol[int(vix_tok)] = "INDIA VIX"
+        except Exception as exc:
+            logger.debug(
+                "[MarketStreamManager] Failed to resolve INDIA VIX token: %s",
+                exc,
+            )
+
         all_tokens = list(
             dict.fromkeys(
                 list(resolved_token_to_symbol.keys())

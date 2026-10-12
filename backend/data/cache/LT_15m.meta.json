@@ -2,11 +2,11 @@
   "symbol": "LT",
   "instrument_token": 2939649,
   "interval": "15minute",
-  "start_date": "2026-08-17",
-  "end_date": "2026-10-08",
+  "start_date": "2026-08-28",
+  "end_date": "2026-10-12",
   "source": "Zerodha Kite Connect Historical API",
-  "downloaded_timestamp": "2026-10-08T11:30:36.704739+05:30",
-  "latest_completed_candle": "2026-10-08T11:15:00",
-  "candle_count": 818,
-  "trading_days": 35
+  "downloaded_timestamp": "2026-10-12T10:21:16.176198+05:30",
+  "latest_completed_candle": "2026-10-12T10:00:00",
+  "candle_count": 700,
+  "trading_days": 30
 }

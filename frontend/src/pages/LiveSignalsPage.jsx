@@ -53,6 +53,7 @@ const SHARED_SECRET_MISSING_MESSAGE =
  */
 export default function LiveSignalsPage({ isAuthenticated }) {
   const [filter, setFilter] = useState('all')
+  const [viewMode, setViewMode] = useState('signals')
   const [expanded, setExpanded] = useState(() => new Set())
   const [streamAction, setStreamAction] = useState('idle')
   const [streamError, setStreamError] = useState(null)
@@ -412,20 +413,47 @@ export default function LiveSignalsPage({ isAuthenticated }) {
         <>
           <Card>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-1 rounded-md border border-[var(--border-strong)] p-1 flex-wrap">
-                {STRATEGIES.map((strategy) => (
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center rounded-md border border-[var(--border-strong)] p-1 bg-black/20">
                   <button
-                    key={strategy.id}
-                    onClick={() => setFilter(strategy.id)}
-                    className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                      filter === strategy.id
-                        ? 'bg-[var(--accent-dim)] text-[var(--accent)]'
+                    onClick={() => setViewMode('signals')}
+                    className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                      viewMode === 'signals'
+                        ? 'bg-[var(--accent)] text-black'
                         : 'text-[var(--text-dim)] hover:text-[var(--text)]'
                     }`}
                   >
-                    {strategy.label}
+                    Active Signals ({visible.length})
                   </button>
-                ))}
+                  <button
+                    onClick={() => setViewMode('diagnostics')}
+                    className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                      viewMode === 'diagnostics'
+                        ? 'bg-[var(--accent)] text-black'
+                        : 'text-[var(--text-dim)] hover:text-[var(--text)]'
+                    }`}
+                  >
+                    Strategy Diagnostics ({candidates.length})
+                  </button>
+                </div>
+
+                {viewMode === 'signals' && (
+                  <div className="flex items-center gap-1 rounded-md border border-[var(--border-strong)] p-1 flex-wrap">
+                    {STRATEGIES.map((strategy) => (
+                      <button
+                        key={strategy.id}
+                        onClick={() => setFilter(strategy.id)}
+                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                          filter === strategy.id
+                            ? 'bg-[var(--accent-dim)] text-[var(--accent)]'
+                            : 'text-[var(--text-dim)] hover:text-[var(--text)]'
+                        }`}
+                      >
+                        {strategy.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="text-xs text-[var(--text-faint)] font-num">
@@ -437,7 +465,9 @@ export default function LiveSignalsPage({ isAuthenticated }) {
 
           <KeyInsights candidates={candidates} />
 
-          {visible.length === 0 ? (
+          {viewMode === 'diagnostics' ? (
+            <StrategyDiagnosticsSection candidates={candidates} />
+          ) : visible.length === 0 ? (
             <Card>
               <EmptyState
                 label={
@@ -1157,4 +1187,234 @@ function hasActiveSignal(candidate) {
   }
   const preds = Object.values(candidate.predictions || {})
   return preds.some(isStrategySignal)
+}
+
+function StrategyDiagnosticsSection({ candidates }) {
+  const [selectedSymbol, setSelectedSymbol] = useState('ALL')
+  const symbols = useMemo(() => ['ALL', ...candidates.map((c) => c.symbol)], [candidates])
+
+  const filteredCandidates = useMemo(() => {
+    if (selectedSymbol === 'ALL') return candidates
+    return candidates.filter((c) => c.symbol === selectedSymbol)
+  }, [candidates, selectedSymbol])
+
+  if (candidates.length === 0) {
+    return (
+      <Card>
+        <EmptyState
+          label="No candidate data available."
+          hint="Start the live stream to receive symbol evaluations."
+        />
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+        <span className="text-xs text-[var(--text-faint)] font-medium">Filter Symbol:</span>
+        {symbols.map((sym) => (
+          <button
+            key={sym}
+            onClick={() => setSelectedSymbol(sym)}
+            className={`px-2.5 py-1 rounded text-xs font-num transition-colors ${
+              selectedSymbol === sym
+                ? 'bg-[var(--accent)] text-black font-semibold'
+                : 'bg-white/[0.03] text-[var(--text-dim)] hover:text-[var(--text)] border border-[var(--border)]'
+            }`}
+          >
+            {sym}
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-4">
+        {filteredCandidates.map((candidate) => (
+          <CandidateDiagnosticsCard key={candidate.symbol} candidate={candidate} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function CandidateDiagnosticsCard({ candidate }) {
+  const preds = candidate.predictions || {}
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-[var(--border)]">
+        <div className="flex items-center gap-3">
+          <span className="text-lg font-bold font-num text-[var(--text)]">{candidate.symbol}</span>
+          <span className="text-sm font-num text-[var(--text-dim)]">{formatCurrency(candidate.ltp)}</span>
+          <StatusPill tone={consensusTone(candidate.consensus?.direction)}>
+            {candidate.consensus?.label || 'NO CONSENSUS'}
+          </StatusPill>
+        </div>
+        <div className="text-xs font-num text-[var(--text-faint)]">
+          Latest Update: {candidate.timestamp ? new Date(candidate.timestamp).toLocaleTimeString('en-IN') : '—'}
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead>
+            <tr className="border-b border-[var(--border)] text-[var(--text-faint)]">
+              <th className="pb-2 font-medium">Strategy</th>
+              <th className="pb-2 font-medium">Evaluation Status</th>
+              <th className="pb-2 font-medium">Readiness</th>
+              <th className="pb-2 font-medium">Candle Time</th>
+              <th className="pb-2 font-medium">Runtime State</th>
+              <th className="pb-2 font-medium">Rejection Reason</th>
+              <th className="pb-2 font-medium">Signal Validation</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[var(--border)]/30 font-num">
+            {ALL_STRATEGY_KEYS.map((key) => {
+              const pred = preds[key]
+              const diag = computeStrategyDiagnostics(key, pred, candidate)
+              return (
+                <tr key={key} className="hover:bg-white/[0.01]">
+                  <td className="py-2.5 font-semibold text-[var(--text)] whitespace-nowrap">
+                    {labelFor(key)}
+                  </td>
+                  <td className="py-2.5 whitespace-nowrap">
+                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium ${diag.evalStatusTone}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${diag.evalDot}`} />
+                      {diag.evalStatus}
+                    </span>
+                  </td>
+                  <td className="py-2.5 whitespace-nowrap">
+                    <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${diag.readinessTone}`}>
+                      {diag.readiness}
+                    </span>
+                  </td>
+                  <td className="py-2.5 text-[var(--text-dim)] whitespace-nowrap">
+                    {diag.candleTime}
+                  </td>
+                  <td className="py-2.5 text-[var(--text-dim)] whitespace-nowrap max-w-xs truncate" title={diag.runtimeState}>
+                    {diag.runtimeState}
+                  </td>
+                  <td className="py-2.5 text-[var(--text-dim)] max-w-md" title={diag.rejectionReason}>
+                    {diag.rejectionReason}
+                  </td>
+                  <td className="py-2.5 whitespace-nowrap">
+                    <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${diag.valTone}`}>
+                      {diag.validation}
+                    </span>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
+function computeStrategyDiagnostics(key, pred, candidate) {
+  if (!pred) {
+    return {
+      evalStatus: 'SKIPPED',
+      evalStatusTone: 'text-[var(--text-faint)] bg-white/[0.02]',
+      evalDot: 'bg-[var(--text-faint)]',
+      readiness: 'NOT EXECUTED',
+      readinessTone: 'text-[var(--text-faint)] bg-white/[0.02]',
+      candleTime: '—',
+      runtimeState: 'UNINITIALIZED',
+      rejectionReason: 'Strategy did not run in last evaluation pass',
+      validation: 'N/A',
+      valTone: 'text-[var(--text-faint)] bg-white/[0.02]',
+    }
+  }
+
+  const s = String(pred.status || '').toUpperCase()
+  const d = String(pred.direction || '').toUpperCase()
+  const isErr = s === 'ERROR'
+  const isUnavail = s === 'UNAVAILABLE' || s === 'STALE'
+  const isNotApp = s === 'NOT_APPLICABLE'
+  const isDir = d === 'LONG' || d === 'SHORT' || d === 'BUY' || d === 'SELL' || isStrategySignal(pred)
+
+  let evalStatus = isErr ? 'ERROR' : 'RAN'
+  let evalStatusTone = isErr ? 'text-red-400 bg-red-500/10' : 'text-emerald-400 bg-emerald-500/10'
+  let evalDot = isErr ? 'bg-red-400' : 'bg-emerald-400'
+
+  let readiness = 'READY'
+  let readinessTone = 'text-emerald-400 bg-emerald-500/10'
+  if (isNotApp) {
+    readiness = 'NOT APPLICABLE'
+    readinessTone = 'text-[var(--text-faint)] bg-white/[0.04]'
+  } else if (isUnavail) {
+    readiness = s === 'STALE' ? 'STALE DATA' : 'UNAVAILABLE'
+    readinessTone = 'text-[var(--warning)] bg-[var(--warning-dim)]'
+  } else if (s === 'WAITING' || s === 'MONITORING' || s === 'BUFFER_ZONE') {
+    readiness = 'WAITING'
+    readinessTone = 'text-[var(--accent)] bg-[var(--accent-dim)]'
+  }
+
+  const candleTime = candidate.timestamp
+    ? new Date(candidate.timestamp).toLocaleTimeString('en-IN')
+    : '—'
+
+  let runtimeState = 'ACTIVE'
+  const lv = pred.levels || {}
+  if (key === 'ssf_l5_srm') {
+    if (lv.regime_ok) {
+      runtimeState = `WARMED UP (${lv.bars_tracked ?? 30} 1m BARS)`
+    } else if (lv.bars_tracked != null) {
+      runtimeState = `ACCUMULATING (${lv.bars_tracked}/30 1m BARS)`
+    } else {
+      runtimeState = 'NO 1m BARS'
+    }
+  } else if (key === 'aou_oss') {
+    const candles = lv.candle_count != null ? `${lv.candle_count}/152 BARS` : '>= 152 BARS'
+    const l2 = lv.l2_passed ? 'L2 GATE OK' : (lv.best_bid ? 'L2 CHECK' : 'NO L2 BOOK')
+    runtimeState = `${candles} · ${l2}`
+  } else if (key === 'sector_impulse') {
+    const l = lv.leader ? `LEADER: ${lv.leader}` : 'NO LEADER'
+    runtimeState = lv.lead_lag_k != null ? `FITTED (k=${lv.lead_lag_k}) · ${l}` : `CALIBRATING · ${l}`
+  } else if (key === 'crsd') {
+    const peers = lv.hedge_peers?.length ? `${lv.hedge_peers.length} PEERS` : 'NO PEERS'
+    runtimeState = lv.entry_z != null ? `FITTED · ${peers}` : `CALIBRATING · ${peers}`
+  } else if (key === 'apex') {
+    const vix = lv.india_vix != null ? `VIX ${lv.india_vix}` : 'VIX CACHED'
+    runtimeState = `SESSION OPEN · ${vix}`
+  } else if (key === 'orb') {
+    runtimeState = '09:15-09:45 IST WINDOW'
+  } else if (key === 'cpr') {
+    runtimeState = 'PRIOR SESSION PIVOTS'
+  } else if (key === 'dual_ema') {
+    runtimeState = '>= 200 BARS WARMED UP'
+  }
+
+  const rejectionReason = pred.reason || (isDir ? 'Validated entry qualification passed' : 'Criteria not met for directional trigger')
+
+  let validation = 'NO SETUP'
+  let valTone = 'text-[var(--text-faint)] bg-white/[0.02]'
+  if (isDir) {
+    validation = `VALIDATED ${d || 'SIGNAL'}`
+    valTone = d === 'LONG' || d === 'BUY' ? 'text-[var(--positive)] bg-[var(--positive-dim)]' : 'text-[var(--negative)] bg-[var(--negative-dim)]'
+  } else if (isUnavail) {
+    validation = 'DATA GATE FAILED'
+    valTone = 'text-[var(--warning)] bg-[var(--warning-dim)]'
+  } else if (isNotApp) {
+    validation = 'NOT APPLICABLE'
+    valTone = 'text-[var(--text-faint)] bg-white/[0.02]'
+  } else if (isErr) {
+    validation = 'ERROR'
+    valTone = 'text-red-400 bg-red-500/10'
+  }
+
+  return {
+    evalStatus,
+    evalStatusTone,
+    evalDot,
+    readiness,
+    readinessTone,
+    candleTime,
+    runtimeState,
+    rejectionReason,
+    validation,
+    valTone,
+  }
 }

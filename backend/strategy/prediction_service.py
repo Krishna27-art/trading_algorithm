@@ -487,6 +487,10 @@ class _PreparedCandles:
     today_digest: str = ""
     dropped: Dict[str, int] = field(default_factory=dict)
 
+    @property
+    def latest_candle_time(self) -> Optional[datetime]:
+        return self.source_candle_ts
+
     @classmethod
     def failure(
         cls,
@@ -1744,7 +1748,7 @@ class PredictionService:
             )
 
         active_ssf_strategy = ssf_strategy
-        if active_ssf_strategy is None and book_snapshot is not None and hasattr(self, "_ssf_runtimes"):
+        if active_ssf_strategy is None and book_snapshot is not None and live_ltp_by_symbol is None and hasattr(self, "_ssf_runtimes"):
             with self._ssf_runtimes_lock:
                 key = str(inst.symbol).strip().upper()
                 if key not in self._ssf_runtimes:
@@ -2288,6 +2292,12 @@ class PredictionService:
             if key not in {"status", "reason", "direction", "entry", "stop_loss", "target"}
         }
         levels["india_vix_source"] = vix_source
+        levels["india_vix"] = apex_context.get("india_vix")
+        levels["previous_close"] = getattr(strategy, "previous_close", None)
+        levels["previous_atr"] = getattr(strategy, "previous_atr", None)
+        levels["today_open"] = getattr(strategy, "today_open", None)
+        levels["rvol"] = analysis.get("rvol")
+        levels["vwap"] = analysis.get("vwap")
         levels["context_missing"] = sorted(
             k for k in ("order_imbalance", "sector_rs", "market_rs") if apex_context.get(k) is None
         )
@@ -2332,17 +2342,19 @@ class PredictionService:
 
         ctx = peer_context
         build_error: Optional[Exception] = None
+        status_res = None
         if ctx is None or not hasattr(ctx, "before"):
             ctx = None
             try:
                 from backend.data.sector_peer_manager import SectorPeerManager
-                ctx = SectorPeerManager.build_peer_context(
+                status_res = SectorPeerManager.build_peer_context_with_status(
                     symbol=inst.symbol,
                     cache_dir=self.cache_dir,
                     kite_client=kite_client,
                     allow_network_fetch=kite_client is not None,
                     as_of=prep.latest_candle_time,
                 )
+                ctx = status_res.context
             except Exception as exc:
                 build_error = exc
 
@@ -2352,6 +2364,13 @@ class PredictionService:
                     STATE_NOT_APPLICABLE,
                     reason=f"Sector impulse does not apply: {inst.symbol} has no sector classification.",
                     levels={}, metrics={},
+                )
+            if status_res is not None and status_res.reason:
+                return SingleStrategyPrediction(
+                    STATE_UNAVAILABLE,
+                    reason=status_res.reason,
+                    levels={"frame_latest": getattr(status_res, "frame_latest", {}), "stale": getattr(status_res, "stale", False)},
+                    metrics={},
                 )
             if build_error is not None:
                 return SingleStrategyPrediction(
@@ -2370,14 +2389,22 @@ class PredictionService:
 
         model = getattr(strategy, "model", None)
         levels: Dict[str, Any] = {}
+        try:
+            from backend.data.sector_peer_manager import SectorPeerManager
+            l_sym, m_sym, s_sym = SectorPeerManager.get_peer_symbols(inst.symbol)
+            levels["leader"] = l_sym
+            levels["market"] = m_sym
+            levels["sector"] = s_sym
+        except Exception:
+            pass
         if model:
             rho = _finite_number(model.get("rho"))
             mkt_sig = _finite_number(model.get("mkt_sig"))
-            levels = {
+            levels.update({
                 "lead_lag_k": _safe_scalar(model.get("k")),
                 "rho": round(rho, 3) if rho is not None else None,
                 "mkt_sig": round(mkt_sig, 4) if mkt_sig is not None else None,
-            }
+            })
 
         directional = self._directional_prediction(
             current_signal, ltp,
@@ -2708,12 +2735,15 @@ class PredictionService:
 
         if len(prep.data) < 152:
             return SingleStrategyPrediction(
-                STATE_UNAVAILABLE, reason="Insufficient 15-minute history for AOU-OSS calibration."
+                STATE_UNAVAILABLE,
+                reason=f"Insufficient 15-minute history for AOU-OSS calibration ({len(prep.data)}/152 candles).",
+                levels={"candle_count": len(prep.data), "required_candles": 152},
             )
         if not prep.warmup_complete:
             return SingleStrategyPrediction(
                 STATE_UNAVAILABLE,
                 reason=f"Prior-session candles have gaps ({prep.warmup_reason}).",
+                levels={"candle_count": len(prep.data), "warmup_reason": prep.warmup_reason},
             )
 
         best_bid, best_ask = (None, None)
@@ -2746,7 +2776,6 @@ class PredictionService:
                 for _, row in new_rows.iterrows():
                     latest_signal = strategy.on_candle(self._candle_dict(row), float(row["vwap"]))
                 if not new_rows.empty:
-                    # AOU votes only on the signal of the latest completed candle.
                     rt.last_signal = latest_signal
                     rt.last_candle_open = new_rows.iloc[-1]["datetime"]
                 rt.consumed_rows = len(prep.today_df)
@@ -2759,6 +2788,11 @@ class PredictionService:
                 raise
 
         levels = {
+            "candle_count": len(prep.data),
+            "warmup_reason": prep.warmup_reason,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "l2_passed": state.get("l2_passed"),
             "rolling_vwap": _finite_number(state.get("rolling_vwap")),
             "spread": _finite_number(state.get("spread")),
             "equilibrium": _finite_number(state.get("equilibrium")),
@@ -2801,7 +2835,7 @@ class PredictionService:
                         reason="Required live data missing: AOU-OSS Level-2 best bid/ask is unavailable or invalid.",
                         levels=levels,
                     )
-                reason = "AOU Level-2 spread gate failed."
+                reason = f"AOU Level-2 spread gate failed (spread={state.get('l2_spread_bps')} bps, bid={best_bid}, ask={best_ask})."
             else:
                 reason = "AOU-OSS calibration not ready or gates not satisfied."
             return SingleStrategyPrediction(STATE_NO_TRADE, reason=reason, levels=levels)

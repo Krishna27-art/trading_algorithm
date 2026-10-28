@@ -908,10 +908,14 @@ class LiveSignalEngine:
                 )
             }
 
+            # Peer/market frames must end at the SAME bar being evaluated.
+            # ``as_of`` is a wall-clock "now" for the completed-candle lookup,
+            # so pass the candle's completion time, not its open time (the
+            # open time resolves to the previous bar and misaligns peers).
             crsd_ctx = self._crsd_runtime.get_context(
                 symbol,
                 kite_client=kite_client,
-                as_of=candle_timestamp,
+                as_of=candle_end,
             )
 
             peer_ctx = None
@@ -922,7 +926,7 @@ class LiveSignalEngine:
                     symbol,
                     kite_client=kite_client,
                     allow_network_fetch=kite_client is not None,
-                    as_of=candle_timestamp,
+                    as_of=candle_end,
                 )
             except Exception as peer_exc:
                 logger.debug(

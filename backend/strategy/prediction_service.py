@@ -491,6 +491,18 @@ class _PreparedCandles:
     def latest_candle_time(self) -> Optional[datetime]:
         return self.source_candle_ts
 
+    @property
+    def latest_candle_close_time(self) -> Optional[datetime]:
+        """Completion time of the latest bar (open + 15m).
+
+        Context builders take ``as_of`` as a wall-clock "now" and resolve the
+        latest COMPLETED bar from it. Passing the bar's open time resolves to
+        the PREVIOUS bar and leaves peer frames one bar behind the stock.
+        """
+        if self.source_candle_ts is None:
+            return None
+        return self.source_candle_ts + timedelta(minutes=DEFAULT_TIMEFRAME_MINUTES)
+
     @classmethod
     def failure(
         cls,
@@ -2352,7 +2364,7 @@ class PredictionService:
                     cache_dir=self.cache_dir,
                     kite_client=kite_client,
                     allow_network_fetch=kite_client is not None,
-                    as_of=prep.latest_candle_time,
+                    as_of=prep.latest_candle_close_time,
                 )
                 ctx = status_res.context
             except Exception as exc:
@@ -2471,7 +2483,7 @@ class PredictionService:
                     symbol=inst.symbol,
                     cache_dir=self.cache_dir,
                     kite_client=kite_client,
-                    as_of=prep.latest_candle_time,
+                    as_of=prep.latest_candle_close_time,
                 )
             except Exception as exc:
                 return SingleStrategyPrediction(

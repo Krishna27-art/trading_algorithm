@@ -127,6 +127,28 @@ class _ThrottledKiteClient:
         return throttled
 
 
+_MARKET_INDEX_SYMBOLS = frozenset({"NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__"})
+
+
+def _index_candle_route(symbol: str, index_symbols: Any) -> str:
+    """
+    Route a completed candle from the index aggregator.
+
+    "market"        -> the NIFTY 50 bar: CRSD's market leg.
+    "index_context" -> any other subscribed index (sector indices, INDIA VIX):
+                       kept in live state only. Writing it into the CRSD market
+                       frame would overwrite the NIFTY bar at the same timestamp
+                       with an unrelated price level (e.g. VIX ~13).
+    "stock"         -> a normal equity candle.
+    """
+    clean = str(symbol or "").strip().upper()
+    if clean in _MARKET_INDEX_SYMBOLS:
+        return "market"
+    if clean in (index_symbols or ()):
+        return "index_context"
+    return "stock"
+
+
 def _safe_positive_float(value: Any) -> Optional[float]:
     try:
         parsed = float(value)
@@ -1438,11 +1460,11 @@ class MarketStreamManager:
 
             live_market_state.update_candle_close(candle_dict, vwap)
 
-            if (
-                symbol in ("NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__")
-                or symbol in index_symbol_set
-            ):
+            route = _index_candle_route(symbol, index_symbol_set)
+            if route == "market":
                 crsd_live_runtime.update_market_candle(candle_dict)
+                return
+            if route == "index_context":
                 return
 
             crsd_live_runtime.update_stock_candle(candle_dict)

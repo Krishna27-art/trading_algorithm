@@ -74,7 +74,7 @@ _MAD_TO_SD = 1.4826
 
 
 # =============================================================================
-from backend.data.sector_peer_manager import SectorPeerManager
+from backend.data.sector_peer_manager import SectorPeerManager, merge_with_live_candles
 
 
 # =============================================================================
@@ -331,6 +331,21 @@ def build_crsd_context(
 
         if df is not None:
             return df
+
+        # Stale or missing cache: top it up with the real completed bars the
+        # live stream already holds before falling back to a Kite fetch.
+        live_df = _read_cached_15m(sym, c_dir, latest_required_timestamp=None)
+        live_df = merge_with_live_candles(live_df, sym)
+        if (
+            live_df is not None
+            and not live_df.empty
+            and {"datetime", "open", "high", "low", "close", "volume"}.issubset(live_df.columns)
+            and (
+                latest_required_timestamp is None
+                or pd.Timestamp(live_df["datetime"].max()) >= pd.Timestamp(latest_required_timestamp)
+            )
+        ):
+            return live_df
 
         if kite_client is None:
             return None

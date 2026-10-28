@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.routes.market import get_market_prices
+from backend.data.time_utils import now_ist_naive
 
 
 def test_market_prices_unauthenticated():
@@ -18,7 +19,7 @@ def test_market_prices_unauthenticated():
 def test_market_prices_authenticated_700_stocks():
     """When Kite is connected, return all 700 stocks with calculated change and percentage."""
     mock_kite = MagicMock()
-    now = datetime.now()
+    now = now_ist_naive()
     
     # Mock quote response for sample instruments
     def mock_quote(instruments):
@@ -79,7 +80,7 @@ def test_market_prices_partial_data_unavailable():
             "ohlc": {"open": 1400.0, "close": 1400.0},
             "volume": 1000000,
             "average_price": 1410.0,
-            "timestamp": datetime.now(),
+            "timestamp": now_ist_naive(),
         }
     }
 

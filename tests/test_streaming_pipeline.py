@@ -1,6 +1,7 @@
 from datetime import datetime, time
 import pandas as pd
 import pytest
+from backend.data.time_utils import now_ist_naive
 
 from backend.streaming.live_market_state import LiveMarketState, live_market_state
 from backend.streaming.live_signal_engine import LiveSignalEngine, live_signal_engine
@@ -104,7 +105,7 @@ def test_live_market_state_and_signal_engine_candle_close():
         "volume": 5000,
     }
     live_market_state.update_candle_close(today_candle, vwap=2458.0)
-    live_signal_engine.record_tick_price("RELIANCE", 2460.0, datetime.now())
+    live_signal_engine.record_tick_price("RELIANCE", 2460.0, now_ist_naive())
 
     # Trigger live signal engine
     res = live_signal_engine.on_candle_close(today_candle, vwap=2458.0)
@@ -233,7 +234,7 @@ def test_market_stream_manager_kite_client_propagation(monkeypatch):
         "close": 2505.0,
         "volume": 1000,
     }
-    live_signal_engine.record_tick_price("RELIANCE", 2505.0, datetime.now())
+    live_signal_engine.record_tick_price("RELIANCE", 2505.0, now_ist_naive())
     market_stream_manager.aggregator.on_candle_close(candle, vwap=2502.0)
 
     import time

@@ -1641,9 +1641,20 @@ class PredictionService:
                 STATE_ERROR, f"Evaluation failed: {type(exc).__name__}: {exc}"
             )
 
-        return self._finalize(
+        predictions, consensus = self._finalize(
             clean_symbol, predictions, ltp, source_ts, started, stale_reason, requested_at
         )
+        # Price-action / order-flow facts (swing structure, liquidity sweep, FVG,
+        # anchored VWAP, order book). Informational only: never alters signals.
+        try:
+            from backend.indicators.market_context import build_indicator_context
+
+            consensus["indicators"] = build_indicator_context(
+                df_15m, ltp if ltp is not None else current_ltp, book_snapshot
+            )
+        except Exception as exc:
+            logger.debug(f"[PredictionService] indicator context skipped for {clean_symbol}: {exc}")
+        return predictions, consensus
 
     def _evaluate_all(
         self,

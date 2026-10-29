@@ -22,73 +22,49 @@ logger = logging.getLogger("backend_api.signals")
 
 router = APIRouter()
 
-STRATEGY_ALIASES = {"sit": "sector_impulse", "ssf": "ssf_l5_srm"}
+STRATEGY_ALIASES = {"gap": "gap_fade", "rsi": "rsi_ema", "orb": "orb_sip"}
 
 STRATEGY_REGISTRY = {
-    "cpr": {
-        "name": "Central Pivot Range (CPR) Regime Breakout & Mean-Reversion",
-        "description": "Dynamic pivot width regime detection (Narrow/Wide/Neutral) with boundary breakout entries",
-        "timeframe": "15m candles",
-        "key_levels": ["TC", "Pivot P", "BC", "R1", "S1", "VWAP"],
-    },
-    "dual_ema": {
-        "name": "Adaptive Volatility-Buffered Dual-EMA Trend System",
-        "description": "Fast 9-EMA / 21-EMA trend ribbon with ATR-scaled noise buffer to eliminate chop",
-        "timeframe": "15m candles",
-        "key_levels": ["EMA-9", "EMA-21", "ATR Buffer", "VWAP"],
-    },
-    "orb": {
-        "name": "30-Minute Volatility-Filtered Opening Range Breakout (ORB)",
-        "description": "Classic 09:15-09:45 Opening Range breakout with session VWAP confirmation",
-        "timeframe": "15m candles",
-        "key_levels": ["OR High", "OR Low", "VWAP"],
-    },
-    "apex": {
-        "name": "APEX-AIVEM Pre-Market Catalyst & Momentum Engine",
-        "description": "Composite score (gap/ATR, RVOL, VWAP, candle imbalance) with optional VIX/GIFT-Nifty/sector context",
-        "timeframe": "15m candles",
-        "key_levels": ["VWAP", "ATR Stop", "ATR Target", "Gap/ATR Ratio"],
-    },
-    "sector_impulse": {
-        "name": "Sector Impulse Transmission (SIT)",
-        "description": "Cross-sectional lead-lag transmission trading lagging peers after idiosyncratic volume shock in sector leader",
-        "timeframe": "15m candles",
-        "key_levels": ["Leader Return", "Idiosyncratic Shock", "Gap Sigma", "Time Stop"],
-    },
-    "ssf_l5_srm": {
-        "name": "Single-Stock Futures L5 Microprice & Sector Residual Momentum (SSF-L5-SRM)",
-        "description": "Level-5 order flow imbalance, microprice drift, futures basis z-score, and sector residual momentum",
-        "timeframe": "Tick / L5 Depth / 15m Regime",
-        "key_levels": ["Microprice Dev", "Basis Z-Score", "OFI Imbalance", "Parkinson Vol"],
-    },
-    "aou_oss": {
-        "name": "Analytic Ornstein-Uhlenbeck Optimal-Stopping System (AOU-OSS)",
-        "description": "Rolling 32-bar RVWAP spread, Kendall-corrected OU calibration, half-life & Garman-Klass volatility gates, with numerical Bertram optimal stopping boundaries",
-        "timeframe": "15m candles",
-        "key_levels": ["RVWAP", "Spread", "Equilibrium", "Long Boundary", "Short Boundary", "Stop Barrier"],
-    },
-    "crsd": {
-        "name": "Cross-Sectional Residual Shock Divergence",
+    "gap_fade": {
+        "name": "Gap Fade",
         "description": (
-            "Intraday market-neutral residual divergence "
-            "strategy using a target stock and peer hedge basket."
+            "Stock opens 1%+ away from yesterday's close. If the first 30 minutes move "
+            "back against the gap, trade toward yesterday's close. Stop: first-30-min "
+            "high/low. Best result in backtests (+0.31% net per trade)."
         ),
         "timeframe": "15m candles",
-        "key_levels": [
-            "Residual Z-Score",
-            "Cross-Sectional Z-Score",
-            "Entry Z",
-            "Exit Z",
-            "Residual Spread",
-            "Hedge Basket",
-            "Risk Scale",
-        ],
+        "key_levels": ["Previous Close", "Gap %", "First 30m High", "First 30m Low"],
+        "schedule": {"entry_start": "09:45", "entry_end": "09:45", "square_off_time": "15:15"},
+        "risk_reward_ratio": None,
+    },
+    "rsi_ema": {
+        "name": "RSI x 9 EMA",
+        "description": (
+            "RSI(14) crosses its 9-period EMA. Buy only when RSI is below 50 and price is "
+            "above VWAP; short only when RSI is above 50 and price is below VWAP. Only on "
+            "days when the 09:15 candle volume is 1.5x normal. Small edge in backtests."
+        ),
+        "timeframe": "15m candles",
+        "key_levels": ["RSI 14", "RSI EMA 9", "VWAP", "Relative Volume"],
+        "schedule": {"entry_start": "10:00", "entry_end": "14:15", "square_off_time": "15:15"},
+        "risk_reward_ratio": 3.0,
+    },
+    "orb_sip": {
+        "name": "ORB 30-min, Stocks in Play (experimental)",
+        "description": (
+            "Breakout of the 09:15-09:45 range, only when the 09:15 candle volume is 2.5x "
+            "normal. Stop: middle of the range. Did NOT pass its backtest; paper trade only."
+        ),
+        "timeframe": "15m candles",
+        "key_levels": ["Range High", "Range Low", "Relative Volume"],
+        "schedule": {"entry_start": "10:00", "entry_end": "11:30", "square_off_time": "15:15"},
+        "risk_reward_ratio": 2.0,
     },
 }
 
 
 def _canonical_strategy(name: Optional[str], default: str) -> str:
-    key = (name or default or "cpr").lower()
+    key = (name or default or "gap_fade").lower()
     key = STRATEGY_ALIASES.get(key, key)
     if key not in STRATEGY_REGISTRY:
         raise HTTPException(
@@ -128,29 +104,14 @@ def get_strategy_state(strategy: Optional[str] = None):
         "configured_exchange": settings.instruments[0].exchange,
         "session_phase": phase,
         "schedule": {
-            "market_open": (
-                settings.strategy.market_open.strftime("%H:%M")
-                + " IST"
-            ),
-            "entry_start": (
-                settings.strategy.entry_start.strftime("%H:%M")
-                + " IST"
-            ),
-            "entry_end": (
-                settings.strategy.entry_end.strftime("%H:%M")
-                + " IST"
-            ),
-            "square_off_time": (
-                settings.strategy.square_off_time.strftime("%H:%M")
-                + " IST"
-            ),
-            "hard_cutoff_time": (
-                settings.strategy.hard_cutoff_time.strftime("%H:%M")
-                + " IST"
-            ),
+            "market_open": settings.strategy.market_open.strftime("%H:%M") + " IST",
+            "entry_start": strat_meta["schedule"]["entry_start"] + " IST",
+            "entry_end": strat_meta["schedule"]["entry_end"] + " IST",
+            "square_off_time": strat_meta["schedule"]["square_off_time"] + " IST",
+            "hard_cutoff_time": strat_meta["schedule"]["square_off_time"] + " IST",
         },
-        "risk_reward_ratio": settings.strategy.risk_reward_ratio,
-        "breakeven_r_multiple": settings.strategy.breakeven_r_multiple,
+        "risk_reward_ratio": strat_meta["risk_reward_ratio"],
+        "breakeven_r_multiple": None,
         "broker": "ZERODHA_KITE",
         "read_only": True,
     }

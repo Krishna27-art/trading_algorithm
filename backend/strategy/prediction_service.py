@@ -10,10 +10,6 @@ Live safety rules enforced here:
   No default value is ever substituted for a missing required input.
 - Directional signals are validated before publication.
 - Price-breached directional signals are invalidated before publication.
-- SSF never reconstructs a fresh signal from stale internal direction state, and
-  never runs on a blank, freshly-built strategy object.
-- CRSD never substitutes a historical hedge close for a live hedge price, and
-  never accepts an un-timestamped hedge quote.
 - Candles: forming candle excluded, duplicates removed, chronological order,
   only valid rows kept, off-grid rows dropped, missing candles are NEVER
   fabricated (gaps => UNAVAILABLE for today / WAITING for warm-up history),
@@ -51,54 +47,38 @@ import copy
 import hashlib
 import math
 from collections import OrderedDict
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta
 from threading import Lock
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from backend.config.settings import AppSettings, InstrumentConfig, settings
-from backend.config.universe import create_instrument_config_for_equity
 from backend.data.time_utils import MarketCalendar
 from backend.data.time_utils import now_ist_naive
-from backend.indicators.vwap import calculate_session_vwap  # noqa: F401  (kept for API compatibility)
 from backend.monitoring.logger import logger
-from backend.strategy.apex_engine import ApexStrategy
 from backend.strategy.base_strategy import SignalAction, StrategySignal
-from backend.strategy.cpr_strategy import CPRRegimeBreakoutStrategy, Regime
-from backend.strategy.dual_ema_strategy import BufferedDualEMAStrategy
-from backend.strategy.aou_oss_strategy import AouOssStrategy
-from backend.strategy.crsd_strategy import CRSDStrategy
-from backend.strategy.orb_strategy import IntradayORBStrategy
-from backend.strategy.sector_impulse_strategy import SectorImpulseStrategy
-from backend.strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy  # noqa: F401  (kept for API compatibility)
+from backend.strategy.gap_fade_strategy import GapFadeStrategy
+from backend.strategy.intraday_base import IntradaySignalStrategy
+from backend.strategy.orb_sip_strategy import OrbSipStrategy
+from backend.strategy.rsi_ema_strategy import RsiEmaStrategy
 
 
-STRATEGY_KEYS = (
-    "orb",
-    "cpr",
-    "dual_ema",
-    "apex",
-    "sector_impulse",
-    "ssf_l5_srm",
-    "aou_oss",
-    "crsd",
-)
+STRATEGY_CLASSES = {
+    GapFadeStrategy.key: GapFadeStrategy,
+    RsiEmaStrategy.key: RsiEmaStrategy,
+    OrbSipStrategy.key: OrbSipStrategy,
+}
 
-# CRSD is a pair/relative-value strategy and is intentionally kept outside the
-# single-name directional consensus. It is still evaluated independently and
-# is returned to the frontend as its own strategy result.
+STRATEGY_KEYS = tuple(STRATEGY_CLASSES)
+
+# ORB-SIP did not pass its backtest (lost money in the first half of the test
+# period), so it is shown on its own but never counted in the consensus vote.
 LIVE_CONSENSUS_STRATEGIES = (
-    "orb",
-    "cpr",
-    "dual_ema",
-    "apex",
-    "sector_impulse",
-    "ssf_l5_srm",
-    "aou_oss",
+    GapFadeStrategy.key,
+    RsiEmaStrategy.key,
 )
 
 REQUIRED_CANDLE_COLUMNS = {
@@ -532,32 +512,6 @@ class _ReplayOutcome:
     flags: Dict[str, Any]
 
 
-@dataclass
-class _StrategyRuntime:
-    """
-    Persistent per-symbol runtime for STATEFUL strategies (AOU-OSS, CRSD).
-
-    The strategy instance is reused across evaluations within a session and is
-    only fed candles it has not yet consumed. It is rebuilt whenever the
-    session, the warm-up history, the supplied context object, or the already
-    consumed candles change (so it can never drift from the validated data).
-    """
-    strategy: Any
-    session_date: date
-    lookback_digest: str = ""
-    ctx: Any = None
-    consumed_rows: int = 0
-    consumed_digest: str = ""
-    last_signal: Optional[StrategySignal] = None      # AOU: signal of the latest candle
-    current_signal: Optional[StrategySignal] = None   # CRSD: open signal until exited
-    last_candle_open: Optional[Any] = None
-    lock: Any = field(default_factory=Lock)
-
-
-# Backwards-compatible alias (previous name of the AOU-only runtime).
-_AouRuntime = _StrategyRuntime
-
-
 def _digest_frame(df: pd.DataFrame) -> str:
     """Stable content digest of a candle frame (used for cache/runtime validity)."""
     if df is None or df.empty or not set(_DIGEST_COLUMNS).issubset(df.columns):
@@ -600,20 +554,10 @@ class PredictionService:
         self.cache_dir = self.settings.base_dir / "backend" / "data" / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stateful strategy runtimes (one per symbol per strategy - never shared).
-        self._aou_runtimes: Dict[str, _StrategyRuntime] = {}
-        self._aou_runtimes_lock = Lock()
-        self._crsd_runtimes: Dict[str, _StrategyRuntime] = {}
-        self._crsd_runtimes_lock = Lock()
-        self._ssf_runtimes: Dict[str, Any] = {}
-        self._ssf_runtimes_lock = Lock()
-
-        # Deterministic replay cache (ORB / CPR / Dual-EMA only).
+        # Deterministic replay cache (every strategy is a pure function of
+        # its validated candles).
         self._replay_cache: "OrderedDict[Tuple[Any, ...], _ReplayOutcome]" = OrderedDict()
         self._replay_cache_lock = Lock()
-
-        self._lot_size_cache: Dict[str, Tuple[date, int]] = {}
-        self._lot_size_lock = Lock()
 
     # ======================================================================
     # CANDLE VALIDATION / PREPARATION
@@ -1011,7 +955,7 @@ class PredictionService:
         return current_signal
 
     # ======================================================================
-    # DETERMINISTIC REPLAY CACHE (ORB / CPR / Dual-EMA only)
+    # DETERMINISTIC REPLAY CACHE
     # ======================================================================
 
     def _cached_replay(
@@ -1057,86 +1001,9 @@ class PredictionService:
             flags=copy.deepcopy(outcome.flags),
         )
 
-    # ======================================================================
-    # STATEFUL RUNTIMES (AOU-OSS / CRSD)
-    # ======================================================================
-
-    @staticmethod
-    def _runtime_prefix_ok(rt: _StrategyRuntime, today_df: pd.DataFrame) -> bool:
-        """The candles the runtime already consumed must still be exactly today's prefix."""
-        n = rt.consumed_rows
-        if n == 0:
-            return True
-        if n > len(today_df):
-            return False
-        return _digest_frame(today_df.iloc[:n]) == rt.consumed_digest
-
-    @contextmanager
-    def _runtime_session(
-        self,
-        store: Dict[str, _StrategyRuntime],
-        store_lock: Any,
-        key: str,
-        prep: _PreparedCandles,
-        factory: Callable[[], _StrategyRuntime],
-        ctx: Any = None,
-    ) -> Iterator[_StrategyRuntime]:
-        """
-        Yield this symbol's runtime, LOCKED, rebuilding it if it is no longer
-        consistent with the validated data (new session, changed warm-up
-        history, different context object, or revised already-consumed candles).
-        """
-        while True:
-            with store_lock:
-                rt = store.get(key)
-                stale = (
-                    rt is None
-                    or rt.session_date != prep.latest_date
-                    or rt.lookback_digest != prep.lookback_digest
-                    or (ctx is not None and rt.ctx is not ctx)
-                )
-                if stale:
-                    rt = factory()
-                    store[key] = rt
-            rt.lock.acquire()
-            with store_lock:
-                current = store.get(key) is rt
-            if current and self._runtime_prefix_ok(rt, prep.today_df):
-                break
-            rt.lock.release()
-            if current:
-                with store_lock:
-                    if store.get(key) is rt:
-                        del store[key]
-        try:
-            yield rt
-        finally:
-            rt.lock.release()
-
-    @staticmethod
-    def _drop_runtime(store: Dict[str, _StrategyRuntime], store_lock: Any, key: str, rt: _StrategyRuntime) -> None:
-        with store_lock:
-            if store.get(key) is rt:
-                del store[key]
-
-    def _prune_runtimes(self, today: date) -> None:
-        for store, lock in (
-            (self._aou_runtimes, self._aou_runtimes_lock),
-            (self._crsd_runtimes, self._crsd_runtimes_lock),
-        ):
-            with lock:
-                for key in [k for k, rt in store.items() if rt.session_date < today]:
-                    del store[key]
-
     def reset_symbol_state(self, symbol: str) -> None:
         """Drop all persistent state for a symbol (e.g. on feed reconnect)."""
         key = str(symbol or "").strip().upper()
-        for store, lock in (
-            (self._aou_runtimes, self._aou_runtimes_lock),
-            (self._crsd_runtimes, self._crsd_runtimes_lock),
-        ):
-            with lock:
-                store.pop(key, None)
         with self._replay_cache_lock:
             for k in [k for k in self._replay_cache if k[1] == key]:
                 del self._replay_cache[k]
@@ -1241,95 +1108,6 @@ class PredictionService:
             signal_timestamp=_normalize_ist_naive(getattr(signal, "timestamp", None)),
         )
 
-    @staticmethod
-    def _prediction_from_crsd_signal(
-        status: str,
-        signal: StrategySignal,
-        default_reason: str,
-        levels: Optional[Dict[str, Any]] = None,
-        metrics: Optional[Dict[str, Any]] = None,
-        min_hedge_legs: int = 1,
-    ) -> SingleStrategyPrediction:
-        target_sym = str(signal.symbol or "").strip().upper()
-
-        def reject(reason: str) -> SingleStrategyPrediction:
-            # A malformed CRSD signal is invalid strategy OUTPUT => ERROR, never a vote.
-            return SingleStrategyPrediction(
-                status=STATE_ERROR,
-                reason=f"CRSD signal rejected: {reason}",
-                levels=levels or {},
-                metrics=metrics or {},
-                strategy="crsd",
-                symbol=target_sym or None,
-            )
-
-        if not target_sym:
-            return reject("primary target symbol is missing.")
-        if signal.action not in (SignalAction.BUY, SignalAction.SELL):
-            return reject(f"invalid primary action '{signal.action}'.")
-
-        price = _positive_number(signal.price)
-        if price is None:
-            return reject(f"invalid primary price '{signal.price}'.")
-        if not isinstance(signal.timestamp, datetime):
-            return reject(f"invalid timestamp '{signal.timestamp}'.")
-
-        hedge_legs = signal.hedge_legs
-        if not isinstance(hedge_legs, dict) or len(hedge_legs) < min_hedge_legs:
-            return reject("hedge basket is missing or insufficient.")
-
-        validated_basket: Dict[str, float] = {}
-        for h_sym, h_weight in hedge_legs.items():
-            clean_h_sym = str(h_sym or "").strip().upper()
-            if not clean_h_sym or clean_h_sym == target_sym:
-                return reject("invalid hedge symbol in basket.")
-            weight = _finite_number(h_weight)
-            if weight is None:
-                return reject(f"invalid hedge weight for {clean_h_sym}.")
-            if abs(weight) < 1e-6:
-                return reject(f"zero/invalid hedge weight for {clean_h_sym}.")
-            validated_basket[clean_h_sym] = weight
-
-        hedge_symbol_str: Optional[str] = None
-        hedge_action_str: Optional[str] = None
-        hedge_entry_val: Optional[float] = None
-        if signal.hedge_symbol:
-            clean_primary_hedge = str(signal.hedge_symbol).strip().upper()
-            if clean_primary_hedge not in validated_basket:
-                return reject(f"primary hedge '{clean_primary_hedge}' not in basket.")
-            if signal.hedge_action not in (SignalAction.BUY, SignalAction.SELL):
-                return reject("invalid hedge action.")
-            if signal.hedge_action == signal.action:
-                return reject("hedge action must be opposite to primary action.")
-            hedge_entry_val = _positive_number(signal.hedge_price)
-            if hedge_entry_val is None:
-                return reject("live hedge price is invalid.")
-            hedge_symbol_str = clean_primary_hedge
-            hedge_action_str = signal.hedge_action.value
-
-        pair_prices = {target_sym: price}
-        if hedge_symbol_str is not None and hedge_entry_val is not None:
-            pair_prices[hedge_symbol_str] = hedge_entry_val
-
-        return SingleStrategyPrediction(
-            status=status,
-            direction="LONG" if signal.action == SignalAction.BUY else "SHORT",
-            entry=price,
-            stop_loss=_positive_number(signal.stop_loss),
-            target=_positive_number(signal.target),
-            reason=signal.reason or default_reason,
-            levels=levels or {},
-            metrics=metrics or {},
-            hedge_symbol=hedge_symbol_str,
-            hedge_action=hedge_action_str,
-            hedge_entry=hedge_entry_val,
-            hedge_legs=validated_basket,
-            strategy="crsd",
-            symbol=target_sym,
-            pair_prices=pair_prices,
-            hedge_notional_weights=validated_basket,
-            signal_timestamp=_normalize_ist_naive(signal.timestamp),
-        )
 
     @staticmethod
     def _validate_signal_risk(
@@ -1356,224 +1134,6 @@ class PredictionService:
                 return False, f"Short target ({target}) must be below entry ({entry})."
         return True, None
 
-    # ======================================================================
-    # LIVE QUOTES / ORDER BOOK / APEX CONTEXT
-    # ======================================================================
-
-    def _quote_price(
-        self,
-        raw: Any,
-        now: datetime,
-        max_age_seconds: float,
-    ) -> Tuple[Optional[float], Optional[str]]:
-        """
-        Resolve a live quote to (price, None) or (None, why_not).
-
-        A quote must be a positive price WITH a timestamp that is recent. An
-        un-timestamped number cannot be proven fresh and is rejected unless
-        ALLOW_UNTIMESTAMPED_LIVE_QUOTES is explicitly enabled.
-        """
-        if raw is None:
-            return None, "missing"
-        if isinstance(raw, (tuple, list)) and len(raw) == 2:
-            price = _positive_number(raw[0])
-            ts = _normalize_ist_naive(raw[1])
-            if price is None:
-                return None, "invalid price"
-            if ts is None:
-                return None, "missing/invalid timestamp"
-            age = (now - ts).total_seconds()
-            if age < -self.MAX_CLOCK_SKEW_SECONDS or age > max_age_seconds:
-                return None, f"stale (age={age:.1f}s)"
-            return price, None
-        price = _positive_number(raw)
-        if price is None:
-            return None, "invalid price"
-        if self.ALLOW_UNTIMESTAMPED_LIVE_QUOTES:
-            return price, None
-        return None, "no timestamp (freshness cannot be verified)"
-
-    @staticmethod
-    def _level_price_qty(level: Any) -> Optional[Tuple[float, float]]:
-        """Parse one depth level into (price>0, qty>=0) or None."""
-        price: Any
-        qty: Any
-        if isinstance(level, dict):
-            price = level.get("price")
-            qty = level.get("quantity", level.get("qty"))
-        elif isinstance(level, (list, tuple)):
-            if len(level) < 2:
-                return None
-            price, qty = level[0], level[1]
-        else:
-            price = getattr(level, "price", None)
-            qty = getattr(level, "quantity", getattr(level, "qty", None))
-        p = _positive_number(price)
-        q = _finite_number(qty)
-        if p is None or q is None or q < 0:
-            return None
-        return p, q
-
-    def _validate_book(
-        self,
-        book_snapshot: Any,
-        min_levels: int,
-        now: datetime,
-    ) -> Optional[str]:
-        """Return a reason string if the book is unusable, else None."""
-        if book_snapshot is None:
-            return "no order-book snapshot supplied"
-        bids = getattr(book_snapshot, "bids", None)
-        asks = getattr(book_snapshot, "asks", None)
-        if not isinstance(bids, (list, tuple)) or not isinstance(asks, (list, tuple)):
-            return "order-book snapshot has no bid/ask ladders"
-        if len(bids) < min_levels or len(asks) < min_levels:
-            return f"order book has fewer than {min_levels} bid/ask levels"
-        parsed_bids = [self._level_price_qty(l) for l in bids[:min_levels]]
-        parsed_asks = [self._level_price_qty(l) for l in asks[:min_levels]]
-        if any(p is None for p in parsed_bids) or any(p is None for p in parsed_asks):
-            return "order book contains invalid price/quantity levels"
-        if parsed_bids[0][0] >= parsed_asks[0][0]:  # type: ignore[index]
-            return "order book is crossed or locked"
-        if hasattr(book_snapshot, "timestamp") and getattr(book_snapshot, "timestamp", None) is not None:
-            ts = _normalize_ist_naive(getattr(book_snapshot, "timestamp"))
-            if ts is None:
-                return "order-book timestamp is invalid"
-            age = (now - ts).total_seconds()
-            if abs(age) < 86400 * 7:
-                if age < -self.MAX_CLOCK_SKEW_SECONDS or age > self.MAX_BOOK_AGE_SECONDS:
-                    return f"order book is stale (age={age:.1f}s)"
-        return None
-
-    def _extract_best_bid_ask(self, book_snapshot: Any) -> Tuple[Optional[float], Optional[float]]:
-        bids = getattr(book_snapshot, "bids", None)
-        asks = getattr(book_snapshot, "asks", None)
-        if not bids or not asks:
-            return None, None
-        best_bid = self._level_price_qty(bids[0])
-        best_ask = self._level_price_qty(asks[0])
-        if best_bid is None or best_ask is None or best_bid[0] >= best_ask[0]:
-            return None, None
-        return best_bid[0], best_ask[0]
-
-    def _order_imbalance(self, book_snapshot: Any) -> Optional[float]:
-        """Top-5 depth imbalance in [-1, 1], or None if it cannot be computed."""
-        try:
-            if isinstance(book_snapshot, dict):
-                buy_depth = book_snapshot.get("buy", []) or []
-                sell_depth = book_snapshot.get("sell", []) or []
-                buy_qty = sum(float(i.get("quantity", 0)) for i in buy_depth if isinstance(i, dict))
-                sell_qty = sum(float(i.get("quantity", 0)) for i in sell_depth if isinstance(i, dict))
-            elif hasattr(book_snapshot, "bids") and hasattr(book_snapshot, "asks"):
-                bids = (getattr(book_snapshot, "bids", None) or [])[:5]
-                asks = (getattr(book_snapshot, "asks", None) or [])[:5]
-                buy_qty = sum(p[1] for p in map(self._level_price_qty, bids) if p is not None)
-                sell_qty = sum(p[1] for p in map(self._level_price_qty, asks) if p is not None)
-            else:
-                return None
-        except (TypeError, ValueError):
-            return None
-        total = buy_qty + sell_qty
-        if not math.isfinite(total) or total <= 0:
-            return None
-        return (buy_qty - sell_qty) / float(total)
-
-    def _load_cached_vix(self, now: datetime) -> Optional[float]:
-        """Last daily VIX close, accepted ONLY if the file proves it is recent."""
-        try:
-            vix_file = self.cache_dir / "daily" / "INDIA_VIX_day.csv"
-            if not vix_file.exists():
-                return None
-            vix_df = pd.read_csv(vix_file)
-            if vix_df.empty or "close" not in vix_df.columns:
-                return None
-            date_col = next((c for c in ("datetime", "date", "timestamp") if c in vix_df.columns), None)
-            if date_col is None:
-                return None
-            target_date = now.date() if hasattr(now, "date") else now
-            dates = pd.to_datetime(vix_df[date_col]).dt.date
-            valid_df = vix_df[dates <= target_date]
-            if valid_df.empty:
-                return None
-            as_of_date = dates[dates <= target_date].iloc[-1]
-            if (target_date - as_of_date).days > self.MAX_CACHED_VIX_AGE_DAYS or (target_date - as_of_date).days < 0:
-                return None
-            return _positive_number(valid_df["close"].iloc[-1])
-        except Exception:
-            return None
-
-    def _get_live_apex_context(
-        self,
-        symbol: str,
-        book_snapshot: Optional[Any] = None,
-        kite_client: Optional[Any] = None,
-        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
-        peer_context: Optional[Any] = None,
-        as_of: Optional[datetime] = None,
-    ) -> Optional[Dict[str, Any]]:
-        now = now_ist_naive()
-        target_time = as_of if as_of is not None else now
-
-        india_vix: Optional[float] = None
-        vix_source: Optional[str] = None
-        if live_ltp_by_symbol:
-            raw_vix = live_ltp_by_symbol.get("INDIA VIX")
-            if raw_vix is None:
-                raw_vix = live_ltp_by_symbol.get("INDIAVIX")
-            india_vix, why = self._quote_price(raw_vix, now, self.MAX_VIX_QUOTE_AGE_SECONDS)
-            if india_vix is not None:
-                vix_source = "live"
-            elif raw_vix is not None:
-                logger.warning(f"[PredictionService] Live India VIX rejected: {why}")
-        if india_vix is None:
-            try:
-                from backend.streaming.live_market_state import live_market_state
-                vix_st = live_market_state.get_symbol_state("INDIA VIX") or live_market_state.get_symbol_state("INDIAVIX")
-                if vix_st and vix_st.ltp and vix_st.last_tick_time:
-                    india_vix, why = self._quote_price((vix_st.ltp, vix_st.last_tick_time), now, self.MAX_VIX_QUOTE_AGE_SECONDS)
-                    if india_vix is not None:
-                        vix_source = "live"
-            except Exception:
-                pass
-        if india_vix is None and kite_client is not None:
-            try:
-                vix_quote = kite_client.quote(["NSE:INDIA VIX"])
-                q = vix_quote.get("NSE:INDIA VIX", {})
-                if q:
-                    px = q.get("last_price")
-                    ts = q.get("timestamp") or q.get("last_trade_time") or now
-                    india_vix, why = self._quote_price((px, ts), now, self.MAX_VIX_QUOTE_AGE_SECONDS)
-                    if india_vix is not None:
-                        vix_source = "live"
-            except Exception as exc:
-                logger.debug(f"[PredictionService] Live Kite VIX quote fetch failed: {exc}")
-        if india_vix is None:
-            india_vix = self._load_cached_vix(target_time)
-            if india_vix is not None:
-                vix_source = "cached_daily_close"
-        if india_vix is None:
-            return None
-
-        order_imbalance = self._order_imbalance(book_snapshot) if book_snapshot is not None else None
-
-        sector_rs = None
-        market_rs = None
-        if peer_context is not None and hasattr(peer_context, "sector_rs"):
-            sector_rs = _finite_number(getattr(peer_context, "sector_rs", None))
-            market_rs = _finite_number(getattr(peer_context, "market_rs", None))
-
-        return {
-            "india_vix": india_vix,
-            "calendar_blackout": False,
-            "gift_nifty_gap": None,
-            "sector_rs": sector_rs,
-            "market_rs": market_rs,
-            "catalyst_score": None,
-            "order_imbalance": order_imbalance,
-            "_vix_source": vix_source,
-        }
-
-    @staticmethod
     def _error_prediction(strategy_name: str, exc: Exception) -> SingleStrategyPrediction:
         return SingleStrategyPrediction(
             status=STATE_ERROR,
@@ -1599,30 +1159,23 @@ class PredictionService:
         current_ltp: Optional[float] = None,
         token: Optional[int] = None,
         stock_metric: Optional[Any] = None,
-        book_snapshot: Optional[Any] = None,
-        peer_context: Optional[Any] = None,
-        kite_client: Optional[Any] = None,
-        ssf_strategy: Optional[Any] = None,
-        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
-        crsd_context: Optional[Any] = None,
         ltp_timestamp: Optional[Any] = None,
         requested_at: Optional[Any] = None,
-        ssf_applicable: Optional[bool] = None,
         max_ltp_age_seconds: Optional[float] = None,
+        **_unused: Any,
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Dict[str, Any]]:
         """
         Evaluate every strategy for ``symbol``.
 
-        Returns ``(predictions, consensus)`` exactly as before. Every prediction
-        and the consensus now also carry ``evaluated_at``, ``source_candle_ts``
-        and ``freshness``.
+        Returns ``(predictions, consensus)``. Every prediction and the
+        consensus also carry ``evaluated_at``, ``source_candle_ts`` and
+        ``freshness``.
 
-        MarketStreamManager integration (all optional, additive):
-          * ``requested_at``  - when the manager snapshotted candles/LTP/book. If the
-            result is only produced long after this, it is marked STALE.
+        Optional inputs:
+          * ``requested_at``  - when candles/LTP were snapshotted. If the result
+            is only produced long after this, it is marked STALE.
           * ``ltp_timestamp`` - time of the supplied LTP; stale LTP => UNAVAILABLE.
-          * ``ssf_applicable``- False when the symbol has no single-stock futures
-            (SSF => NOT_APPLICABLE). None = unknown (SSF still needs its book/runtime).
+        Extra keyword arguments are accepted and ignored.
         """
         started = now_ist_naive()
         clean_symbol = str(symbol or "").strip().upper()
@@ -1636,15 +1189,7 @@ class PredictionService:
                 df_15m=df_15m,
                 started=started,
                 current_ltp=current_ltp,
-                token=token,
-                book_snapshot=book_snapshot,
-                peer_context=peer_context,
-                kite_client=kite_client,
-                ssf_strategy=ssf_strategy,
-                live_ltp_by_symbol=live_ltp_by_symbol,
-                crsd_context=crsd_context,
                 ltp_timestamp=ltp_timestamp,
-                ssf_applicable=ssf_applicable,
                 max_ltp_age_seconds=max_ltp_age_seconds,
             )
         except Exception as exc:  # fail closed: never a signal on an unexpected failure
@@ -1663,31 +1208,14 @@ class PredictionService:
         df_15m: pd.DataFrame,
         started: datetime,
         current_ltp: Optional[float],
-        token: Optional[int],
-        book_snapshot: Optional[Any],
-        peer_context: Optional[Any],
-        kite_client: Optional[Any],
-        ssf_strategy: Optional[Any],
-        live_ltp_by_symbol: Optional[Dict[str, Any]],
-        crsd_context: Optional[Any],
         ltp_timestamp: Optional[Any],
-        ssf_applicable: Optional[bool],
         max_ltp_age_seconds: Optional[float],
     ) -> Tuple[Dict[str, SingleStrategyPrediction], Optional[float], Optional[datetime], Optional[str]]:
         """Returns (predictions, ltp, source_candle_ts, stale_reason)."""
         if not clean_symbol:
             return self._uniform_predictions(STATE_UNAVAILABLE, "Symbol is missing."), None, None, None
 
-        resolved_crsd_context = crsd_context
-        resolved_peer_context = peer_context
-        if resolved_crsd_context is None and resolved_peer_context is not None:
-            if hasattr(resolved_peer_context, "market") and not hasattr(resolved_peer_context, "before"):
-                resolved_crsd_context = resolved_peer_context
-                resolved_peer_context = None
-
-        self._prune_runtimes(started.date())
-
-        # One validation pass, shared (read-only) by every independent strategy.
+        # One validation pass, shared (read-only) by every strategy.
         prep = self._build_prepared(clean_symbol, df_15m, started)
         if not prep.ok:
             return (
@@ -1722,145 +1250,18 @@ class PredictionService:
                 reason = f"Live LTP is stale (age={ltp_age:.1f}s, max={max_age:.0f}s)."
                 return self._uniform_predictions(STATE_UNAVAILABLE, reason), ltp, source_ts, reason
 
-        session_reference_price = _positive_number(prep.today_df["open"].iloc[0])
-        if session_reference_price is None:
-            return (
-                self._uniform_predictions(STATE_UNAVAILABLE, "Current-session opening price is invalid."),
-                ltp, source_ts, None,
-            )
-
-        # Lot size is metadata and must come from the actual instrument master.
-        if kite_client is None:
-            try:
-                from backend.broker.kite_adapter import get_active_kite
-                kite_client = get_active_kite()
-            except Exception:
-                pass
-
-        lot_size = self._resolve_lot_size(clean_symbol, kite_client, started.date())
-        if lot_size is None or lot_size <= 0:
-            return (
-                self._uniform_predictions(STATE_UNAVAILABLE, "Live instrument lot size is unavailable."),
-                ltp, source_ts, None,
-            )
-
-        try:
-            inst = create_instrument_config_for_equity(
-                clean_symbol,
-                token,
-                current_price=float(session_reference_price),
-                lot_size=lot_size,
-            )
-        except Exception as exc:
-            return (
-                self._uniform_predictions(
-                    STATE_ERROR, f"Instrument configuration failed: {type(exc).__name__}: {exc}"
-                ),
-                ltp, source_ts, None,
-            )
-
-        active_ssf_strategy = ssf_strategy
-        if active_ssf_strategy is None and book_snapshot is not None and live_ltp_by_symbol is None and hasattr(self, "_ssf_runtimes"):
-            with self._ssf_runtimes_lock:
-                key = str(inst.symbol).strip().upper()
-                if key not in self._ssf_runtimes:
-                    from backend.strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
-                    self._ssf_runtimes[key] = SsfL5SrmStrategy(inst, self.settings.strategy, signal_only=True)
-                active_ssf_strategy = self._ssf_runtimes[key]
-
-        evaluators: Tuple[Tuple[str, str, Callable[[], SingleStrategyPrediction]], ...] = (
-            ("orb", "ORB", lambda: self._evaluate_orb(inst, prep, ltp)),
-            ("cpr", "CPR", lambda: self._evaluate_cpr(inst, prep, ltp)),
-            ("dual_ema", "Dual EMA", lambda: self._evaluate_dual_ema(inst, prep, ltp)),
-            (
-                "apex",
-                "APEX",
-                lambda: self._evaluate_apex(
-                    inst, prep, ltp,
-                    book_snapshot=book_snapshot,
-                    kite_client=kite_client,
-                    live_ltp_by_symbol=live_ltp_by_symbol,
-                    peer_context=resolved_peer_context,
-                ),
-            ),
-            (
-                "sector_impulse",
-                "Sector Impulse",
-                lambda: self._evaluate_sector_impulse(
-                    inst, prep, ltp, peer_context=resolved_peer_context, kite_client=kite_client
-                ),
-            ),
-            (
-                "ssf_l5_srm",
-                "SSF-L5-SRM",
-                lambda: self._evaluate_ssf_l5_srm(
-                    inst, prep, ltp,
-                    book_snapshot=book_snapshot,
-                    ssf_strategy=active_ssf_strategy,
-                    ssf_applicable=ssf_applicable,
-                ),
-            ),
-            (
-                "aou_oss",
-                "AOU-OSS",
-                lambda: self._evaluate_aou_oss(
-                    inst, prep, ltp,
-                    book_snapshot=book_snapshot,
-                    allow_historical_session=False,
-                ),
-            ),
-            (
-                "crsd",
-                "CRSD",
-                lambda: self._evaluate_crsd(
-                    inst, prep, ltp,
-                    peer_context=resolved_crsd_context,
-                    kite_client=kite_client,
-                    live_ltp_by_symbol=live_ltp_by_symbol,
-                ),
-            ),
-        )
-
         predictions: Dict[str, SingleStrategyPrediction] = {}
-        for key, display_name, evaluator in evaluators:
+        for key, cls in STRATEGY_CLASSES.items():
             try:
-                result = evaluator()
+                result = self._evaluate_strategy(key, cls, clean_symbol, prep, ltp)
                 if not isinstance(result, SingleStrategyPrediction):
                     raise TypeError(f"evaluator returned {type(result).__name__}")
                 predictions[key] = result
             except Exception as exc:  # strategy exception => ERROR, never a signal
-                logger.error(f"[PredictionService] {display_name} failed for {clean_symbol}: {type(exc).__name__}: {exc}")
-                predictions[key] = self._error_prediction(display_name, exc)
+                logger.error(f"[PredictionService] {cls.display_name} failed for {clean_symbol}: {type(exc).__name__}: {exc}")
+                predictions[key] = self._error_prediction(cls.display_name, exc)
 
         return predictions, ltp, source_ts, None
-
-    def _resolve_lot_size(self, symbol: str, kite_client: Optional[Any], today: date) -> Optional[int]:
-        """Lot size from the instrument master; cached per symbol per session."""
-        with self._lot_size_lock:
-            cached = self._lot_size_cache.get(symbol)
-            if cached is not None and cached[0] == today:
-                return cached[1]
-        try:
-            from backend.data.instrument_resolver import instrument_resolver
-            lot_size = instrument_resolver.resolve_lot_size(
-                symbol,
-                exchange="NSE",
-                instrument_type="EQ",
-                kite_client=kite_client,
-                fallback=None,
-            )
-        except Exception as exc:
-            logger.warning(f"Live instrument lot-size resolution failed for {symbol}: {exc}")
-            return None
-        try:
-            lot = int(lot_size)
-        except (TypeError, ValueError):
-            return None
-        if lot <= 0:
-            return None
-        with self._lot_size_lock:
-            self._lot_size_cache[symbol] = (today, lot)
-        return lot
 
     # ======================================================================
     # FRESHNESS
@@ -2068,795 +1469,96 @@ class PredictionService:
             return self._prediction_from_signal(short_status, signal, ltp, short_reason, levels)
         return None
 
-    @staticmethod
-    def _sector_known(symbol: str) -> Optional[bool]:
-        """True = has a sector, False = no sector classification, None = cannot tell."""
-        try:
-            from backend.data.sector_peer_manager import SectorPeerManager
-            return SectorPeerManager.get_sector_for_symbol(symbol) is not None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _strategy_symbol(strategy: Any) -> Optional[str]:
-        """Best-effort symbol a persistent strategy object was built for."""
-        for path in (("symbol",), ("inst", "symbol"), ("instrument", "symbol"), ("config", "symbol")):
-            obj: Any = strategy
-            for attr in path:
-                obj = getattr(obj, attr, None)
-                if obj is None:
-                    break
-            if isinstance(obj, str) and obj.strip():
-                return obj.strip().upper()
-        return None
 
     # ======================================================================
-    # ORB  (deterministic: shared candle context + digest-keyed replay cache)
+    # STRATEGY REPLAY (Gap Fade / RSI x EMA / ORB-SIP)
     # ======================================================================
 
-    def _replay_orb(self, inst: InstrumentConfig, prep: _PreparedCandles) -> _ReplayOutcome:
-        strategy = IntradayORBStrategy(inst, self.settings.strategy)
+    @staticmethod
+    def _replay_strategy(
+        strategy: IntradaySignalStrategy,
+        prep: _PreparedCandles,
+    ) -> _ReplayOutcome:
+        """
+        Seed the strategy with prior sessions, then feed today's completed
+        candles in order. A signal is treated as taken at once, so the
+        strategy itself reports the stop / target / 15:15 exit afterwards and
+        an old signal is never shown again once it has resolved.
+        """
+        strategy.seed_context(prep.lookback_df.copy())
         strategy.reset_session(prep.latest_date)
-        signal = self._replay_rows(strategy, prep.today_df)
+        current: Optional[StrategySignal] = None
+        for _, row in prep.today_df.iterrows():
+            sig = strategy.on_candle(PredictionService._candle_dict(row), float(row["vwap"]))
+            if sig is None:
+                continue
+            if sig.action in (SignalAction.BUY, SignalAction.SELL):
+                current = sig
+                strategy.register_trade_entry(
+                    entry_price=float(sig.price),
+                    position=1 if sig.action == SignalAction.BUY else -1,
+                    stop_loss=float(sig.stop_loss),
+                    target=float(sig.target),
+                    risk_dist=abs(float(sig.price) - float(sig.stop_loss)),
+                )
+            elif sig.action == SignalAction.EXIT:
+                current = None
+                strategy.register_trade_exit()
+        flags = {
+            "signalled_today": bool(strategy.signalled_today),
+            "exit_reason": strategy.last_exit_reason,
+            "note": getattr(strategy, "status_note", ""),
+            "context_ready": strategy.daily_atr is not None and strategy.prev_close is not None,
+        }
+        return _ReplayOutcome(current, strategy.levels(), flags)
 
-        orb_info: Dict[str, Any] = {}
-        flags = {"orb_present": strategy.orb is not None, "orb_valid": False}
-        if strategy.orb is not None:
-            flags["orb_valid"] = bool(strategy.orb.is_valid_volatility)
-            orb_info = {
-                "orb_high": round(float(strategy.orb.high), 2),
-                "orb_low": round(float(strategy.orb.low), 2),
-                "orb_width": round(float(strategy.orb.width), 2),
-                "is_valid_volatility": bool(strategy.orb.is_valid_volatility),
-            }
-        return _ReplayOutcome(signal, orb_info, flags)
-
-    def _evaluate_orb(self, inst: InstrumentConfig, data: Any, ltp: float) -> SingleStrategyPrediction:
-        prep, failure = self._resolve_prepared(inst.symbol, data)
+    def _evaluate_strategy(
+        self,
+        key: str,
+        cls: Any,
+        symbol: str,
+        data: Any,
+        ltp: float,
+    ) -> SingleStrategyPrediction:
+        prep, failure = self._resolve_prepared(symbol, data)
         if failure is not None:
             return failure
-        outcome = self._cached_replay("orb", inst, prep, lambda: self._replay_orb(inst, prep))
+        warm = self._warmup_failure(prep, cls.display_name, full_history=True)
+        if warm is not None:
+            return warm
+
+        inst = InstrumentConfig(symbol=symbol)
+        outcome = self._cached_replay(key, inst, prep, lambda: self._replay_strategy(cls(symbol), prep))
         levels = outcome.levels
 
-        directional = self._directional_prediction(
-            outcome.signal, ltp,
-            "LONG_BREAKOUT", "SHORT_BREAKDOWN",
-            "Price broke above the 30-minute ORB high with VWAP confirmation.",
-            "Price broke below the 30-minute ORB low with VWAP confirmation.",
-            levels,
-        )
-        if directional is not None:
-            return directional
-        if not outcome.flags["orb_present"]:
-            return SingleStrategyPrediction(
-                STATE_WAITING, reason="Establishing the 30-minute opening range (09:15-09:45 IST).",
-                levels=levels,
+        if outcome.signal is not None:
+            label = key.upper()
+            directional = self._directional_prediction(
+                outcome.signal, ltp,
+                f"{label}_LONG", f"{label}_SHORT",
+                f"{cls.display_name} buy signal.", f"{cls.display_name} sell signal.",
+                levels,
             )
-        if not outcome.flags["orb_valid"]:
-            return SingleStrategyPrediction(
-                STATE_NO_TRADE, reason="Opening range failed the configured volatility filter.", levels=levels
-            )
-        return SingleStrategyPrediction(
-            STATE_NO_TRADE, reason="No valid ORB breakout signal on the latest completed candle.", levels=levels
-        )
+            if directional is not None:
+                return directional
 
-    # ======================================================================
-    # CPR  (deterministic)
-    # ======================================================================
-
-    def _replay_cpr(self, inst: InstrumentConfig, prep: _PreparedCandles) -> _ReplayOutcome:
-        strategy = CPRRegimeBreakoutStrategy(inst, self.settings.strategy)
-        strategy.seed_context(prep.lookback_df.copy())
-        strategy.reset_session(prep.latest_date)
-        signal = self._replay_rows(strategy, prep.today_df)
-
-        levels: Dict[str, Any] = {}
-        if strategy.pivots:
-            levels = {
-                "pivot": round(float(strategy.pivots["P"]), 2),
-                "bottom_central": round(float(strategy.pivots["BC"]), 2),
-                "top_central": round(float(strategy.pivots["TC"]), 2),
-                "r1": round(float(strategy.pivots["R1"]), 2),
-                "s1": round(float(strategy.pivots["S1"]), 2),
-                "cpr_width_pct": round(float(strategy.pivots["width_pct"]), 2),
-                "regime": _safe_scalar(strategy.regime),
-            }
-        return _ReplayOutcome(signal, levels, {"regime_neutral": strategy.regime == Regime.NEUTRAL})
-
-    def _evaluate_cpr(self, inst: InstrumentConfig, data: Any, ltp: float) -> SingleStrategyPrediction:
-        prep, failure = self._resolve_prepared(inst.symbol, data)
-        if failure is not None:
-            return failure
-        warm = self._warmup_failure(prep, "CPR", full_history=False)
-        if warm is not None:
-            return warm
-        outcome = self._cached_replay("cpr", inst, prep, lambda: self._replay_cpr(inst, prep))
-
-        directional = self._directional_prediction(
-            outcome.signal, ltp,
-            "BULLISH_EXPANSION", "BEARISH_EXPANSION",
-            "Valid CPR bullish breakout on the latest completed candle.",
-            "Valid CPR bearish breakdown on the latest completed candle.",
-            outcome.levels,
-        )
-        if directional is not None:
-            return directional
-        return SingleStrategyPrediction(
-            STATE_NO_TRADE,
-            reason=("CPR regime is neutral; no directional setup is active."
-                    if outcome.flags["regime_neutral"]
-                    else "No valid CPR trigger on the latest completed candle."),
-            levels=outcome.levels,
-        )
-
-    # ======================================================================
-    # DUAL EMA  (deterministic)
-    # ======================================================================
-
-    def _replay_dual_ema(self, inst: InstrumentConfig, prep: _PreparedCandles) -> _ReplayOutcome:
-        strategy = BufferedDualEMAStrategy(inst, self.settings.strategy)
-        strategy.seed_context(prep.lookback_df.copy())
-        strategy.reset_session(prep.latest_date)
-        signal = self._replay_rows(strategy, prep.today_df)
-
-        levels: Dict[str, Any] = {}
-        current_indicators, _ = strategy.latest_indicators()
-        if current_indicators is not None:
-            atr = _positive_number(current_indicators.get("atr14"))
-            if atr is not None:
-                levels = {
-                    "ema_fast": round(float(current_indicators["ema9"]), 2),
-                    "ema_slow": round(float(current_indicators["ema21"]), 2),
-                    "sma_trend": round(float(current_indicators["sma200"]), 2),
-                    "atr_14": round(float(current_indicators["atr14"]), 2),
-                    "buffer": round(float(strategy.buffer_gamma * atr), 2),
-                }
-        return _ReplayOutcome(signal, levels, {"indicators_ready": current_indicators is not None})
-
-    def _evaluate_dual_ema(
-        self,
-        inst: InstrumentConfig,
-        data: Any = None,
-        ltp: float = 0.0,
-        df_15m: Optional[pd.DataFrame] = None,
-        df_15m_all: Optional[pd.DataFrame] = None,
-        **kwargs: Any,
-    ) -> SingleStrategyPrediction:
-        data_to_use = df_15m if df_15m is not None else (df_15m_all if df_15m_all is not None else data)
-        prep, failure = self._resolve_prepared(inst.symbol, data_to_use)
-        if failure is not None:
-            return failure
-        if len(prep.days) < 2:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason="Dual-EMA requires prior-session history for SMA200/ATR warm-up.",
-            )
-        outcome = self._cached_replay("dual_ema", inst, prep, lambda: self._replay_dual_ema(inst, prep))
-
-        directional = self._directional_prediction(
-            outcome.signal, ltp,
-            "TRENDING_LONG", "TRENDING_SHORT",
-            "Validated bullish Dual-EMA buffer crossover with SMA200 trend confirmation.",
-            "Validated bearish Dual-EMA buffer crossover with SMA200 trend confirmation.",
-            outcome.levels,
-        )
-        if directional is not None:
-            return directional
-        if not outcome.flags["indicators_ready"]:
+        if not outcome.flags["context_ready"]:
             return SingleStrategyPrediction(
                 STATE_WAITING,
-                reason="Historical warmup incomplete: insufficient valid history for the SMA200/ATR14 warm-up.",
-                levels=outcome.levels,
-            )
-        return SingleStrategyPrediction(
-            STATE_NO_TRADE,
-            reason="No valid Dual-EMA crossover signal on the latest completed candle.",
-            levels=outcome.levels,
-        )
-
-    # ======================================================================
-    # APEX  (depends on live context => rebuilt per evaluation, never cached)
-    # ======================================================================
-
-    def _evaluate_apex(
-        self,
-        inst: InstrumentConfig,
-        data: Any,
-        ltp: float,
-        book_snapshot: Optional[Any] = None,
-        kite_client: Optional[Any] = None,
-        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
-        peer_context: Optional[Any] = None,
-    ) -> SingleStrategyPrediction:
-        prep, failure = self._resolve_prepared(inst.symbol, data)
-        if failure is not None:
-            return failure
-        warm = self._warmup_failure(prep, "APEX (ATR/gap context)")
-        if warm is not None:
-            return warm
-
-        apex_context = self._get_live_apex_context(
-            symbol=inst.symbol,
-            book_snapshot=book_snapshot,
-            kite_client=kite_client,
-            live_ltp_by_symbol=live_ltp_by_symbol,
-            peer_context=peer_context,
-            as_of=prep.latest_candle_time,
-        )
-        if apex_context is None:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason="Required live data missing: APEX needs a fresh India VIX (none available; no default is substituted).",
-                levels={}, metrics={},
-            )
-        vix_source = apex_context.pop("_vix_source", None)
-
-        strategy = ApexStrategy(inst, self.settings.strategy)
-        strategy.seed_context(prep.lookback_df.copy())
-        strategy.reset_session(prep.latest_date)
-        strategy.set_context(**apex_context)
-        current_signal = self._replay_rows(strategy, prep.today_df)
-
-        analysis = getattr(strategy, "last_analysis", None) or {}
-        levels = {
-            key: _safe_scalar(value)
-            for key, value in analysis.items()
-            if key not in {"status", "reason", "direction", "entry", "stop_loss", "target"}
-        }
-        levels["india_vix_source"] = vix_source
-        levels["india_vix"] = apex_context.get("india_vix")
-        levels["previous_close"] = getattr(strategy, "previous_close", None)
-        levels["previous_atr"] = getattr(strategy, "previous_atr", None)
-        levels["today_open"] = getattr(strategy, "today_open", None)
-        levels["rvol"] = analysis.get("rvol")
-        levels["vwap"] = analysis.get("vwap")
-        levels["context_missing"] = sorted(
-            k for k in ("order_imbalance", "sector_rs", "market_rs") if apex_context.get(k) is None
-        )
-
-        directional = self._directional_prediction(
-            current_signal, ltp,
-            "APEX_LONG", "APEX_SHORT",
-            "APEX generated a validated bullish signal.",
-            "APEX generated a validated bearish signal.",
-            levels,
-        )
-        if directional is not None:
-            return directional
-
-        status = str(analysis.get("status", "NO_TRADE"))
-        if status.upper() in {"LONG", "SHORT", "BUY", "SELL"}:
-            status = "NO_TRADE"  # a bare direction without a validated signal is not a vote
-        return SingleStrategyPrediction(
-            status=status,
-            reason=str(analysis.get("reason", "APEX criteria not met.")),
-            levels=levels,
-        )
-
-    # ======================================================================
-    # SECTOR IMPULSE  (depends on peer context => rebuilt per evaluation)
-    # ======================================================================
-
-    def _evaluate_sector_impulse(
-        self,
-        inst: InstrumentConfig,
-        data: Any,
-        ltp: float,
-        peer_context: Optional[Any] = None,
-        kite_client: Optional[Any] = None,
-    ) -> SingleStrategyPrediction:
-        prep, failure = self._resolve_prepared(inst.symbol, data)
-        if failure is not None:
-            return failure
-        warm = self._warmup_failure(prep, "Sector impulse")
-        if warm is not None:
-            return warm
-
-        ctx = peer_context
-        build_error: Optional[Exception] = None
-        status_res = None
-        if ctx is None or not hasattr(ctx, "before"):
-            ctx = None
-            try:
-                from backend.data.sector_peer_manager import SectorPeerManager
-                status_res = SectorPeerManager.build_peer_context_with_status(
-                    symbol=inst.symbol,
-                    cache_dir=self.cache_dir,
-                    kite_client=kite_client,
-                    allow_network_fetch=kite_client is not None,
-                    as_of=prep.latest_candle_close_time,
-                )
-                ctx = status_res.context
-            except Exception as exc:
-                build_error = exc
-
-        if ctx is None:
-            if self._sector_known(inst.symbol) is False:
-                return SingleStrategyPrediction(
-                    STATE_NOT_APPLICABLE,
-                    reason=f"Sector impulse does not apply: {inst.symbol} has no sector classification.",
-                    levels={}, metrics={},
-                )
-            if status_res is not None and status_res.reason:
-                return SingleStrategyPrediction(
-                    STATE_UNAVAILABLE,
-                    reason=status_res.reason,
-                    levels={"frame_latest": getattr(status_res, "frame_latest", {}), "stale": getattr(status_res, "stale", False)},
-                    metrics={},
-                )
-            if build_error is not None:
-                return SingleStrategyPrediction(
-                    STATE_UNAVAILABLE,
-                    reason=f"Sector peer context unavailable: {type(build_error).__name__}: {build_error}",
-                    levels={}, metrics={},
-                )
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE, reason="Sector leader/index peer context is unavailable.", levels={}, metrics={}
-            )
-
-        strategy = SectorImpulseStrategy(inst, self.settings.strategy, ctx=ctx)
-        strategy.seed_context(prep.lookback_df.copy())
-        strategy.reset_session(prep.latest_date)
-        current_signal = self._replay_rows(strategy, prep.today_df)
-
-        model = getattr(strategy, "model", None)
-        levels: Dict[str, Any] = {}
-        try:
-            from backend.data.sector_peer_manager import SectorPeerManager
-            l_sym, m_sym, s_sym = SectorPeerManager.get_peer_symbols(inst.symbol)
-            levels["leader"] = l_sym
-            levels["market"] = m_sym
-            levels["sector"] = s_sym
-        except Exception:
-            pass
-        if model:
-            rho = _finite_number(model.get("rho"))
-            mkt_sig = _finite_number(model.get("mkt_sig"))
-            levels.update({
-                "lead_lag_k": _safe_scalar(model.get("k")),
-                "rho": round(rho, 3) if rho is not None else None,
-                "mkt_sig": round(mkt_sig, 4) if mkt_sig is not None else None,
-            })
-
-        directional = self._directional_prediction(
-            current_signal, ltp,
-            "IMPULSE_LONG", "IMPULSE_SHORT",
-            "Sector impulse generated a validated LONG signal.",
-            "Sector impulse generated a validated SHORT signal.",
-            levels,
-        )
-        if directional is not None:
-            return directional
-
-        if model is None:
-            reason = str(getattr(strategy, "disabled_reason", None) or "Sector impulse model is not currently eligible.")
-            return SingleStrategyPrediction(STATE_NO_TRADE, reason=reason, levels=levels)
-
-        rho = _finite_number(model.get("rho"))
-        rho_text = f"{rho:.2f}" if rho is not None else "N/A"
-        return SingleStrategyPrediction(
-            "MONITORING",  # canonicalised to WAITING, original kept in detail_status
-            reason=f"Monitoring sector impulse transmission (k={model.get('k')}, rho={rho_text}).",
-            levels=levels,
-        )
-
-    # ======================================================================
-    # CRSD  (STATEFUL: persistent per-symbol runtime, advanced incrementally)
-    # ======================================================================
-
-    def _evaluate_crsd(
-        self,
-        inst: InstrumentConfig,
-        data: Any,
-        ltp: float,
-        peer_context: Optional[Any] = None,
-        kite_client: Optional[Any] = None,
-        live_ltp_by_symbol: Optional[Dict[str, Any]] = None,
-    ) -> SingleStrategyPrediction:
-        prep, failure = self._resolve_prepared(inst.symbol, data)
-        if failure is not None:
-            return failure
-
-        sector_known = self._sector_known(inst.symbol)
-        if sector_known is False:
-            return SingleStrategyPrediction(
-                STATE_NOT_APPLICABLE,
-                reason=f"CRSD has no sector classification for {inst.symbol}.",
-                strategy="crsd", symbol=inst.symbol,
-            )
-        if sector_known is None:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE, reason="CRSD sector classification could not be determined.",
-                strategy="crsd", symbol=inst.symbol,
-            )
-
-        warm = self._warmup_failure(prep, "CRSD")
-        if warm is not None:
-            warm.strategy, warm.symbol = "crsd", inst.symbol
-            return warm
-
-        ctx = peer_context
-        if ctx is None or not hasattr(ctx, "frames") or not hasattr(ctx, "market"):
-            try:
-                from backend.strategy.crsd_strategy import build_crsd_context
-                ctx = build_crsd_context(
-                    symbol=inst.symbol,
-                    cache_dir=self.cache_dir,
-                    kite_client=kite_client,
-                    as_of=prep.latest_candle_close_time,
-                )
-            except Exception as exc:
-                return SingleStrategyPrediction(
-                    STATE_UNAVAILABLE,
-                    reason=f"CRSD peer context build failed: {type(exc).__name__}: {exc}",
-                    strategy="crsd", symbol=inst.symbol,
-                )
-        if ctx is None:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE, reason="CRSD peer/market context is unavailable.",
-                strategy="crsd", symbol=inst.symbol,
-            )
-
-        key = str(inst.symbol).strip().upper()
-
-        def factory() -> _StrategyRuntime:
-            strategy = CRSDStrategy(inst, self.settings.strategy, ctx=ctx)
-            strategy.seed_context(prep.lookback_df.copy())
-            strategy.reset_session(prep.latest_date)
-            return _StrategyRuntime(
-                strategy=strategy,
-                session_date=prep.latest_date,
-                lookback_digest=prep.lookback_digest,
-                ctx=ctx,
-            )
-
-        with self._runtime_session(
-            self._crsd_runtimes, self._crsd_runtimes_lock, key, prep, factory, ctx=ctx
-        ) as rt:
-            try:
-                new_rows = prep.today_df.iloc[rt.consumed_rows:]
-                rt.current_signal = self._replay_rows(rt.strategy, new_rows, rt.current_signal)
-                rt.consumed_rows = len(prep.today_df)
-                rt.consumed_digest = prep.today_digest
-            except Exception:
-                # Partially advanced state is untrustworthy: discard it.
-                self._drop_runtime(self._crsd_runtimes, self._crsd_runtimes_lock, key, rt)
-                raise
-            signal = copy.copy(rt.current_signal) if rt.current_signal is not None else None
-            return self._crsd_prediction(inst, rt.strategy, signal, live_ltp_by_symbol, kite_client=kite_client)
-
-    def _crsd_prediction(
-        self,
-        inst: InstrumentConfig,
-        strategy: Any,
-        current_signal: Optional[StrategySignal],
-        live_ltp_by_symbol: Optional[Dict[str, Any]],
-        kite_client: Optional[Any] = None,
-    ) -> SingleStrategyPrediction:
-        model = getattr(strategy, "model", None)
-        levels: Dict[str, Any] = {}
-        if model:
-            for key, digits in (("lam", 3), ("entry_z", 2), ("exit_z", 2), ("sigma_d", 6)):
-                value = _finite_number(model.get(key))
-                if value is not None:
-                    levels[key] = round(value, digits)
-            syms = model.get("syms", [])
-            sel = model.get("sel", [])
-            levels["hedge_peers"] = [syms[k] for k in sel if isinstance(k, int) and 0 <= k < len(syms)]
-
-        last_features = getattr(strategy, "last_features", {}) or {}
-        metrics: Dict[str, Any] = {}
-        for key, digits in (("z", 3), ("z_cs", 3), ("cp_recent", 3), ("stress", 3), ("spread", 6)):
-            value = _finite_number(last_features.get(key))
-            if value is not None:
-                metrics[key] = round(value, digits)
-        metrics["liq_ok"] = bool(last_features.get("liq_ok", False))
-        risk_scale = _finite_number(getattr(strategy, "risk_scale", None))
-        if risk_scale is not None:
-            levels["risk_scale"] = risk_scale
-            metrics["risk_scale"] = risk_scale
-
-        def unavailable(reason: str) -> SingleStrategyPrediction:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE, reason=reason,
-                levels=levels, metrics=metrics, strategy="crsd", symbol=inst.symbol,
-            )
-
-        if current_signal is not None and current_signal.action in (SignalAction.BUY, SignalAction.SELL):
-            hedge_legs = getattr(strategy, "hedge_legs", {}) or {}
-            if not hedge_legs:
-                return unavailable("CRSD generated a directional candidate without a validated hedge basket.")
-
-            now = now_ist_naive()
-            validated_hedge_prices: Dict[str, float] = {}
-            for hedge_sym in hedge_legs:
-                raw_h = live_ltp_by_symbol.get(hedge_sym) if live_ltp_by_symbol else None
-                h_price, why = self._quote_price(raw_h, now, self.MAX_HEDGE_QUOTE_AGE_SECONDS)
-                if h_price is None and kite_client is not None:
-                    try:
-                        q_data = kite_client.quote(["NSE:" + hedge_sym])
-                        q = q_data.get("NSE:" + hedge_sym, {})
-                        if q:
-                            px = q.get("last_price")
-                            ts = q.get("timestamp") or q.get("last_trade_time") or now
-                            h_price, why = self._quote_price((px, ts), now, self.MAX_HEDGE_QUOTE_AGE_SECONDS)
-                    except Exception:
-                        pass
-                if h_price is None:
-                    return unavailable(f"CRSD live hedge price unavailable for {hedge_sym}: {why}.")
-                validated_hedge_prices[hedge_sym] = h_price
-
-            top_hedge_sym = max(hedge_legs, key=lambda s: abs(hedge_legs[s]))
-            hedge_weight = float(hedge_legs[top_hedge_sym])
-            current_signal.hedge_symbol = top_hedge_sym
-            current_signal.hedge_action = SignalAction.SELL if hedge_weight < 0 else SignalAction.BUY
-            current_signal.hedge_price = validated_hedge_prices[top_hedge_sym]
-
-            status = "CRSD_LONG" if current_signal.action == SignalAction.BUY else "CRSD_SHORT"
-            return self._prediction_from_crsd_signal(
-                status=status,
-                signal=current_signal,
-                default_reason="CRSD relative-value shock generated a validated signal.",
+                reason="Needs 10+ prior sessions of 15-minute candles (daily range / volume history).",
                 levels=levels,
-                metrics=metrics,
             )
-
-        if model is None:
-            reason = str(getattr(strategy, "disabled_reason", None) or "CRSD model is not currently eligible.")
+        exit_reason = outcome.flags["exit_reason"]
+        if outcome.flags["signalled_today"] and exit_reason:
             return SingleStrategyPrediction(
-                STATE_NO_TRADE, reason=reason, levels=levels, metrics=metrics,
-                strategy="crsd", symbol=inst.symbol,
+                STATE_NO_TRADE,
+                reason=f"Today's signal is closed ({exit_reason.replace('_', ' ').lower()}). One signal per day.",
+                levels=levels,
             )
+        note = outcome.flags["note"] or "No setup on the latest completed candle."
+        state = STATE_WAITING if not outcome.flags["signalled_today"] and "Waiting" in note else STATE_NO_TRADE
+        return SingleStrategyPrediction(state, reason=note, levels=levels)
 
-        z_val = _finite_number(last_features.get("z"))
-        z_text = f"{z_val:.2f}" if z_val is not None else "N/A"
-        return SingleStrategyPrediction(
-            "MONITORING",  # canonicalised to WAITING, original kept in detail_status
-            reason=f"Monitoring CRSD residual divergence (Z={z_text}, entry_Z={model.get('entry_z', 'N/A')}).",
-            levels=levels, metrics=metrics, strategy="crsd", symbol=inst.symbol,
-        )
-
-    # ======================================================================
-    # SSF-L5-SRM  (STATEFUL, owned by the stream manager; never rebuilt blank)
-    # ======================================================================
-
-    def _evaluate_ssf_l5_srm(
-        self,
-        inst: InstrumentConfig,
-        data: Any,
-        ltp: float,
-        book_snapshot: Optional[Any] = None,
-        ssf_strategy: Optional[Any] = None,
-        ssf_applicable: Optional[bool] = None,
-    ) -> SingleStrategyPrediction:
-        if ssf_applicable is False:
-            return SingleStrategyPrediction(
-                STATE_NOT_APPLICABLE, reason="Single-stock futures unavailable", levels={}, metrics={}
-            )
-
-        problem = self._validate_book(book_snapshot, 5, now_ist_naive())
-        if problem is not None:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason=f"Required live data missing: SSF-L5-SRM needs a real, fresh Level-5 book ({problem}).",
-                levels={}, metrics={},
-            )
-
-        # The strategy's regime/bar state is built up over time by its owner.
-        # A freshly constructed object has none, so evaluating on one would
-        # report a misleading "no trade" instead of "cannot evaluate".
-        strategy = ssf_strategy
-        if strategy is None:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason="SSF-L5-SRM requires its persistent runtime from the stream manager; none was supplied.",
-                levels={}, metrics={},
-            )
-        owner = self._strategy_symbol(strategy)
-        if owner is not None and owner != str(inst.symbol).strip().upper():
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason=f"SSF-L5-SRM runtime belongs to {owner}, not {inst.symbol}; its state was not reused.",
-                levels={}, metrics={},
-            )
-
-        try:
-            signal = strategy.on_book_update(book_snapshot)
-        except Exception as exc:
-            return SingleStrategyPrediction(
-                STATE_ERROR, reason=f"SSF-L5-SRM book evaluation failed: {type(exc).__name__}: {exc}", levels={}
-            )
-
-        regime_ok = bool(getattr(strategy, "regime_ok", False))
-        bars = getattr(strategy, "_bars", [])
-        features = getattr(strategy, "last_features", {}) or {}
-        levels: Dict[str, Any] = {
-            "regime_ok": regime_ok,
-            "bars_tracked": len(bars),
-        }
-        for key, value in features.items():
-            number = _finite_number(value)
-            if number is not None:
-                levels[key] = round(number, 3)
-
-        # Do not infer a new signal from _last_signal_direction. Only the
-        # actual StrategySignal returned by this fresh book evaluation votes.
-        directional = self._directional_prediction(
-            signal, ltp,
-            "SSF_LONG", "SSF_SHORT",
-            "SSF Level-5 microstructure generated a validated LONG signal.",
-            "SSF Level-5 microstructure generated a validated SHORT signal.",
-            levels,
-        )
-        if directional is not None:
-            return directional
-
-        if not regime_ok:
-            if len(bars) == 0:
-                return SingleStrategyPrediction(
-                    STATE_WAITING, reason="SSF runtime has not accumulated any bars yet (warm-up).", levels=levels
-                )
-            return SingleStrategyPrediction(STATE_NO_TRADE, reason="SSF regime filter is inactive.", levels=levels)
-
-        if features:
-            try:
-                blocked_reason = strategy._blocked(book_snapshot, features)
-            except Exception as exc:
-                return SingleStrategyPrediction(
-                    STATE_ERROR, reason=f"SSF-L5-SRM block evaluation failed: {type(exc).__name__}: {exc}", levels=levels
-                )
-            if blocked_reason:
-                return SingleStrategyPrediction(
-                    STATE_NO_TRADE, reason=f"SSF conditions not met ({blocked_reason}).", levels=levels
-                )
-
-        score = _finite_number(features.get("score"))
-        score_text = f"{score:.2f}" if score is not None else "N/A"
-        return SingleStrategyPrediction(
-            STATE_WAITING, reason=f"Awaiting SSF trigger threshold (composite score={score_text}).", levels=levels
-        )
-
-    # ======================================================================
-    # AOU-OSS  (STATEFUL: persistent per-symbol runtime, advanced incrementally)
-    # ======================================================================
-
-    def _evaluate_aou_oss(
-        self,
-        inst: InstrumentConfig,
-        data: Any,
-        ltp: float,
-        book_snapshot: Optional[Any] = None,
-        allow_historical_session: bool = False,
-    ) -> SingleStrategyPrediction:
-        prep, failure = self._resolve_prepared(inst.symbol, data)
-        if failure is not None:
-            return failure
-
-        now = now_ist_naive()
-        today = now.date()
-        if not allow_historical_session and not self._is_trading_day(today):
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE, reason="AOU-OSS is unavailable because today is not a trading session."
-            )
-
-        if not allow_historical_session and prep.latest_date != today:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason=f"AOU-OSS live data is stale: latest session is {prep.latest_date}, current session is {today}.",
-            )
-
-        if len(prep.data) < 152:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason=f"Insufficient 15-minute history for AOU-OSS calibration ({len(prep.data)}/152 candles).",
-                levels={"candle_count": len(prep.data), "required_candles": 152},
-            )
-        if not prep.warmup_complete:
-            return SingleStrategyPrediction(
-                STATE_UNAVAILABLE,
-                reason=f"Prior-session candles have gaps ({prep.warmup_reason}).",
-                levels={"candle_count": len(prep.data), "warmup_reason": prep.warmup_reason},
-            )
-
-        best_bid, best_ask = (None, None)
-        if book_snapshot is not None:
-            best_bid, best_ask = self._extract_best_bid_ask(book_snapshot)
-
-        key = str(inst.symbol).strip().upper()
-
-        def factory() -> _StrategyRuntime:
-            strategy = AouOssStrategy(inst, self.settings.strategy)
-            if not prep.lookback_df.empty:
-                strategy.seed_context(prep.lookback_df.copy())
-            strategy.reset_session(prep.latest_date)
-            return _StrategyRuntime(
-                strategy=strategy,
-                session_date=prep.latest_date,
-                lookback_digest=prep.lookback_digest,
-            )
-
-        with self._runtime_session(
-            self._aou_runtimes, self._aou_runtimes_lock, key, prep, factory
-        ) as rt:
-            try:
-                strategy = rt.strategy
-                if best_bid is not None and best_ask is not None:
-                    strategy.set_market_context(best_bid=best_bid, best_ask=best_ask)
-
-                new_rows = prep.today_df.iloc[rt.consumed_rows:]
-                latest_signal = None
-                for _, row in new_rows.iterrows():
-                    latest_signal = strategy.on_candle(self._candle_dict(row), float(row["vwap"]))
-                if not new_rows.empty:
-                    rt.last_signal = latest_signal
-                    rt.last_candle_open = new_rows.iloc[-1]["datetime"]
-                rt.consumed_rows = len(prep.today_df)
-                rt.consumed_digest = prep.today_digest
-
-                current_signal = copy.copy(rt.last_signal) if rt.last_signal is not None else None
-                state = strategy.get_state()
-            except Exception:
-                self._drop_runtime(self._aou_runtimes, self._aou_runtimes_lock, key, rt)
-                raise
-
-        levels = {
-            "candle_count": len(prep.data),
-            "warmup_reason": prep.warmup_reason,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "l2_passed": state.get("l2_passed"),
-            "rolling_vwap": _finite_number(state.get("rolling_vwap")),
-            "spread": _finite_number(state.get("spread")),
-            "equilibrium": _finite_number(state.get("equilibrium")),
-            "half_life_minutes": _finite_number(state.get("half_life_minutes")),
-            "volatility_ratio": _finite_number(state.get("volatility_ratio")),
-            "entry_boundary_long": _finite_number(state.get("entry_boundary_long")),
-            "entry_boundary_short": _finite_number(state.get("entry_boundary_short")),
-            "stop_boundary_long": _finite_number(state.get("stop_boundary_long")),
-            "stop_boundary_short": _finite_number(state.get("stop_boundary_short")),
-            "l2_spread_bps": _finite_number(state.get("l2_spread_bps")),
-        }
-        levels = {
-            k: round(v, 4) if isinstance(v, float) else v
-            for k, v in levels.items()
-            if v is not None
-        }
-
-        directional = self._directional_prediction(
-            current_signal, ltp,
-            "AOU_LONG", "AOU_SHORT",
-            "AOU-OSS optimal stopping generated a validated LONG signal.",
-            "AOU-OSS optimal stopping generated a validated SHORT signal.",
-            levels,
-        )
-        if directional is not None:
-            return directional
-
-        if not state.get("ready"):
-            half_life = _finite_number(state.get("half_life_minutes"))
-            vol_ratio = _finite_number(state.get("volatility_ratio"))
-            vol_passed = bool(state.get("volatility_passed", False))
-            if half_life is not None and (half_life < 15.0 or half_life > 60.0):
-                reason = f"AOU half-life ({half_life:.1f}m) outside 15-60m mean-reverting gate."
-            elif not vol_passed and vol_ratio is not None:
-                reason = f"AOU volatility ratio ({vol_ratio:.2f}) exceeds threshold."
-            elif not bool(state.get("l2_passed", False)):
-                if best_bid is None or best_ask is None:
-                    return SingleStrategyPrediction(
-                        STATE_UNAVAILABLE,
-                        reason="Required live data missing: AOU-OSS Level-2 best bid/ask is unavailable or invalid.",
-                        levels=levels,
-                    )
-                reason = f"AOU Level-2 spread gate failed (spread={state.get('l2_spread_bps')} bps, bid={best_bid}, ask={best_ask})."
-            else:
-                reason = "AOU-OSS calibration not ready or gates not satisfied."
-            return SingleStrategyPrediction(STATE_NO_TRADE, reason=reason, levels=levels)
-
-        spread_val = _finite_number(state.get("spread"))
-        spread_text = f"{spread_val:.4f}" if spread_val is not None else "N/A"
-        return SingleStrategyPrediction(
-            STATE_WAITING, reason=f"Awaiting AOU-OSS boundary trigger (spread={spread_text}).", levels=levels
-        )
 
     # ======================================================================
     # SIGNAL EXPIRATION

@@ -89,184 +89,6 @@ class TransactionCostConfig(BaseModel):
     equity_slippage_pct: float = 0.0002          # 0.02% or 1 tick
 
 
-class DeliveryCostConfig(BaseModel):
-    brokerage_per_order: float = 0.0        # Zerodha CNC delivery is free
-    stt_buy_pct: float = 0.0010             # 0.10% on buy turnover
-    stt_sell_pct: float = 0.0010            # 0.10% on sell turnover
-    exchange_txn_pct: float = 0.0000297     # 0.00297% on aggregate turnover
-    sebi_charges_pct: float = 0.0000010     # Rs 10 per crore
-    stamp_duty_buy_pct: float = 0.00015     # 0.015% on buy turnover
-    gst_pct: float = 0.18
-    slippage_pct: float = 0.0005            # 5 bps per execution leg
-    dp_charges_per_sell_scrip: float = 15.34  # CDSL + broker, per scrip per day
-
-
-class IndexOptionsCostConfig(BaseModel):
-    brokerage_per_order: float = 20.0       # flat, per leg
-    stt_sell_premium_pct: float = 0.0010    # 0.10% of premium, sell side only
-    exchange_txn_premium_pct: float = 0.0003503   # 0.03503% of premium
-    sebi_charges_pct: float = 0.0000010
-    stamp_duty_buy_pct: float = 0.00003     # 0.003% on buy premium turnover
-    gst_pct: float = 0.18
-    slippage_premium_pct: float = 0.0075    # 0.75% of premium per leg
-
-
-class ResidualMomentumConfig(BaseModel):
-    # Estimation windows (trading days)
-    regression_window: int = 252        # M: rolling OLS calibration
-    momentum_window: int = 126          # K: residual accumulation lookback
-    lag_buffer: int = 10                # L: recent sessions excluded
-    vol_window: int = 20                # sizing volatility lookback
-    adtv_window: int = 20
-
-    # Universe / liquidity gates
-    min_adtv_rupees: float = 50 * 1e7
-    min_valid_universe: int = 70        # below this, skip the whole cycle
-
-    # Selection
-    portfolio_size: int = 10            # J
-    top_decile_pct: float = 0.10
-    exit_percentile: float = 0.75       # rescored holdings below P75 are cut
-
-    # Sizing
-    max_weight: float = 0.15
-    min_weight: float = 0.04
-    max_sector_weight: float = 0.30
-
-    # Regime
-    regime_sma: int = 200
-    bullish_gross_exposure: float = 1.00
-    defensive_gross_exposure: float = 0.40
-    trend_filter_sma: int = 50
-
-    # Exits
-    stop_atr_multiple: float = 2.5
-    atr_window: int = 14
-    trail_trigger_gain: float = 0.15    # +15% unrealised arms the EMA20 trail
-    trail_ema: int = 20
-
-    # Hedge
-    nifty_lot_size: int = DEFAULT_NIFTY_LOT_SIZE
-
-    # Schedule
-    entry_time: time = time(15, 0)
-    order_deadline: time = time(15, 10)
-    rebalance_weekday: int = 4          # Friday
-    rebalance_parity_weeks: int = 2     # every alternate Friday
-
-    # Slippage assumption used for reference pricing only
-    slippage_pct: float = 0.0005
-
-
-class VRPConfig(BaseModel):
-    # Signal
-    rv_ema_span: int = 20
-    vrp_zscore_window: int = 60
-    min_vrp_zscore: float = 0.50
-
-    # Absolute regime band on India VIX
-    vix_floor: float = 12.0
-    vix_ceiling: float = 23.0
-
-    # Structure deltas
-    short_delta: float = 0.15
-    long_delta: float = 0.05
-    lots: int = 1
-    lot_size: int = DEFAULT_NIFTY_LOT_SIZE  # NIFTY options lot size -- current NSE contract spec
-
-    # Exits
-    profit_target_pct: float = 0.65     # of initial net credit
-    stop_loss_multiple: float = 1.50    # of initial net credit
-    expiry_exit_time: time = time(14, 30)
-
-    # Schedule
-    entry_weekday: int = 3              # Thursday
-    entry_time: time = time(15, 10)
-
-    # Costs / execution
-    premium_slippage_pct: float = 0.0075   # 0.75% of premium per leg
-    risk_free_rate: float = 0.065
-
-
-class CRSDConfig(BaseModel):
-    # ---- factor model / training window
-    horizon_bars: int = 3                      # h: residual accumulation window
-    train_days: int = 20
-    min_train_bars: int = 250
-    min_coverage: float = 0.90                 # peer must cover >= this share of own bars
-    group_cap: int = 8                         # max peers loaded into the factor model
-    halflife_grid_days: Tuple[float, ...] = (3.0, 5.0, 8.0, 12.0)
-    ridge_lambda: float = 1e-8
-    transient_halflife_bars: float = 3.0
-    use_local_beta: bool = True
-    local_beta_window: int = 4
-    local_beta_clip: Tuple[float, float] = (0.6, 1.5)
-
-    # ---- basket construction
-    max_peers: int = 4
-    min_peers: int = 2
-    min_peer_corr: float = 0.10
-    hedge_ratio_clip: Tuple[float, float] = (0.5, 1.5)
-
-    # ---- entry / exit thresholds (research grid: entry 2.0-3.5, exit 0.5-1.0)
-    entry_z: float = 2.5
-    exit_z: float = 0.75
-    confirm_bars: int = 1
-    cs_min_group: int = 4                      # cross-sectional z needs >= this many names
-    cs_confirm_z: float = 1.0
-    auto_calibrate: bool = False               # grid-search entry/exit inside training only
-    entry_z_grid: Tuple[float, ...] = (2.0, 2.5, 3.0, 3.5)
-    exit_z_grid: Tuple[float, ...] = (0.5, 0.75, 1.0)
-    calib_min_events: int = 12
-    require_convergence_evidence: bool = True
-    min_hit_rate: float = 0.52
-    min_net_bps: float = 0.0
-
-    # ---- regime gate (BOCPD)
-    bocpd_hazard: float = 1.0 / 60.0
-    bocpd_max_run: int = 120
-    bocpd_recent_window: int = 3
-    bocpd_warm_bars: int = 300
-    bocpd_kappa0: float = 0.1
-    bocpd_alpha0: float = 2.0
-    bocpd_beta0: float = 1.0
-    cp_entry_max: float = 0.35
-    cp_exit: float = 0.60
-
-    # ---- volatility memory
-    vm_exponent: float = 0.75
-    vm_len: int = 120
-    vm_stress_pctl: float = 0.90               # entries blocked at/above this
-    vm_scale_pctl: float = 0.75                # scale halves at/above this
-
-    # ---- liquidity
-    liq_turnover_pctl: float = 0.30            # own/hedge turnover must exceed this pctl
-    liq_spread_pctl: float = 0.90              # spread proxy must be below this pctl
-    liq_shock_frac: float = 0.25               # turnover < frac*median for 2 bars -> shock
-
-    # ---- costs
-    round_trip_cost_bps_per_leg: float = 8.0   # brokerage+STT+charges+slippage
-    edge_cost_mult: float = 2.0
-    capture_frac: float = 0.60                 # share of the excess spread expected to convert
-
-    # ---- exits
-    max_hold_bars: int = 8
-    stop_sigma: float = 2.0
-    tail_quantile: float = 0.99
-    leg_stop_mult: float = 2.0                 # price stop on the unhedged leg = mult x spread stop
-    min_target_bps: float = 3.0
-    strategy_loss_cap_bps: float = 60.0
-    daily_dd_limit_bps: float = 100.0
-    max_trades_per_day: int = 2
-
-    # ---- session
-    entry_start: time = time(9, 45)
-    entry_end: time = time(14, 15)
-    session_end: time = time(15, 10)
-    skip_expiry_day: bool = True
-    expiry_weekday: int = 1                    # monthly expiry weekday (Tue)
-
-
 class AppSettings(BaseSettings):
     # Target Instruments
     instruments: List[InstrumentConfig] = [
@@ -280,20 +102,13 @@ class AppSettings(BaseSettings):
         )
     ]
 
-    # Active Strategy (Options: "cpr", "dual_ema", "orb", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss", "crsd", "rm100", "vrp")
-    active_strategy: str = "cpr"
+    # Default strategy shown when none is selected (Options: "gap_fade", "rsi_ema", "orb_sip")
+    active_strategy: str = "gap_fade"
 
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     initial_capital: float = 1000000.0  # ₹10,00,000 (10 Lakhs) reference capital for backtesting
     liquidity_filter: LiquidityFilterConfig = Field(default_factory=LiquidityFilterConfig)
     costs: TransactionCostConfig = Field(default_factory=TransactionCostConfig)
-
-    # Portfolio-level strategies and cost schedules
-    rm100: ResidualMomentumConfig = Field(default_factory=ResidualMomentumConfig)
-    vrp: VRPConfig = Field(default_factory=VRPConfig)
-    crsd: CRSDConfig = Field(default_factory=CRSDConfig)
-    delivery_costs: DeliveryCostConfig = Field(default_factory=DeliveryCostConfig)
-    options_costs: IndexOptionsCostConfig = Field(default_factory=IndexOptionsCostConfig)
 
     # Storage paths
     base_dir: Path = Path(__file__).resolve().parent.parent.parent

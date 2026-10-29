@@ -8,20 +8,13 @@ import { ApiError } from '../api/client'
 import { formatCurrency, formatNumber } from '../utils/format'
 
 const STRATEGIES = [
-  { id: 'orb', label: 'ORB', usesSymbol: true },
-  { id: 'cpr', label: 'CPR', usesSymbol: true },
-  { id: 'dual_ema', label: 'Dual EMA', usesSymbol: true },
-  { id: 'apex', label: 'APEX-AIVEM', usesSymbol: true },
-  { id: 'sector_impulse', label: 'Sector Impulse', usesSymbol: true },
-  { id: 'ssf_l5_srm', label: 'SSF-L5-SRM', usesSymbol: true },
-  { id: 'aou_oss', label: 'AOU-OSS', usesSymbol: true },
-  { id: 'crsd', label: 'CRSD', usesSymbol: true },
-  { id: 'orb_retest', label: 'ORB Retest (research)', usesSymbol: true },
-  { id: 'rm100', label: 'RM100 (portfolio)', usesSymbol: false },
+  { id: 'gap_fade', label: 'Gap Fade', usesSymbol: true },
+  { id: 'rsi_ema', label: 'RSI x EMA', usesSymbol: true },
+  { id: 'orb_sip', label: 'ORB Stocks-in-Play (experimental)', usesSymbol: true },
 ]
 
 export default function BacktestPage() {
-  const [strategy, setStrategy] = useState('orb')
+  const [strategy, setStrategy] = useState('gap_fade')
   const [symbol, setSymbol] = useState('NIFTY')
   const [days, setDays] = useState(180)
 

@@ -5,13 +5,8 @@ This is the piece that actually answers "how would the algorithm have
 worked, day by day, the day before that, the day before that... without
 ever knowing what happens next?"
 
-walk_forward.py (the existing file) does ONE static split: the first 70% of
-days are "in-sample", the last 30% are "out-of-sample". That's a fine sanity
-check, but it only proves the strategy holds up on one single unseen block
-at the end of history. It doesn't tell you whether it would have kept
-working consistently across many different stretches of time.
-
-This engine instead walks forward through the whole history in sequential
+A single in-sample / out-of-sample split only proves a strategy holds up on
+one unseen block at the end of history. This engine instead walks forward through the whole history in sequential
 blocks:
 
     fold 1:  train on days [0 .. 60)   -> test on days [60 .. 80)
@@ -27,13 +22,10 @@ curve — literally what you'd have ended up with running this live, one real
 trading day after another, never seeing tomorrow's candle before today's
 decisions were made.
 
-The strategy here is rule-based (fixed ORB/VWAP logic), so by default
-"training" a fold does nothing but define the window — the same instrument
-config is used everywhere. If you want genuine walk-forward *optimization*
-(re-picking min_orb_range / risk_reward_ratio per fold from only the
-trailing window), pass a `param_selector` callback; it receives the
-training slice and must return an InstrumentConfig, which is then used for
-that fold's out-of-sample test only.
+The strategies are rule-based (fixed parameters), so "training" a fold does
+nothing but define the window and warm up the strategy context. A
+`param_selector` callback can still be passed; it receives the training
+slice and must return an InstrumentConfig used for that fold's test only.
 """
 
 from dataclasses import dataclass, field
@@ -43,11 +35,11 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from backend.backtest.strategy_backtester import StrategyBacktester as EventDrivenBacktester
+from backend.backtest.strategy_backtester import StrategyBacktester
 from backend.backtest.performance import PerformanceAnalyzer, PerformanceReport
 from backend.config.settings import AppSettings, InstrumentConfig, settings
 from backend.monitoring.logger import logger
-from backend.strategy.orb_strategy import IntradayORBStrategy
+from backend.strategy.gap_fade_strategy import GapFadeStrategy
 
 ParamSelector = Callable[[pd.DataFrame], InstrumentConfig]
 BacktesterFactory = Callable[[InstrumentConfig], object]  # must expose .generate_trades(df, initial_capital)
@@ -93,16 +85,15 @@ class RollingWalkForwardValidator:
     ):
         """
         backtester_factory: builds the backtester for a given fold's instrument
-        config. Defaults to the ORB+VWAP EventDrivenBacktester (unchanged
-        behavior for existing callers). Pass e.g.
-            lambda inst: StrategyBacktester(lambda: CPRRegimeBreakoutStrategy(inst), inst, app_settings)
-        to walk-forward test any other BaseStrategy through the same
+        config. Defaults to Gap Fade. Pass e.g.
+            lambda inst: StrategyBacktester(lambda: RsiEmaStrategy(inst.symbol), inst, app_settings)
+        to walk-forward test any other strategy through the same
         no-look-ahead fold structure.
         """
         self.instrument = instrument
         self.settings = app_settings
         self.backtester_factory = backtester_factory or (
-            lambda inst: EventDrivenBacktester(lambda: IntradayORBStrategy(inst), inst, app_settings)
+            lambda inst: StrategyBacktester(lambda: GapFadeStrategy(inst.symbol), inst, app_settings)
         )
 
     def validate(

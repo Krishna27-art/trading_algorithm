@@ -20,16 +20,11 @@ from backend.config.universe import (
 )
 from backend.data.candle_aggregator import MultiSymbolCandleAggregator
 from backend.data.historical_loader import HistoricalDataLoader
-from backend.data.instrument_resolver import instrument_resolver
-from backend.data.sector_peer_manager import get_sector_index_symbol
 from backend.data.time_utils import now_ist, now_ist_iso, now_ist_naive, to_ist_aware
 from backend.database.db import db_manager
 from backend.indicators.volume_profile import VolumeProfileEngine, VolumeProfileFacts
-from backend.streaming.crsd_live_runtime import crsd_live_runtime
 from backend.streaming.live_market_state import live_market_state
 from backend.streaming.live_signal_engine import live_signal_engine
-from backend.streaming.ssf_runtime import ssf_context_store
-from backend.streaming.ssf_runtime import ssf_one_minute_runtime
 
 
 logger = logging.getLogger("backend.streaming.market_stream_manager")
@@ -44,7 +39,6 @@ MAX_EVALUATION_WORKERS = 16
 EVALUATION_QUEUE_SIZE = 10000
 EVALUATION_MAX_AGE_SECONDS = 300
 HISTORY_REFRESH_QUEUE_SIZE = 500
-L5_QUEUE_SIZE = 5000
 
 HISTORY_MAX_CONCURRENCY = 4
 HISTORY_MIN_REQUEST_INTERVAL_SECONDS = 0.34
@@ -127,28 +121,6 @@ class _ThrottledKiteClient:
         return throttled
 
 
-_MARKET_INDEX_SYMBOLS = frozenset({"NIFTY", "NIFTY 50", "NIFTY50", "__MARKET__"})
-
-
-def _index_candle_route(symbol: str, index_symbols: Any) -> str:
-    """
-    Route a completed candle from the index aggregator.
-
-    "market"        -> the NIFTY 50 bar: CRSD's market leg.
-    "index_context" -> any other subscribed index (sector indices, INDIA VIX):
-                       kept in live state only. Writing it into the CRSD market
-                       frame would overwrite the NIFTY bar at the same timestamp
-                       with an unrelated price level (e.g. VIX ~13).
-    "stock"         -> a normal equity candle.
-    """
-    clean = str(symbol or "").strip().upper()
-    if clean in _MARKET_INDEX_SYMBOLS:
-        return "market"
-    if clean in (index_symbols or ()):
-        return "index_context"
-    return "stock"
-
-
 def _safe_positive_float(value: Any) -> Optional[float]:
     try:
         parsed = float(value)
@@ -176,11 +148,8 @@ class MarketStreamManager:
 
         self.kws: Optional[Any] = None
         self.aggregator: Optional[MultiSymbolCandleAggregator] = None
-        self.index_aggregator: Optional[MultiSymbolCandleAggregator] = None
         self.volume_profile_engine: VolumeProfileEngine = VolumeProfileEngine()
 
-        self.futures_token_to_symbol: Dict[int, str] = {}
-        self.index_token_to_symbol: Dict[int, str] = {}
         self.scanner_snapshot: Optional[Any] = None
         self._session_finalized_date: Optional[str] = None
 
@@ -236,10 +205,6 @@ class MarketStreamManager:
         self._ticks_stale_count = 0
         self._ticks_out_of_order_count = 0
 
-        self._l5_received_count = 0
-        self._l5_processed_count = 0
-        self._l5_replaced_count = 0
-
         self._history_refresh_queue = queue.Queue(
             maxsize=HISTORY_REFRESH_QUEUE_SIZE
         )
@@ -247,15 +212,6 @@ class MarketStreamManager:
         self._history_refresh_requested: Dict[str, int] = {}
         self._history_refresh_worker_started = False
         self._history_refresh_thread: Optional[threading.Thread] = None
-
-        self._book_queue = queue.Queue(maxsize=L5_QUEUE_SIZE)
-        self._book_lock = threading.Lock()
-        self._pending_book_snapshots: Dict[str, Tuple[int, Any]] = {}
-        self._dirty_book_symbols: Set[str] = set()
-        self._book_worker_started = False
-        self._book_worker_thread: Optional[threading.Thread] = None
-
-        self._ssf_seed_thread: Optional[threading.Thread] = None
 
         self._flush_worker_started = False
         self._flush_worker_thread: Optional[threading.Thread] = None
@@ -332,15 +288,6 @@ class MarketStreamManager:
             )
             self._history_refresh_thread.start()
 
-        if not self._book_worker_started:
-            self._book_worker_started = True
-            self._book_worker_thread = threading.Thread(
-                target=self._book_worker_loop,
-                name="ssf-l5-worker",
-                daemon=True,
-            )
-            self._book_worker_thread.start()
-
         if not self._flush_worker_started:
             self._flush_worker_started = True
             self._flush_worker_thread = threading.Thread(
@@ -361,15 +308,6 @@ class MarketStreamManager:
                 except Exception:
                     logger.debug(
                         "[MarketStreamManager] Periodic candle flush error",
-                        exc_info=True,
-                    )
-            idx_agg = self.index_aggregator
-            if idx_agg is not None:
-                try:
-                    idx_agg.flush_due_candles()
-                except Exception:
-                    logger.debug(
-                        "[MarketStreamManager] Periodic index candle flush error",
                         exc_info=True,
                     )
 
@@ -774,54 +712,6 @@ class MarketStreamManager:
 
             if remaining and pass_index + 1 < HISTORY_WARMUP_PASSES:
                 _time.sleep(HISTORY_WARMUP_RETRY_DELAY_SECONDS)
-
-    def _book_worker_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                symbol = self._book_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            try:
-                with self._book_lock:
-                    entry = self._pending_book_snapshots.pop(symbol, None)
-                    if self._dirty_book_symbols:
-                        next_sym = self._dirty_book_symbols.pop()
-                        try:
-                            self._book_queue.put_nowait(next_sym)
-                        except queue.Full:
-                            self._dirty_book_symbols.add(next_sym)
-
-                if entry is not None:
-                    entry_generation, snapshot = entry
-                    if self._is_current_generation(entry_generation):
-                        self._l5_processed_count += 1
-                        live_signal_engine.on_book_update(
-                            symbol=symbol,
-                            snapshot=snapshot,
-                        )
-            except Exception:
-                logger.exception("[MarketStreamManager] SSF L5 worker failed.")
-            finally:
-                self._book_queue.task_done()
-
-    def _drain_book_state(self) -> None:
-        with self._book_lock:
-            self._pending_book_snapshots.clear()
-            self._dirty_book_symbols.clear()
-
-    def _seed_ssf_history_background(
-        self,
-        kite_client: Any,
-        generation: int,
-    ) -> None:
-        try:
-            if not self._is_current_generation(generation):
-                return
-            ssf_one_minute_runtime.seed_historical_data(kite_client)
-        except Exception:
-            logger.exception(
-                "[MarketStreamManager] Background SSF historical seeding failed."
-            )
 
     def _schedule_symbol_history_refresh(
         self,
@@ -1239,7 +1129,6 @@ class MarketStreamManager:
             self._first_observed_candle.clear()
             self._drain_evaluation_queue()
             self._drain_history_refresh_queue()
-            self._drain_book_state()
 
         try:
             return self._start_stream_impl(
@@ -1269,126 +1158,7 @@ class MarketStreamManager:
             sym: tok for tok, sym in resolved_token_to_symbol.items()
         }
 
-        resolved_futures_token_to_symbol: Dict[int, str] = {}
-
-        for sym in resolved_token_to_symbol.values():
-            try:
-                fut_info = instrument_resolver.find_nearest_single_stock_future(
-                    sym,
-                    kite_client=kite_client,
-                )
-
-                if fut_info is None:
-                    continue
-
-                raw_fut_token = fut_info.get("instrument_token")
-
-                try:
-                    fut_token = int(raw_fut_token)
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "[MarketStreamManager] Invalid futures instrument token for %s: %r",
-                        sym,
-                        raw_fut_token,
-                    )
-                    continue
-
-                if fut_token <= 0:
-                    logger.warning(
-                        "[MarketStreamManager] Non-positive futures instrument token for %s: %s",
-                        sym,
-                        fut_token,
-                    )
-                    continue
-
-                resolved_futures_token_to_symbol[fut_token] = sym
-
-            except Exception as exc:
-                logger.debug(
-                    "[MarketStreamManager] Failed to resolve futures token for %s: %s",
-                    sym,
-                    exc,
-                )
-
-        resolved_index_token_to_symbol: Dict[int, str] = {}
-        _resolved_index_tokens: Dict[str, Optional[int]] = {}
-
-        for sym in resolved_token_to_symbol.values():
-            try:
-                idx_sym = get_sector_index_symbol(sym)
-
-                if not idx_sym:
-                    continue
-
-                if idx_sym in _resolved_index_tokens:
-                    idx_tok = _resolved_index_tokens[idx_sym]
-                else:
-                    idx_tok = instrument_resolver.resolve_token(
-                        idx_sym,
-                        exchange="NSE",
-                        kite_client=kite_client,
-                    )
-                    _resolved_index_tokens[idx_sym] = idx_tok
-
-                if idx_tok:
-                    resolved_index_token_to_symbol[int(idx_tok)] = idx_sym
-
-            except Exception as exc:
-                logger.debug(
-                    "[MarketStreamManager] Failed to resolve index token for %s: %s",
-                    sym,
-                    exc,
-                )
-
-        try:
-            nifty_tok = (
-                instrument_resolver.resolve_token(
-                    "NIFTY",
-                    exchange="NSE",
-                    kite_client=kite_client,
-                )
-                or instrument_resolver.resolve_token(
-                    "NIFTY 50",
-                    exchange="NSE",
-                    kite_client=kite_client,
-                )
-            )
-            if nifty_tok:
-                resolved_index_token_to_symbol[int(nifty_tok)] = "NIFTY"
-        except Exception as exc:
-            logger.debug(
-                "[MarketStreamManager] Failed to resolve NIFTY token: %s",
-                exc,
-            )
-
-        try:
-            vix_tok = (
-                instrument_resolver.resolve_token(
-                    "INDIA VIX",
-                    exchange="NSE",
-                    kite_client=kite_client,
-                )
-                or instrument_resolver.resolve_token(
-                    "INDIAVIX",
-                    exchange="NSE",
-                    kite_client=kite_client,
-                )
-            )
-            if vix_tok:
-                resolved_index_token_to_symbol[int(vix_tok)] = "INDIA VIX"
-        except Exception as exc:
-            logger.debug(
-                "[MarketStreamManager] Failed to resolve INDIA VIX token: %s",
-                exc,
-            )
-
-        all_tokens = list(
-            dict.fromkeys(
-                list(resolved_token_to_symbol.keys())
-                + list(resolved_futures_token_to_symbol.keys())
-                + list(resolved_index_token_to_symbol.keys())
-            )
-        )
+        all_tokens = list(dict.fromkeys(resolved_token_to_symbol.keys()))
 
         tokens_to_subscribe = list(all_tokens)
 
@@ -1401,7 +1171,6 @@ class MarketStreamManager:
             )
 
         callback_generation = generation
-        index_symbol_set = set(resolved_index_token_to_symbol.values())
 
         def _token_for(symbol: str) -> Optional[int]:
             state = live_market_state.get_symbol_state(symbol)
@@ -1459,15 +1228,6 @@ class MarketStreamManager:
                 return
 
             live_market_state.update_candle_close(candle_dict, vwap)
-
-            route = _index_candle_route(symbol, index_symbol_set)
-            if route == "market":
-                crsd_live_runtime.update_market_candle(candle_dict)
-                return
-            if route == "index_context":
-                return
-
-            crsd_live_runtime.update_stock_candle(candle_dict)
 
             with self._evaluation_queue_lock:
                 latest = self._latest_completed_candle_start.get(symbol)
@@ -1529,23 +1289,8 @@ class MarketStreamManager:
         def _on_book_update(symbol: str, snapshot: Any) -> None:
             if callback_generation != self._stream_generation:
                 return
-
-            self._l5_received_count += 1
+            # Depth is kept for display / LTP fallback only; no strategy uses it.
             live_market_state.update_book_snapshot(symbol, snapshot)
-
-            with self._book_lock:
-                if symbol in self._pending_book_snapshots:
-                    self._l5_replaced_count += 1
-                self._pending_book_snapshots[symbol] = (
-                    callback_generation,
-                    snapshot,
-                )
-
-            try:
-                self._book_queue.put_nowait(symbol)
-            except queue.Full:
-                with self._book_lock:
-                    self._dirty_book_symbols.add(symbol)
 
         aggregator = MultiSymbolCandleAggregator(
             token_to_symbol_map=resolved_token_to_symbol,
@@ -1553,15 +1298,6 @@ class MarketStreamManager:
             on_candle_close=_on_candle_close,
             on_book_update=_on_book_update,
         )
-
-        index_aggregator = None
-        if resolved_index_token_to_symbol:
-            index_aggregator = MultiSymbolCandleAggregator(
-                token_to_symbol_map=resolved_index_token_to_symbol,
-                timeframe_minutes=timeframe_minutes,
-                on_candle_close=_on_candle_close,
-                require_vwap_for_callback=False,
-            )
 
         try:
             from kiteconnect import KiteTicker
@@ -1592,7 +1328,6 @@ class MarketStreamManager:
                 self._ticks_received_count += len(tick_batch)
 
             cash_ticks: List[dict] = []
-            index_ticks: List[dict] = []
             accepted_tick_count = 0
             latest_exchange_timestamp = None
             latest_equity_timestamp = None
@@ -1632,32 +1367,6 @@ class MarketStreamManager:
                     self._last_accepted_tick_timestamp_by_token[tok] = (
                         exchange_timestamp
                     )
-
-                if tok in resolved_futures_token_to_symbol:
-                    ssf_context_store.update_futures(
-                        symbol=resolved_futures_token_to_symbol[tok],
-                        fut_ltp=tick.get("last_price"),
-                        fut_oi=tick.get("oi"),
-                        timestamp=exchange_timestamp,
-                    )
-                    accepted_tick_count += 1
-                    if (
-                        latest_exchange_timestamp is None
-                        or exchange_timestamp > latest_exchange_timestamp
-                    ):
-                        latest_exchange_timestamp = exchange_timestamp
-                    continue
-
-                if tok in resolved_index_token_to_symbol:
-                    ssf_one_minute_runtime.on_tick(tick)
-                    accepted_tick_count += 1
-                    if (
-                        latest_exchange_timestamp is None
-                        or exchange_timestamp > latest_exchange_timestamp
-                    ):
-                        latest_exchange_timestamp = exchange_timestamp
-                    index_ticks.append(tick)
-                    continue
 
                 sym = resolved_token_to_symbol.get(tok)
                 last_price = tick.get("last_price")
@@ -1731,8 +1440,6 @@ class MarketStreamManager:
                     session_volume=session_volume,
                 )
 
-                ssf_one_minute_runtime.on_tick(tick)
-
                 cash_ticks.append(tick)
 
             if callback_generation != self._stream_generation:
@@ -1799,15 +1506,6 @@ class MarketStreamManager:
                         "[MarketStreamManager] Error processing cash ticks in CandleAggregator"
                     )
 
-            if index_ticks and index_aggregator is not None:
-                if callback_generation == self._stream_generation:
-                    try:
-                        index_aggregator.process_ticks(index_ticks)
-                    except Exception:
-                        logger.exception(
-                            "[MarketStreamManager] Error processing index ticks in IndexCandleAggregator"
-                        )
-
             with self._lock:
                 if callback_generation != self._stream_generation:
                     return
@@ -1840,11 +1538,8 @@ class MarketStreamManager:
             ws.set_mode(ws.MODE_FULL, tokens_to_subscribe)
 
             logger.info(
-                "[MarketStreamManager] KiteTicker connected in MODE_FULL — subscribed %d instruments (%d cash, %d futures, %d indices).",
+                "[MarketStreamManager] KiteTicker connected in MODE_FULL — subscribed %d instruments.",
                 len(tokens_to_subscribe),
-                len(resolved_token_to_symbol),
-                len(resolved_futures_token_to_symbol),
-                len(resolved_index_token_to_symbol),
             )
 
             if gap_detected:
@@ -1860,14 +1555,6 @@ class MarketStreamManager:
                     logger.exception(
                         "[MarketStreamManager] Error recovering aggregator state after connection gap."
                     )
-
-                if index_aggregator is not None:
-                    try:
-                        index_aggregator.handle_connection_gap()
-                    except Exception:
-                        logger.exception(
-                            "[MarketStreamManager] Error recovering index aggregator state after connection gap."
-                        )
 
                 try:
                     self.volume_profile_engine.handle_connection_gap()
@@ -1983,13 +1670,10 @@ class MarketStreamManager:
 
             self.token_to_symbol = dict(resolved_token_to_symbol)
             self.symbol_to_token = dict(resolved_symbol_to_token)
-            self.futures_token_to_symbol = dict(resolved_futures_token_to_symbol)
-            self.index_token_to_symbol = dict(resolved_index_token_to_symbol)
             self.subscribed_token_count = len(tokens_to_subscribe)
             self.state = StreamState.CONNECTING
             self.last_error = None
             self.aggregator = aggregator
-            self.index_aggregator = index_aggregator
             self.kws = kws
 
             with self._history_lock:
@@ -2003,20 +1687,6 @@ class MarketStreamManager:
             live_market_state.set_token_map(self.token_to_symbol)
 
         self._ensure_background_workers_started()
-
-        ssf_one_minute_runtime.initialize(
-            symbols=list(resolved_token_to_symbol.values()),
-            kite_client=kite_client,
-            seed_history=False,
-        )
-
-        self._ssf_seed_thread = threading.Thread(
-            target=self._seed_ssf_history_background,
-            args=(kite_client, generation),
-            name="ssf-history-seed",
-            daemon=True,
-        )
-        self._ssf_seed_thread.start()
 
         warmup_thread = threading.Thread(
             target=self._warm_historical_state,
@@ -2053,8 +1723,6 @@ class MarketStreamManager:
 
         self._drain_evaluation_queue()
         self._drain_history_refresh_queue()
-        self._drain_book_state()
-
         self._stop_event.set()
         for t in self._evaluation_worker_threads:
             if t.is_alive():
@@ -2066,11 +1734,6 @@ class MarketStreamManager:
             self._history_refresh_thread.join(timeout=0.5)
         self._history_refresh_thread = None
         self._history_refresh_worker_started = False
-
-        if self._book_worker_thread and self._book_worker_thread.is_alive():
-            self._book_worker_thread.join(timeout=0.5)
-        self._book_worker_thread = None
-        self._book_worker_started = False
 
         if self._flush_worker_thread and self._flush_worker_thread.is_alive():
             self._flush_worker_thread.join(timeout=0.5)
@@ -2111,11 +1774,6 @@ class MarketStreamManager:
             )
 
         try:
-            ssf_one_minute_runtime.stop()
-        except Exception:
-            logger.exception("[MarketStreamManager] Error stopping SSF 1m runtime")
-
-        try:
             live_signal_engine.reset()
         except Exception:
             logger.exception(
@@ -2129,13 +1787,10 @@ class MarketStreamManager:
                 "[MarketStreamManager] Error resetting live market state"
             )
 
-        self.futures_token_to_symbol.clear()
-        self.index_token_to_symbol.clear()
         self.token_to_symbol.clear()
         self.symbol_to_token.clear()
         self.subscribed_token_count = 0
         self.aggregator = None
-        self.index_aggregator = None
 
         self.state = StreamState.STOPPED
         self.last_disconnect_time = now_ist()
@@ -2255,9 +1910,6 @@ class MarketStreamManager:
                 "ticks_rejected_count": self._ticks_rejected_count,
                 "ticks_invalid_count": self._ticks_invalid_count,
                 "ticks_out_of_order_count": self._ticks_out_of_order_count,
-                "l5_received_count": self._l5_received_count,
-                "l5_processed_count": self._l5_processed_count,
-                "l5_replaced_count": self._l5_replaced_count,
             }
 
     def get_volume_profile(

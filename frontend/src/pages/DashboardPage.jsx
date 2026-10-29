@@ -287,16 +287,9 @@ function Stat({ label, value, tone }) {
 function strategyLabel(key) {
   return (
     {
-      orb: 'ORB',
-      cpr: 'CPR',
-      dual_ema: 'Dual EMA',
-      apex: 'APEX-AIVEM',
-      sector_impulse: 'Sector Impulse',
-      ssf_l5_srm: 'SSF-L5-SRM',
-      aou_oss: 'AOU-OSS',
-      crsd: 'CRSD',
-      rm100: 'RM100',
-      vrp: 'VRP',
+      gap_fade: 'Gap Fade',
+      rsi_ema: 'RSI x EMA',
+      orb_sip: 'ORB Stocks-in-Play',
     }[key] || (key ? key.toUpperCase() : 'STRATEGY')
   )
 }

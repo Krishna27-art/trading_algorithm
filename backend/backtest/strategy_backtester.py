@@ -157,6 +157,7 @@ class StrategyBacktester:
         context_lookback_days: int = 30,
         db: Optional[DatabaseManager] = None,
         persist_trades: bool = False,
+        fill_policy: str = "NEXT_BAR_OPEN",
     ):
         """
         strategy_factory: a zero-arg callable returning a FRESH BaseStrategy
@@ -177,6 +178,14 @@ class StrategyBacktester:
         self.context_lookback_days = context_lookback_days
         self.persist_trades = persist_trades
         self._db = db  # may be None; lazily resolved in generate_trades
+        # NEXT_BAR_OPEN: a signal is only known once its candle has CLOSED, so
+        # the earliest real fill is the next candle's open. SIGNAL_CLOSE keeps
+        # the old (optimistic) fill-at-signal-close behaviour for comparison.
+        policy = str(fill_policy or "NEXT_BAR_OPEN").upper()
+        if policy not in ("NEXT_BAR_OPEN", "SIGNAL_CLOSE"):
+            raise ValueError(f"Unknown fill_policy {fill_policy!r}")
+        self.fill_policy = policy
+        self.skipped_entries: List[dict] = []
 
     def _get_db(self) -> Optional[DatabaseManager]:
         if not self.persist_trades:
@@ -275,9 +284,24 @@ class StrategyBacktester:
 
             position = 0
             trade_record: Optional[dict] = None
+            pending = None  # entry signal waiting for the next candle's open
 
             for i in range(len(day_df)):
                 row = day_df.iloc[i]
+
+                if pending is not None and position == 0:
+                    filled = self._fill_pending(pending, row, current_capital, session_date)
+                    pending = None
+                    if filled is not None:
+                        trade_record, position = filled
+                        if db:
+                            self._db_persist_trade(db, trade_record, closed=False)
+                        strategy.register_trade_entry(
+                            entry_price=trade_record["entry_price"], position=position,
+                            stop_loss=trade_record["initial_stop"], target=trade_record["initial_target"],
+                            risk_dist=abs(trade_record["entry_price"] - trade_record["initial_stop"]),
+                        )
+
                 candle = {
                     "datetime": row["datetime"], "open": row["open"], "high": row["high"],
                     "low": row["low"], "close": row["close"], "volume": row.get("volume", 0),
@@ -297,6 +321,20 @@ class StrategyBacktester:
                     strategy.register_trade_exit()
                     position = 0
                     trade_record = None
+                    continue
+
+                if (
+                    signal.action in (SignalAction.BUY, SignalAction.SELL)
+                    and position == 0
+                    and self.fill_policy == "NEXT_BAR_OPEN"
+                ):
+                    if i + 1 < len(day_df):
+                        pending = signal
+                    else:
+                        self.skipped_entries.append({
+                            "date": str(session_date), "time": str(signal.timestamp),
+                            "reason": "signal on last candle of session; no next open to fill",
+                        })
                     continue
 
                 if signal.action in (SignalAction.BUY, SignalAction.SELL) and position == 0:
@@ -341,6 +379,53 @@ class StrategyBacktester:
                 strategy.register_trade_exit()
 
         return all_trades
+
+    def _fill_pending(self, signal, row, capital: float, session_date) -> Optional[Tuple[dict, int]]:
+        """Fill a pending entry at this candle's real open, or cancel it."""
+        fill = float(row["open"])
+        stop, target = signal.stop_loss, signal.target
+        is_long = signal.action == SignalAction.BUY
+        reason = None
+        if not (fill > 0 and math.isfinite(fill)):
+            reason = "invalid next open"
+        elif stop:
+            if is_long and fill <= stop:
+                reason = f"next open {fill} already at/below stop {stop}"
+            elif not is_long and fill >= stop:
+                reason = f"next open {fill} already at/above stop {stop}"
+        if reason is None and target:
+            if is_long and fill >= target:
+                reason = f"next open {fill} already at/above target {target}"
+            elif not is_long and fill <= target:
+                reason = f"next open {fill} already at/below target {target}"
+        if reason is not None:
+            self.skipped_entries.append({
+                "date": str(session_date), "time": str(signal.timestamp), "reason": reason,
+            })
+            return None
+
+        stop_distance = abs(fill - stop) if stop else 0.0
+        qty = self.position_sizer.calculate_order_quantity(
+            capital=capital, stop_distance=stop_distance, instrument=self.instrument,
+        )
+        if qty <= 0:
+            return None
+        direction = "BUY" if is_long else "SELL"
+        record = {
+            "trade_id": f"BT_{session_date}_{uuid.uuid4().hex[:8]}",
+            "symbol": self.instrument.symbol,
+            "direction": direction,
+            "signal_time": signal.timestamp,
+            "signal_price": signal.price,
+            "entry_time": row["datetime"],
+            "entry_price": fill,
+            "quantity": qty,
+            "initial_stop": stop,
+            "initial_target": target,
+            "entry_reason": signal.reason,
+            "fill_policy": self.fill_policy,
+        }
+        return record, (1 if is_long else -1)
 
     def _close_position(self, trade: dict, exit_price: float, exit_time, reason: str, all_trades: List[dict]):
         qty = trade["quantity"]
@@ -428,6 +513,7 @@ class EventDrivenBacktester(StrategyBacktester):
         strategy_factory: Optional[Callable[[], BaseStrategy]] = None,
         context_lookback_days: int = 30,
         slippage_points: float = 0.5,
+        fill_policy: str = "NEXT_BAR_OPEN",
     ):
         factory = strategy_factory or (
             lambda: IntradayORBStrategy(
@@ -441,6 +527,7 @@ class EventDrivenBacktester(StrategyBacktester):
             instrument=instrument,
             app_settings=app_settings,
             context_lookback_days=context_lookback_days,
+            fill_policy=fill_policy,
         )
         self.execution_policy = execution_policy
         self.slippage_points = slippage_points

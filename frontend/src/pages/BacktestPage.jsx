@@ -3,7 +3,7 @@ import { Play, Loader2 } from 'lucide-react'
 import Card from '../components/common/Card'
 import StatusPill from '../components/common/StatusPill'
 import { ErrorState, EmptyState } from '../components/common/DataStates'
-import { runBacktest, getResearchBacktest } from '../api/backtest'
+import { runBacktest, getResearchBacktest, runWalkForwardApi } from '../api/backtest'
 import { ApiError } from '../api/client'
 import { formatCurrency, formatNumber } from '../utils/format'
 
@@ -16,6 +16,7 @@ const STRATEGIES = [
   { id: 'ssf_l5_srm', label: 'SSF-L5-SRM', usesSymbol: true },
   { id: 'aou_oss', label: 'AOU-OSS', usesSymbol: true },
   { id: 'crsd', label: 'CRSD', usesSymbol: true },
+  { id: 'orb_retest', label: 'ORB Retest (research)', usesSymbol: true },
   { id: 'rm100', label: 'RM100 (portfolio)', usesSymbol: false },
 ]
 
@@ -30,6 +31,23 @@ export default function BacktestPage() {
 
   const [compare, setCompare] = useState(null)
   const [compareStatus, setCompareStatus] = useState('idle')
+
+  const [wf, setWf] = useState(null)
+  const [wfStatus, setWfStatus] = useState('idle')
+  const [wfError, setWfError] = useState(null)
+
+  const runWalkForward = async () => {
+    setWfStatus('loading')
+    setWfError(null)
+    try {
+      const data = await runWalkForwardApi(strategy, symbol, days)
+      setWf(data)
+      setWfStatus('success')
+    } catch (err) {
+      setWfError(err instanceof ApiError ? err : new Error('Walk-forward failed.'))
+      setWfStatus('error')
+    }
+  }
 
   const selected = STRATEGIES.find((s) => s.id === strategy)
 
@@ -113,7 +131,23 @@ export default function BacktestPage() {
             Run backtest
           </button>
         </div>
+        {selected.usesSymbol && strategy !== 'rm100' && (
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              onClick={runWalkForward}
+              disabled={wfStatus === 'loading'}
+              className="flex items-center gap-2 rounded-md border border-[var(--border-strong)] px-3 py-1.5 text-xs font-medium text-[var(--text-dim)] hover:text-[var(--text)] disabled:opacity-50"
+            >
+              {wfStatus === 'loading' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+              Walk-forward test (60-day train / 20-day test)
+            </button>
+            <span className="text-xs text-[var(--text-faint)]">Entries fill at the next candle's open.</span>
+          </div>
+        )}
       </Card>
+
+      {wfStatus === 'error' && <Card><ErrorState error={wfError} onRetry={runWalkForward} label="Walk-forward failed." /></Card>}
+      {wfStatus === 'success' && wf && <WalkForwardCard wf={wf} />}
 
       {status === 'error' && <Card><ErrorState error={error} onRetry={run} label="Backtest failed." /></Card>}
 
@@ -192,6 +226,8 @@ export default function BacktestPage() {
             </Card>
           )}
 
+          {result?.robustness?.monte_carlo && <MonteCarloCard mc={result.robustness.monte_carlo} />}
+
           {trades && trades.length > 0 && <TradesAndEquity trades={trades} />}
         </>
       )}
@@ -267,6 +303,68 @@ export default function BacktestPage() {
 
 function DataSourceBadge({ source }) {
   return <StatusPill tone={source === 'REAL_KITE' ? 'positive' : 'warning'}>{source}</StatusPill>
+}
+
+function MonteCarloCard({ mc, title = 'Monte Carlo stress test' }) {
+  if (!mc || !mc.trades) {
+    return <Card title={title}><EmptyState label="No completed trades to stress-test." /></Card>
+  }
+  return (
+    <Card title={title} action={<StatusPill tone={mc.reliable ? 'accent' : 'neutral'} dot={false}>{mc.reliable ? `${mc.simulations} runs` : 'Small sample'}</StatusPill>}>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <Metric label="Typical max drawdown" value={`${formatNumber(mc.max_drawdown_pct_p50, 1)}%`} tone="negative" />
+        <Metric label="Bad-case drawdown (95%)" value={`${formatNumber(mc.max_drawdown_pct_p95, 1)}%`} tone="negative" />
+        <Metric label="Losing streak (95%)" value={mc.losing_streak_p95} />
+        <Metric label="Chance of loss" value={`${formatNumber(mc.probability_of_loss_pct, 1)}%`} tone={mc.probability_of_loss_pct > 20 ? 'negative' : undefined} />
+        <Metric label="P&L, bad case (5%)" value={formatCurrency(mc.net_pnl_p05)} tone={pnlTone(mc.net_pnl_p05)} />
+        <Metric label="P&L, median" value={formatCurrency(mc.net_pnl_p50)} tone={pnlTone(mc.net_pnl_p50)} />
+        <Metric label="P&L, good case (95%)" value={formatCurrency(mc.net_pnl_p95)} tone={pnlTone(mc.net_pnl_p95)} />
+        <Metric label={`Chance of ${mc.ruin_drawdown_pct}% drawdown`} value={`${formatNumber(mc.probability_of_ruin_pct, 1)}%`} />
+      </div>
+      <p className="text-xs text-[var(--text-faint)] mt-3">{mc.note} Trades are reshuffled and resampled; no prices are invented.</p>
+    </Card>
+  )
+}
+
+function WalkForwardCard({ wf }) {
+  const oos = wf.out_of_sample || {}
+  return (
+    <>
+      <Card title={`Walk-forward: ${wf.strategy} on ${wf.symbol}`} action={<DataSourceBadge source={wf.data_source} />}>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+          <Metric label="Unseen-data net P&L" value={formatCurrency(oos.net_pnl)} tone={pnlTone(oos.net_pnl)} />
+          <Metric label="Unseen-data trades" value={oos.total_trades} />
+          <Metric label="Unseen-data win rate" value={`${formatNumber(oos.win_rate_pct, 1)}%`} />
+          <Metric label="Profitable folds" value={`${formatNumber(wf.fold_statistics?.pct_profitable_folds, 0)}%`} />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-[var(--text-faint)] border-b border-[var(--border)]">
+                <th className="py-2 pr-3 font-medium">Fold</th>
+                <th className="py-2 pr-3 font-medium">Test window</th>
+                <th className="py-2 pr-3 font-medium">Trades</th>
+                <th className="py-2 pr-3 font-medium">Win rate</th>
+                <th className="py-2 pr-3 font-medium">Net P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(wf.folds || []).map((f) => (
+                <tr key={f.fold} className="border-b border-[var(--border)] last:border-0 font-num">
+                  <td className="py-2 pr-3">{f.fold}</td>
+                  <td className="py-2 pr-3">{f.test}</td>
+                  <td className="py-2 pr-3">{f.trades}</td>
+                  <td className="py-2 pr-3">{formatNumber(f.win_rate_pct, 1)}%</td>
+                  <td className={`py-2 pr-3 ${f.net_pnl > 0 ? 'text-[var(--positive)]' : f.net_pnl < 0 ? 'text-[var(--negative)]' : ''}`}>{formatCurrency(f.net_pnl)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      <MonteCarloCard mc={wf.robustness?.monte_carlo} title="Monte Carlo on unseen-data trades" />
+    </>
+  )
 }
 
 function Metric({ label, value, tone }) {

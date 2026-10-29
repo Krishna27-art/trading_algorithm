@@ -12,3 +12,11 @@ export const runBacktest = (strategy, symbol, days) =>
 // GET /api/research/backtest?days=&symbol= -> ORB vs CPR vs Dual-EMA comparison
 export const getResearchBacktest = (days, symbol) =>
   apiGet(`/api/research/backtest?days=${days}&symbol=${encodeURIComponent(symbol)}`, { requireSecret: true })
+
+// POST /api/strategy/walk_forward -> rolling walk-forward + Monte Carlo on unseen-data trades.
+export const runWalkForwardApi = (strategy, symbol, days, trainDays = 60, testDays = 20) =>
+  apiPost(
+    `/api/strategy/walk_forward?days=${days}&symbol=${encodeURIComponent(symbol)}&strategy=${encodeURIComponent(strategy)}&train_days=${trainDays}&test_days=${testDays}`,
+    undefined,
+    { requireSecret: true },
+  )

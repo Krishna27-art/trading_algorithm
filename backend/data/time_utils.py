@@ -191,6 +191,33 @@ class MarketCalendar:
         return d not in HOLIDAYS_BY_YEAR[d.year]
 
     @staticmethod
+    def coverage_end() -> date:
+        """Last date the verified NSE holiday calendar covers."""
+        return date(max(HOLIDAYS_BY_YEAR), 12, 31)
+
+    @staticmethod
+    def coverage_status(today: date, warn_days: int = 45) -> dict:
+        """OK / EXPIRING / EXPIRED. After coverage ends, trading-day checks raise
+        CALENDAR_UNAVAILABLE (fail closed) until the next NSE holiday list is added."""
+        end = MarketCalendar.coverage_end()
+        days_left = (end - today).days
+        if days_left < 0:
+            state = "EXPIRED"
+        elif days_left <= warn_days:
+            state = "EXPIRING"
+        else:
+            state = "OK"
+        return {
+            "status": state,
+            "covered_until": end.isoformat(),
+            "days_left": days_left,
+            "action": (
+                None if state == "OK"
+                else f"Add the NSE {end.year + 1} trading-holiday list to HOLIDAYS_BY_YEAR in backend/data/time_utils.py."
+            ),
+        }
+
+    @staticmethod
     def is_blackout_date(d: date) -> bool:
         return d in BLACKOUT_DATES
 

@@ -38,12 +38,21 @@ export default function SystemStatusPage() {
               <Row key={row.key} label={row.label} value={health.data[row.key]} />
             ))}
             <Row label="Active broker" value={health.data.active_broker} tone="accent" />
+            {health.data.holiday_calendar && (
+              <Row
+                label={`Holiday calendar (to ${health.data.holiday_calendar.covered_until || '?'})`}
+                value={health.data.holiday_calendar.status}
+              />
+            )}
             <Row
               label="Overall status"
               value={health.data.overall_status}
               tone={statusTone(health.data.overall_status)}
             />
           </div>
+        )}
+        {health.data?.holiday_calendar?.action && (
+          <p className="text-xs text-[var(--negative)] mt-3">{health.data.holiday_calendar.action}</p>
         )}
       </Card>
 

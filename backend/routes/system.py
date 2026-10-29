@@ -83,6 +83,14 @@ def _classify(stream_state: str) -> str:
     return "DISCONNECTED"
 
 
+def _calendar_status() -> Dict[str, Any]:
+    try:
+        from backend.data.time_utils import MarketCalendar, today_ist
+        return MarketCalendar.coverage_status(today_ist())
+    except Exception as exc:
+        return {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+
 @router.get("/api/system/health")
 def get_system_health() -> Dict[str, Any]:
     """Reports status of broker, stream, database and signal-engine subsystems."""
@@ -262,5 +270,6 @@ def get_system_health() -> Dict[str, Any]:
         "active_signal_count": producing_signal_count,
         "active_broker": "ZERODHA_KITE" if kite_conn else "DISCONNECTED",
         "overall_status": overall,
+        "holiday_calendar": _calendar_status(),
         "timestamp": now_ist_iso(),
     }

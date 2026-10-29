@@ -207,8 +207,14 @@ class PairBacktester:
 
             strategy.reset_session(session_date)
 
+            pending_entry = None
             for _, row in day_df.iterrows():
                 ts = row["datetime"]
+                if pending_entry is not None and active_trade is None and strategy.position == 0:
+                    active_trade = self._fill_pair_entry(
+                        pending_entry, row, current_capital, strategy
+                    )
+                    pending_entry = None
                 candle = {
                     "datetime": ts,
                     "open": float(row["open"]),
@@ -241,59 +247,18 @@ class PairBacktester:
                         active_trade = None
                         continue
 
-                # 2. If flat, check for new entry signals
+                # 2. If flat, check for new entry signals. A signal is only
+                # known when its candle CLOSES, so all legs are filled at the
+                # NEXT candle's real open (target and every hedge leg).
                 if active_trade is None and strategy.position == 0:
                     sig = strategy.on_candle(candle, vwap)
                     if sig is not None and sig.action in (SignalAction.BUY, SignalAction.SELL):
                         hedge_legs = sig.hedge_legs or getattr(strategy, "hedge_legs", {})
                         if hedge_legs:
-                            # Get current prices for all hedge legs at ts
-                            hedge_prices: Dict[str, float] = {}
-                            for h_sym in hedge_legs.keys():
-                                h_bar = self.peer_context.bar(h_sym, ts)
-                                if h_bar and h_bar.get("close", 0) > 0:
-                                    hedge_prices[h_sym] = float(h_bar["close"])
+                            pending_entry = (sig, dict(hedge_legs))
 
-                            if len(hedge_prices) == len(hedge_legs):
-                                # Size multi-leg position
-                                stop_dist = abs(sig.price - (sig.stop_loss or sig.price))
-                                if stop_dist <= 0:
-                                    stop_dist = sig.price * 0.01
-
-                                pos_size = self.sizer.calculate_pair_quantities(
-                                    capital=current_capital,
-                                    target_symbol=self.instrument.symbol,
-                                    target_price=sig.price,
-                                    target_stop_distance=stop_dist,
-                                    target_action="BUY" if sig.action == SignalAction.BUY else "SELL",
-                                    hedge_legs=hedge_legs,
-                                    hedge_prices=hedge_prices,
-                                    risk_scale=getattr(strategy, "risk_scale", 1.0),
-                                )
-
-                                if pos_size.target_quantity > 0:
-                                    active_trade = {
-                                        "entry_timestamp": ts,
-                                        "target_symbol": self.instrument.symbol,
-                                        "target_action": pos_size.target_action,
-                                        "target_entry_price": sig.price,
-                                        "target_quantity": pos_size.target_quantity,
-                                        "target_stop_loss": sig.stop_loss,
-                                        "target_target": sig.target,
-                                        "hedge_quantities": pos_size.hedge_quantities,
-                                        "hedge_actions": pos_size.hedge_actions,
-                                        "hedge_entry_prices": hedge_prices,
-                                        "entry_reason": sig.reason,
-                                        "risk_scale": pos_size.risk_scale,
-                                    }
-                                    strategy.register_trade_entry(
-                                        entry_price=sig.price,
-                                        position=1 if sig.action == SignalAction.BUY else -1,
-                                        stop_loss=sig.stop_loss or 0.0,
-                                        target=sig.target or 0.0,
-                                        risk_dist=stop_dist,
-                                    )
-
+            # A signal on the session's last candle has no next open to fill.
+            pending_entry = None
             # EOD Square-off (strictly intraday MIS)
             if active_trade is not None:
                 last_row = day_df.iloc[-1]
@@ -319,6 +284,61 @@ class PairBacktester:
                 active_trade = None
 
         return all_trades
+
+    def _fill_pair_entry(self, pending, row, capital: float, strategy) -> Optional[Dict[str, Any]]:
+        sig, hedge_legs = pending
+        ts = row["datetime"]
+        fill = float(row["open"])
+        is_long = sig.action == SignalAction.BUY
+        if not (fill > 0 and math.isfinite(fill)):
+            return None
+        if sig.stop_loss and ((is_long and fill <= sig.stop_loss) or (not is_long and fill >= sig.stop_loss)):
+            return None  # next open already through the stop: never filled
+        hedge_prices: Dict[str, float] = {}
+        for h_sym in hedge_legs:
+            h_bar = self.peer_context.bar(h_sym, ts)
+            if not h_bar or not (h_bar.get("open", 0) > 0):
+                return None  # a leg without a real price at this bar: no trade
+            hedge_prices[h_sym] = float(h_bar["open"])
+
+        stop_dist = abs(fill - sig.stop_loss) if sig.stop_loss else 0.0
+        if stop_dist <= 0:
+            stop_dist = fill * 0.01
+        pos_size = self.sizer.calculate_pair_quantities(
+            capital=capital,
+            target_symbol=self.instrument.symbol,
+            target_price=fill,
+            target_stop_distance=stop_dist,
+            target_action="BUY" if is_long else "SELL",
+            hedge_legs=hedge_legs,
+            hedge_prices=hedge_prices,
+            risk_scale=getattr(strategy, "risk_scale", 1.0),
+        )
+        if pos_size.target_quantity <= 0:
+            return None
+        strategy.register_trade_entry(
+            entry_price=fill,
+            position=1 if is_long else -1,
+            stop_loss=sig.stop_loss or 0.0,
+            target=sig.target or 0.0,
+            risk_dist=stop_dist,
+        )
+        return {
+            "entry_timestamp": ts,
+            "signal_timestamp": sig.timestamp,
+            "signal_price": sig.price,
+            "target_symbol": self.instrument.symbol,
+            "target_action": pos_size.target_action,
+            "target_entry_price": fill,
+            "target_quantity": pos_size.target_quantity,
+            "target_stop_loss": sig.stop_loss,
+            "target_target": sig.target,
+            "hedge_quantities": pos_size.hedge_quantities,
+            "hedge_actions": pos_size.hedge_actions,
+            "hedge_entry_prices": hedge_prices,
+            "entry_reason": sig.reason,
+            "risk_scale": pos_size.risk_scale,
+        }
 
     def _hedge_exit_price(self, symbol: str, ts: Any):
         bar = self.peer_context.bar(symbol, ts)

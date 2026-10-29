@@ -44,6 +44,8 @@ STRATEGIES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "ssf_l5_srm": ("SSF-L5-SRM Microprice & Residual Momentum", ("ssf_l5_srm", "ssf")),
     "aou_oss": ("Analytic Ornstein-Uhlenbeck Optimal-Stopping (AOU-OSS)", ("aou_oss",)),
     "crsd": ("Cross-Sectional Residual Shock Divergence (CRSD)", ("crsd",)),
+    # Research only: not part of live consensus until proven out-of-sample.
+    "orb_retest": ("ORB Retest (15m range + ATR/RVOL, research)", ("orb_retest",)),
 }
 
 # The 7 single-instrument directional strategies compared in research
@@ -158,6 +160,9 @@ def _make_factory(key: str, inst, kite, ctx: Any = None) -> Callable[[], Any]:
     if key == "orb":
         from backend.strategy.orb_strategy import IntradayORBStrategy
         return lambda: IntradayORBStrategy(inst, settings.strategy)
+    if key == "orb_retest":
+        from backend.strategy.orb_retest_strategy import ORBRetestStrategy
+        return lambda: ORBRetestStrategy(inst, settings.strategy)
     if key == "cpr":
         from backend.strategy.cpr_strategy import CPRRegimeBreakoutStrategy
         return lambda: CPRRegimeBreakoutStrategy(inst, settings.strategy)
@@ -315,33 +320,65 @@ def _strategy_context(key: str, inst, days: int, kite, auth_err: Optional[str]):
     return None
 
 
-def _run_one(key: str, inst, kite, df, days: int = 180, auth_err: Optional[str] = None):
+def _make_backtester(key: str, inst, kite, ctx: Any):
+    """Backtester for one strategy (pair backtester for CRSD)."""
     from backend.config.settings import settings
-
-    ctx = _strategy_context(key, inst, days, kite, auth_err)
 
     if key == "crsd":
         from backend.backtest.pair_backtester import PairBacktester
         from backend.strategy.crsd_strategy import CRSDStrategy
 
-        peer_ctx = ctx
-        backtester = PairBacktester(
-            strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx),
+        return PairBacktester(
+            strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=ctx),
             instrument=inst,
-            peer_context=peer_ctx,
+            peer_context=ctx,
             app_settings=settings,
         )
-        return backtester.run(df, initial_capital=settings.initial_capital)
 
     from backend.backtest.strategy_backtester import StrategyBacktester
 
-    backtester = StrategyBacktester(
+    return StrategyBacktester(
         strategy_factory=_make_factory(key, inst, kite, ctx),
         instrument=inst,
         app_settings=settings,
         persist_trades=False,
     )
-    return backtester.run(df, initial_capital=settings.initial_capital)
+
+
+def _report_for(trades, df, initial_capital: float):
+    import pandas as pd
+    from backend.backtest.performance import PerformanceAnalyzer
+
+    dts = pd.to_datetime(df["datetime"])
+    return PerformanceAnalyzer.generate_report(
+        trades,
+        initial_capital=initial_capital,
+        backtest_start_date=dts.min(),
+        backtest_end_date=dts.max(),
+        all_trading_dates=sorted(dts.dt.date.unique().tolist()),
+    )
+
+
+def _run_one_with_trades(key: str, inst, kite, df, days: int = 180, auth_err: Optional[str] = None):
+    """(report, trades, skipped_entries) for one strategy."""
+    from backend.config.settings import settings
+
+    ctx = _strategy_context(key, inst, days, kite, auth_err)
+    backtester = _make_backtester(key, inst, kite, ctx)
+    trades = backtester.generate_trades(df, initial_capital=settings.initial_capital)
+    report = _report_for(trades, df, settings.initial_capital)
+    return report, trades, list(getattr(backtester, "skipped_entries", []) or [])
+
+
+def _run_one(key: str, inst, kite, df, days: int = 180, auth_err: Optional[str] = None):
+    return _run_one_with_trades(key, inst, kite, df, days=days, auth_err=auth_err)[0]
+
+
+def _monte_carlo(trades) -> Dict[str, Any]:
+    from backend.backtest.monte_carlo import run_monte_carlo
+    from backend.config.settings import settings
+
+    return run_monte_carlo(trades, initial_capital=settings.initial_capital).to_dict()
 
 
 def _serialize_rounded(rep) -> dict:
@@ -380,10 +417,13 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
 
     active = (settings.active_strategy or "").lower()
     reports: Dict[str, Any] = {}
+    robustness: Dict[str, Any] = {}
     unavailable: Dict[str, Dict[str, str]] = {}
     for key in RESEARCH_STRATEGIES:
         try:
-            reports[key] = _run_one(key, inst, kite, df, days=days, auth_err=auth_err)
+            rep, trades, _ = _run_one_with_trades(key, inst, kite, df, days=days, auth_err=auth_err)
+            reports[key] = rep
+            robustness[key] = _monte_carlo(trades)
         except StrategyUnavailable as exc:
             unavailable[key] = {"state": exc.state, "reason": exc.reason}
 
@@ -418,6 +458,9 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
             "max_drawdown": round(rep.max_drawdown_pct, 1),
             "net_pnl": round(rep.net_pnl, 2),
             "state": "ACTIVE" if active == key or active in aliases else "STANDBY",
+            "mc_max_drawdown_p95": robustness[key]["max_drawdown_pct_p95"],
+            "mc_probability_of_loss": robustness[key]["probability_of_loss_pct"],
+            "mc_reliable": robustness[key]["reliable"],
             "execution_note": "REGIME_ONLY: Order book depth absent" if key == "ssf_l5_srm" else None,
         })
 
@@ -426,7 +469,11 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
         "symbol": inst.symbol,
         "data_source": "REAL_KITE",
         "excluded_irregular_sessions": excluded_sessions,
-        "strategies": {key: _serialize_rounded(rep) for key, rep in reports.items()},
+        "fill_policy": "NEXT_BAR_OPEN",
+        "strategies": {
+            key: {**_serialize_rounded(rep), "monte_carlo": robustness[key]}
+            for key, rep in reports.items()
+        },
         "unavailable_strategies": unavailable,
         "comparison": comparison,
     }
@@ -506,7 +553,7 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
             app_settings=settings,
         )
         trades = backtester.generate_trades(df, initial_capital=settings.initial_capital)
-        report = PerformanceAnalyzer.generate_report(trades, initial_capital=settings.initial_capital)
+        report = _report_for(trades, df, settings.initial_capital)
 
         target_gross = sum(float(t.get("target_gross_pnl", 0)) for t in trades)
         hedge_gross = sum(float(t.get("hedge_gross_pnl", 0)) for t in trades)
@@ -530,6 +577,7 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
                 "total_leg_costs": round(total_costs, 2),
             },
             "trades": trades,
+            "robustness": {"monte_carlo": _monte_carlo(trades)},
             "report": {
                 "symbol": inst.symbol,
                 "strategy": "CRSD",
@@ -558,7 +606,7 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
         }
 
     try:
-        report = _run_one(key, inst, kite, df, days=days, auth_err=auth_err)
+        report, trades, skipped = _run_one_with_trades(key, inst, kite, df, days=days, auth_err=auth_err)
     except StrategyUnavailable as exc:
         raise _unavailable(exc)
 
@@ -567,6 +615,9 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
         "strategy": key,
         "data_source": "REAL_KITE",
         "excluded_irregular_sessions": excluded_sessions,
+        "fill_policy": "NEXT_BAR_OPEN",
+        "skipped_entries": len(skipped),
+        "robustness": {"monte_carlo": _monte_carlo(trades)},
         "report": {
             "symbol": inst.symbol,
             "strategy": key.upper(),
@@ -592,4 +643,99 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
             "short_net_pnl": report.short_net_pnl,
             "yearly_returns": report.yearly_returns,
         },
+    }
+
+
+@router.post("/api/strategy/walk_forward")
+def trigger_walk_forward(
+    days: int = 365,
+    symbol: str = "NIFTY",
+    strategy: str = "orb",
+    train_days: int = 60,
+    test_days: int = 20,
+):
+    """
+    Rolling walk-forward test of one strategy on real Kite history.
+
+    Each fold trades ONLY sessions after everything it warmed up on; the
+    out-of-sample folds are chained into one equity curve and stress-tested
+    with Monte Carlo. Parameters are fixed (no per-fold optimisation), so
+    nothing here can be tuned to the test data.
+    """
+    key = _canonical_strategy(strategy)
+    if key is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown strategy '{strategy}'. Valid: {', '.join(STRATEGIES)}.",
+        )
+    if train_days < 5 or test_days < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="train_days must be >= 5 and test_days >= 1.",
+        )
+    return _guarded(_walk_forward_one, days, symbol, key, train_days, test_days)
+
+
+def _walk_forward_one(days: int, symbol: str, key: str, train_days: int, test_days: int) -> Dict[str, Any]:
+    from backend.backtest.rolling_walk_forward import RollingWalkForwardValidator
+    from backend.config.settings import settings
+
+    kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
+    inst, token = _resolve_instrument(symbol, kite)
+    df, excluded_sessions = _load_backtest_data(inst, token, days, kite, auth_err)
+
+    try:
+        ctx = _strategy_context(key, inst, days, kite, auth_err)
+    except StrategyUnavailable as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_422_UNPROCESSABLE_ENTITY
+                if exc.state == "NOT_APPLICABLE"
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            ),
+            detail=f"{STRATEGIES[key][0]}: {exc.reason}",
+        )
+
+    validator = RollingWalkForwardValidator(
+        instrument=inst,
+        app_settings=settings,
+        backtester_factory=lambda fold_inst: _make_backtester(key, fold_inst, kite, ctx),
+    )
+    try:
+        result = validator.validate(
+            df,
+            min_train_days=train_days,
+            test_block_days=test_days,
+            initial_capital=settings.initial_capital,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    oos = result.combined_out_of_sample_report
+    stats = result.fold_statistics
+    return {
+        "success": True,
+        "strategy": key,
+        "symbol": inst.symbol,
+        "data_source": "REAL_KITE",
+        "fill_policy": "NEXT_BAR_OPEN",
+        "excluded_irregular_sessions": excluded_sessions,
+        "train_days": train_days,
+        "test_days": test_days,
+        "folds": [
+            {
+                "fold": f.fold_number,
+                "train": f"{f.train_start} -> {f.train_end}",
+                "test": f"{f.test_start} -> {f.test_end}",
+                "trades": f.report.total_trades,
+                "win_rate_pct": round(f.report.win_rate_pct, 1),
+                "net_pnl": round(f.report.net_pnl, 2),
+                "profit_factor": _safe_pf(f.report.profit_factor)[0],
+            }
+            for f in result.folds
+        ],
+        "fold_statistics": stats.__dict__ if stats is not None else None,
+        "out_of_sample": _serialize_rounded(oos),
+        "final_capital": round(result.final_capital, 2),
+        "robustness": {"monte_carlo": _monte_carlo(result.all_out_of_sample_trades)},
     }

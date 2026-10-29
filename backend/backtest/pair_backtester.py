@@ -185,14 +185,25 @@ class PairBacktester:
         # Track active multi-leg position
         active_trade: Optional[Dict[str, Any]] = None
 
+        pretrain_days: list = []
+        if pretrain_df is not None and not pretrain_df.empty:
+            pt = pretrain_df.copy()
+            if "datetime" not in pt.columns and isinstance(pt.index, pd.DatetimeIndex):
+                pt["datetime"] = pt.index
+            pt["datetime"] = pd.to_datetime(pt["datetime"])
+            pt = pt[pt["datetime"] < data["datetime"].min()] if not data.empty else pt
+            pt.sort_values("datetime", inplace=True)
+            pt["date"] = pt["datetime"].dt.date
+            pretrain_days = list(pt.groupby("date"))
+        history_days = pretrain_days + days
+
         for day_idx, (session_date, day_df) in enumerate(days):
-            # Seed lookback context
-            if pretrain_df is not None and not pretrain_df.empty:
-                strategy.seed_context(pretrain_df)
-            elif day_idx > 0:
-                lookback_days = days[max(0, day_idx - self.context_lookback_days):day_idx]
-                lookback_data = pd.concat([d for _, d in lookback_days], ignore_index=True)
-                strategy.seed_context(lookback_data)
+            # Seed with the sessions strictly before this one (pretrain window
+            # then earlier test sessions), never a frozen pretrain snapshot.
+            h_idx = len(pretrain_days) + day_idx
+            prior = history_days[max(0, h_idx - self.context_lookback_days):h_idx]
+            if prior:
+                strategy.seed_context(pd.concat([d for _, d in prior], ignore_index=True))
 
             strategy.reset_session(session_date)
 
@@ -309,6 +320,21 @@ class PairBacktester:
 
         return all_trades
 
+    def _hedge_exit_price(self, symbol: str, ts: Any):
+        bar = self.peer_context.bar(symbol, ts)
+        if bar is not None:
+            return float(bar["close"]), "EXACT_BAR"
+        frame = self.peer_context.frames.get(symbol)
+        if frame is None or frame.empty:
+            return None, "MISSING"
+        pos = frame.index.searchsorted(pd.Timestamp(ts), side="right") - 1
+        if pos < 0:
+            return None, "MISSING"
+        px = float(frame["close"].iloc[pos])
+        if not (px > 0 and math.isfinite(px)):
+            return None, "MISSING"
+        return px, "LAST_REAL_BAR"
+
     def _close_pair_trade(
         self,
         active_trade: Dict[str, Any],
@@ -347,15 +373,23 @@ class PairBacktester:
         hedge_gross_pnl = 0.0
         hedge_total_costs = 0.0
         hedge_exit_prices: Dict[str, float] = {}
+        hedge_exit_sources: Dict[str, str] = {}
 
         for h_sym, h_qty in active_trade["hedge_quantities"].items():
             h_entry_px = active_trade["hedge_entry_prices"][h_sym]
             h_action = active_trade["hedge_actions"][h_sym]
 
-            # Fetch exit price from peer context
-            h_bar = self.peer_context.bar(h_sym, exit_timestamp)
-            h_exit_px = float(h_bar["close"]) if h_bar else h_entry_px
+            # Real exit price from the peer frame: the exact bar, otherwise the
+            # last real close at or before the exit. Never the entry price
+            # (that would book a fabricated zero-P&L hedge leg).
+            h_exit_px, h_source = self._hedge_exit_price(h_sym, exit_timestamp)
+            if h_exit_px is None:
+                raise ValueError(
+                    f"No real {h_sym} price at or before {exit_timestamp}; "
+                    "hedge leg cannot be valued."
+                )
             hedge_exit_prices[h_sym] = h_exit_px
+            hedge_exit_sources[h_sym] = h_source
 
             if h_action == "BUY":
                 leg_pnl = (h_exit_px - h_entry_px) * h_qty
@@ -383,6 +417,10 @@ class PairBacktester:
         total_costs = target_cost + hedge_total_costs
         net_pnl = total_gross_pnl - total_costs
 
+        stop = active_trade.get("target_stop_loss")
+        initial_risk = abs(target_entry_px - stop) * target_qty if stop else 0.0
+        r_multiple = round(net_pnl / initial_risk, 2) if initial_risk > 0 else 0.0
+
         return {
             "entry_time": active_trade["entry_timestamp"],
             "exit_time": exit_timestamp,
@@ -399,9 +437,15 @@ class PairBacktester:
             "hedge_actions": active_trade["hedge_actions"],
             "hedge_entry_prices": active_trade["hedge_entry_prices"],
             "hedge_exit_prices": hedge_exit_prices,
+            "hedge_exit_price_source": hedge_exit_sources,
             "gross_pnl": round(total_gross_pnl, 2),
             "costs": round(total_costs, 2),
             "net_pnl": round(net_pnl, 2),
+            # Keys PerformanceAnalyzer reads (same contract as StrategyBacktester).
+            "pnl_gross": round(total_gross_pnl, 2),
+            "pnl_net": round(net_pnl, 2),
+            "total_costs": round(total_costs, 2),
+            "r_multiple": r_multiple,
             "exit_reason": exit_signal.reason or "EXIT",
             "risk_scale": active_trade["risk_scale"],
         }

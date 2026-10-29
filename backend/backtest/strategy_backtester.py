@@ -239,25 +239,36 @@ class StrategyBacktester:
         all_trades: List[dict] = []
         db = self._get_db()
 
+        pretrain_days: list = []
         if pretrain_df is not None and not pretrain_df.empty:
             pt = pretrain_df.copy()
             if "datetime" not in pt.columns and isinstance(pt.index, pd.DatetimeIndex):
                 pt["datetime"] = pt.index
             pt["datetime"] = pd.to_datetime(pt["datetime"])
+            pt = pt[pt["datetime"] < data["datetime"].min()] if not data.empty else pt
             pt.sort_values("datetime", inplace=True)
-            strategy.seed_context(pt)
+            if "vwap" not in pt.columns or pt["vwap"].isna().any():
+                pt["vwap"] = calculate_session_vwap(pt).values
+            pt["date"] = pt["datetime"].dt.date
+            pretrain_days = list(pt.groupby("date"))
+
+        # Every session is seeded with the sessions strictly before it:
+        # the pretrain window followed by the earlier test sessions. Seeding
+        # only once with pretrain_df left CPR/Dual-EMA/APEX using the last
+        # TRAIN day as "previous day" for every later test day.
+        history_days = pretrain_days + days
 
         for idx, (session_date, day_df) in enumerate(days):
             day_df = day_df.copy().reset_index(drop=True)
             if len(day_df) < 3:
                 continue
 
-            # Cross-day context from df_15m (in addition to any pretrain_df already supplied)
-            if idx > 0 and pretrain_df is None:
-                start = max(0, idx - self.context_lookback_days)
-                lookback_df = pd.concat([d for _, d in days[start:idx]], ignore_index=True)
-                strategy.seed_context(lookback_df)
-            elif idx == 0 and pretrain_df is None:
+            h_idx = len(pretrain_days) + idx
+            start = max(0, h_idx - self.context_lookback_days)
+            prior = [d for _, d in history_days[start:h_idx]]
+            if prior:
+                strategy.seed_context(pd.concat(prior, ignore_index=True))
+            else:
                 strategy.seed_context(pd.DataFrame(columns=data.columns))
 
             strategy.reset_session(session_date)

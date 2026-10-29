@@ -226,7 +226,15 @@ export default function BacktestPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {compare.comparison.map((row) => (
+                  {compare.comparison.map((row) => row.trades == null ? (
+                    <tr key={row.strategy_id} className="border-b border-[var(--border)] last:border-0">
+                      <td className="py-2 pr-3">{row.strategy}</td>
+                      <td className="py-2 pr-3">
+                        <StatusPill tone="neutral" dot={false}>{String(row.state || 'UNAVAILABLE').replace('_', ' ')}</StatusPill>
+                      </td>
+                      <td colSpan={6} className="py-2 pr-3 text-xs text-[var(--text-dim)]">{row.execution_note || 'Not evaluable on this data.'}</td>
+                    </tr>
+                  ) : (
                     <tr key={row.strategy_id} className="border-b border-[var(--border)] last:border-0 font-num">
                       <td className="py-2 pr-3 font-sans">{row.strategy}</td>
                       <td className="py-2 pr-3 font-sans">
@@ -244,6 +252,11 @@ export default function BacktestPage() {
                   ))}
                 </tbody>
               </table>
+              {compare.excluded_irregular_sessions?.length > 0 && (
+                <p className="text-xs text-[var(--text-faint)] mt-2">
+                  Excluded irregular NSE sessions (DR drill / Muhurat): {compare.excluded_irregular_sessions.join(', ')}
+                </p>
+              )}
             </div>
           )}
         </Card>

@@ -1006,7 +1006,7 @@ class PredictionService:
             if sig is not None:
                 if sig.action in (SignalAction.BUY, SignalAction.SELL):
                     current_signal = sig
-                elif sig.action in (SignalAction.STOP_LOSS, SignalAction.TARGET, SignalAction.EXIT):
+                elif sig.action == SignalAction.EXIT:  # SignalAction has no STOP_LOSS/TARGET members
                     current_signal = None
         return current_signal
 

@@ -56,6 +56,39 @@ def _normalize_timestamp_to_ist_naive(value: Any) -> Optional[datetime]:
     return to_ist_naive(value)
 
 
+_INTERVAL_MINUTES = {
+    "minute": 1, "3minute": 3, "5minute": 5, "10minute": 10,
+    "15minute": 15, "30minute": 30, "60minute": 60,
+}
+
+
+def exclude_irregular_sessions(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[date]]:
+    """
+    Remove real-but-irregular NSE sessions (DR drills, Muhurat, sessions on
+    exchange holidays) that intraday strategies cannot treat as a normal day.
+    Returns (filtered frame, dropped session dates). Nothing is altered or
+    synthesised; rows are only removed.
+    """
+    if df is None or df.empty or "datetime" not in df.columns:
+        return df, []
+    dates = pd.to_datetime(df["datetime"]).dt.date
+
+    def _regular(d: date) -> bool:
+        if MarketCalendar.is_partial_special_session(d):
+            return False
+        try:
+            return MarketCalendar.is_trading_day(d)
+        except ValueError:
+            # Year not covered by the holiday calendar: keep weekdays and
+            # known full special sessions, never guess a holiday.
+            return d.weekday() < 5 or MarketCalendar.is_special_session(d)
+
+    keep_map = {d: _regular(d) for d in set(dates)}
+    keep = dates.map(keep_map)
+    dropped = sorted(d for d, ok in keep_map.items() if not ok)
+    return df.loc[keep.values].reset_index(drop=True), dropped
+
+
 _MAX_DAYS_PER_REQUEST = {
     "minute": 60,
     "3minute": 100,
@@ -290,6 +323,23 @@ class HistoricalDataLoader:
         df.sort_values("datetime", inplace=True)
         df.reset_index(drop=True, inplace=True)
 
+        # Kite returns the still-forming bar when to_date is today. It is not
+        # a completed candle and must never be cached or backtested.
+        bar_minutes = _INTERVAL_MINUTES.get(interval)
+        if bar_minutes and not df.empty:
+            completed = (
+                df["datetime"] + pd.Timedelta(minutes=bar_minutes)
+            ) <= pd.Timestamp(now_ist_naive())
+            if not completed.all():
+                logger.info(
+                    f"Dropping {int((~completed).sum())} forming candle(s) for token {instrument_token}."
+                )
+                df = df.loc[completed].reset_index(drop=True)
+            if df.empty:
+                raise RuntimeError(
+                    f"No completed candles between {start_date} and {end_date} for token {instrument_token}."
+                )
+
         if not df.empty:
             from backend.indicators.vwap import calculate_session_vwap
             df["vwap"] = calculate_session_vwap(df).to_numpy()
@@ -386,8 +436,21 @@ class HistoricalDataLoader:
 
         is_intraday = (df["datetime"].dt.time != time(0, 0)).any()
         if is_intraday:
-            if (df["datetime"].dt.weekday >= 5).any():
-                errors.append("Weekend candles detected in dataset.")
+            weekend_dates = sorted(
+                set(df.loc[df["datetime"].dt.weekday >= 5, "datetime"].dt.date)
+            )
+            # NSE occasionally runs real live sessions on a Saturday/Sunday
+            # (Union Budget, DR-site drills, Muhurat). Those candles are
+            # genuine; only weekend data with no known session is rejected.
+            unexplained = [
+                d for d in weekend_dates if not MarketCalendar.is_special_session(d)
+            ]
+            if unexplained:
+                shown = ", ".join(str(d) for d in unexplained[:5])
+                errors.append(
+                    "Weekend candles detected on dates with no known NSE special "
+                    f"session: {shown}."
+                )
 
         return len(errors) == 0, errors
 

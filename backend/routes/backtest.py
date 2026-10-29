@@ -76,7 +76,83 @@ def _safe_pf(pf: Optional[float]) -> Tuple[Optional[float], str]:
     return round(float(pf), 2), "CALCULATED"
 
 
-def _make_factory(key: str, inst, kite) -> Callable[[], Any]:
+class StrategyUnavailable(Exception):
+    """A strategy cannot be backtested on this data; reported, never faked."""
+
+    def __init__(self, state: str, reason: str):
+        super().__init__(reason)
+        self.state = state
+        self.reason = reason
+
+
+def _peer_history(symbol: str, days: int, kite, auth_err: Optional[str]):
+    """Real Kite 15m history for a peer over the SAME window as the target."""
+    from backend.data.historical_loader import exclude_irregular_sessions
+
+    inst, token = _resolve_instrument(symbol, kite)
+    df = _load_history(inst, token, days, kite, auth_err)
+    df, _ = exclude_irregular_sessions(df)
+    return df
+
+
+def _backtest_sector_context(inst, days: int, kite, auth_err: Optional[str]):
+    """Leader / market / sector frames covering the full backtest window."""
+    from backend.data.models import PeerContext
+    from backend.data.sector_peer_manager import SectorPeerManager
+
+    try:
+        leader, market, sector = SectorPeerManager.get_peer_symbols(inst.symbol)
+    except ValueError:
+        raise StrategyUnavailable(
+            "NOT_APPLICABLE", f"{inst.symbol} has no sector classification."
+        )
+    if sector == inst.symbol:
+        # A sector leader cannot be its own sector reference.
+        raise StrategyUnavailable(
+            "NOT_APPLICABLE",
+            f"{inst.symbol} is the sector reference itself; no independent sector leg.",
+        )
+    frames = {}
+    for role, sym in (("leader", leader), ("market", market), ("sector", sector)):
+        try:
+            frames[role] = _peer_history(sym, days, kite, auth_err)
+        except HTTPException as exc:
+            raise StrategyUnavailable("UNAVAILABLE", f"{role} {sym}: {exc.detail}")
+    return PeerContext(leader=frames["leader"], market=frames["market"], sector=frames["sector"])
+
+
+def _backtest_crsd_context(inst, days: int, kite, auth_err: Optional[str]):
+    """CRSD peer basket + NIFTY market frame covering the full backtest window."""
+    from backend.data.sector_peer_manager import SectorPeerManager
+    from backend.strategy.crsd_strategy import CRSDPeerContext
+
+    sec = SectorPeerManager.get_sector_for_symbol(inst.symbol)
+    if sec is None:
+        raise StrategyUnavailable(
+            "NOT_APPLICABLE", f"{inst.symbol} has no sector classification."
+        )
+    try:
+        market = _peer_history("NIFTY", days, kite, auth_err)
+    except HTTPException as exc:
+        raise StrategyUnavailable("UNAVAILABLE", f"market NIFTY: {exc.detail}")
+
+    peers = {}
+    failures = []
+    for sym in [m for m in sec.constituents if m != inst.symbol][:8]:
+        try:
+            peers[sym] = _peer_history(sym, days, kite, auth_err)
+        except HTTPException as exc:
+            failures.append(f"{sym}: {exc.detail}")
+    if len(peers) < 2:
+        raise StrategyUnavailable(
+            "UNAVAILABLE",
+            "CRSD needs at least 2 peers with real history; "
+            + ("; ".join(failures[:3]) or "none available."),
+        )
+    return CRSDPeerContext(peers=peers, market=market)
+
+
+def _make_factory(key: str, inst, kite, ctx: Any = None) -> Callable[[], Any]:
     from backend.config.settings import settings
 
     if key == "orb":
@@ -92,9 +168,7 @@ def _make_factory(key: str, inst, kite) -> Callable[[], Any]:
         from backend.strategy.apex_engine import ApexStrategy
         return lambda: ApexStrategy(inst, settings.strategy)
     if key == "sector_impulse":
-        from backend.data.sector_peer_manager import SectorPeerManager
         from backend.strategy.sector_impulse_strategy import SectorImpulseStrategy
-        ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
         return lambda: SectorImpulseStrategy(inst, settings.strategy, ctx=ctx)
     if key == "ssf_l5_srm":
         # Order-book strategy: 15m OHLCV has no depth, so this only exercises its regime gate.
@@ -104,10 +178,8 @@ def _make_factory(key: str, inst, kite) -> Callable[[], Any]:
         from backend.strategy.aou_oss_strategy import AouOssStrategy
         return lambda: AouOssStrategy(inst, settings.strategy)
     if key == "crsd":
-        from backend.data.sector_peer_manager import SectorPeerManager
         from backend.strategy.crsd_strategy import CRSDStrategy
-        peer_ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
-        return lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx)
+        return lambda: CRSDStrategy(inst, settings.strategy, ctx=ctx)
     raise HTTPException(status_code=400, detail=f"Unknown strategy '{key}'.")
 
 
@@ -216,15 +288,43 @@ def _load_history(inst, token, days: int, kite, auth_err: Optional[str]):
     return df
 
 
-def _run_one(key: str, inst, kite, df):
+def _load_backtest_data(inst, token, days: int, kite, auth_err: Optional[str]):
+    """Target history with irregular NSE sessions (DR drills, Muhurat) removed."""
+    from backend.data.historical_loader import exclude_irregular_sessions
+
+    df = _load_history(inst, token, days, kite, auth_err)
+    df, dropped = exclude_irregular_sessions(df)
+    if dropped:
+        logger.info(
+            "component=backtest symbol=%s excluded_irregular_sessions=%s",
+            inst.symbol, [str(d) for d in dropped],
+        )
+    if df is None or df.empty:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No regular-session candles available for {inst.symbol}.",
+        )
+    return df, [str(d) for d in dropped]
+
+
+def _strategy_context(key: str, inst, days: int, kite, auth_err: Optional[str]):
+    if key == "sector_impulse":
+        return _backtest_sector_context(inst, days, kite, auth_err)
+    if key == "crsd":
+        return _backtest_crsd_context(inst, days, kite, auth_err)
+    return None
+
+
+def _run_one(key: str, inst, kite, df, days: int = 180, auth_err: Optional[str] = None):
     from backend.config.settings import settings
+
+    ctx = _strategy_context(key, inst, days, kite, auth_err)
 
     if key == "crsd":
         from backend.backtest.pair_backtester import PairBacktester
-        from backend.data.sector_peer_manager import SectorPeerManager
         from backend.strategy.crsd_strategy import CRSDStrategy
 
-        peer_ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
+        peer_ctx = ctx
         backtester = PairBacktester(
             strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx),
             instrument=inst,
@@ -236,7 +336,7 @@ def _run_one(key: str, inst, kite, df):
     from backend.backtest.strategy_backtester import StrategyBacktester
 
     backtester = StrategyBacktester(
-        strategy_factory=_make_factory(key, inst, kite),
+        strategy_factory=_make_factory(key, inst, kite, ctx),
         instrument=inst,
         app_settings=settings,
         persist_trades=False,
@@ -276,15 +376,36 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
 
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
     inst, token = _resolve_instrument(symbol, kite)
-    df = _load_history(inst, token, days, kite, auth_err)
+    df, excluded_sessions = _load_backtest_data(inst, token, days, kite, auth_err)
 
     active = (settings.active_strategy or "").lower()
-    reports = {key: _run_one(key, inst, kite, df) for key in RESEARCH_STRATEGIES}
+    reports: Dict[str, Any] = {}
+    unavailable: Dict[str, Dict[str, str]] = {}
+    for key in RESEARCH_STRATEGIES:
+        try:
+            reports[key] = _run_one(key, inst, kite, df, days=days, auth_err=auth_err)
+        except StrategyUnavailable as exc:
+            unavailable[key] = {"state": exc.state, "reason": exc.reason}
 
     comparison = []
     for key in RESEARCH_STRATEGIES:
-        rep = reports[key]
         name, aliases = STRATEGIES[key]
+        if key in unavailable:
+            comparison.append({
+                "strategy": name,
+                "strategy_id": key,
+                "trades": None,
+                "win_rate": None,
+                "profit_factor": None,
+                "profit_factor_status": "UNDEFINED",
+                "sharpe": None,
+                "max_drawdown": None,
+                "net_pnl": None,
+                "state": unavailable[key]["state"],
+                "execution_note": unavailable[key]["reason"],
+            })
+            continue
+        rep = reports[key]
         pf_val, pf_status = _safe_pf(rep.profit_factor)
         comparison.append({
             "strategy": name,
@@ -304,7 +425,9 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
         "days": days,
         "symbol": inst.symbol,
         "data_source": "REAL_KITE",
+        "excluded_irregular_sessions": excluded_sessions,
         "strategies": {key: _serialize_rounded(rep) for key, rep in reports.items()},
+        "unavailable_strategies": unavailable,
         "comparison": comparison,
     }
 
@@ -353,16 +476,29 @@ def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cp
 def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
     inst, token = _resolve_instrument(symbol, kite)
-    df = _load_history(inst, token, days, kite, auth_err)
+    df, excluded_sessions = _load_backtest_data(inst, token, days, kite, auth_err)
+
+    def _unavailable(exc: StrategyUnavailable):
+        code = (
+            status.HTTP_422_UNPROCESSABLE_ENTITY
+            if exc.state == "NOT_APPLICABLE"
+            else status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+        return HTTPException(
+            status_code=code,
+            detail=f"{STRATEGIES[key][0]} {exc.state.replace('_', ' ').lower()} for {inst.symbol}: {exc.reason}",
+        )
 
     if key == "crsd":
         from backend.backtest.pair_backtester import PairBacktester
         from backend.backtest.performance import PerformanceAnalyzer
-        from backend.data.sector_peer_manager import SectorPeerManager
         from backend.strategy.crsd_strategy import CRSDStrategy
         from backend.config.settings import settings
 
-        peer_ctx = SectorPeerManager.build_peer_context(inst.symbol, kite_client=kite)
+        try:
+            peer_ctx = _backtest_crsd_context(inst, days, kite, auth_err)
+        except StrategyUnavailable as exc:
+            raise _unavailable(exc)
         backtester = PairBacktester(
             strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx),
             instrument=inst,
@@ -377,12 +513,13 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
         target_cost = sum(float(t.get("target_cost", 0)) for t in trades)
         hedge_cost = sum(float(t.get("hedge_cost", 0)) for t in trades)
         total_costs = target_cost + hedge_cost
-        peer_symbols = peer_ctx.peer_symbols if peer_ctx else []
+        peer_symbols = peer_ctx.symbols() if peer_ctx else []
 
         return {
             "success": True,
             "strategy": key,
             "data_source": "REAL_KITE",
+            "excluded_irregular_sessions": excluded_sessions,
             "pair_info": {
                 "target_symbol": inst.symbol,
                 "hedge_basket": peer_symbols,
@@ -420,12 +557,16 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
             },
         }
 
-    report = _run_one(key, inst, kite, df)
+    try:
+        report = _run_one(key, inst, kite, df, days=days, auth_err=auth_err)
+    except StrategyUnavailable as exc:
+        raise _unavailable(exc)
 
     return {
         "success": True,
         "strategy": key,
         "data_source": "REAL_KITE",
+        "excluded_irregular_sessions": excluded_sessions,
         "report": {
             "symbol": inst.symbol,
             "strategy": key.upper(),

@@ -168,7 +168,12 @@ def test_research_backtest_endpoints(monkeypatch):
     assert data["symbol"] == "NIFTY"
     assert "strategies" in data
     for expected_strat in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss"]:
-        assert expected_strat in data["strategies"]
+        assert expected_strat in data["strategies"] or expected_strat in data["unavailable_strategies"]
+
+    # NIFTY is an index with no sector peers: Sector Impulse must be reported
+    # as not applicable, never as a fabricated zero-trade result.
+    assert data["unavailable_strategies"]["sector_impulse"]["state"] == "NOT_APPLICABLE"
+    assert "sector_impulse" not in data["strategies"]
 
     required_metrics = [
         "total_trades", "long_trades", "short_trades", "winning_trades", "losing_trades",
@@ -176,7 +181,7 @@ def test_research_backtest_endpoints(monkeypatch):
         "sharpe_ratio", "cagr_pct", "max_drawdown_pct", "expectancy_rupees",
         "long_win_rate", "short_win_rate", "long_net_pnl", "short_net_pnl", "yearly_returns",
     ]
-    for strat_key in ["orb", "cpr", "dual_ema", "apex", "sector_impulse", "ssf_l5_srm", "aou_oss"]:
+    for strat_key in data["strategies"]:
         strat_report = data["strategies"][strat_key]
         for m in required_metrics:
             assert m in strat_report, f"Missing metric {m} in {strat_key}"
@@ -197,7 +202,7 @@ def test_research_backtest_endpoints(monkeypatch):
     # Test POST function
     data_post = post_research_backtest(days=20, symbol="NIFTY")
     assert data_post["days"] == 20
-    assert len(data_post["strategies"]) == 7
+    assert len(data_post["strategies"]) + len(data_post["unavailable_strategies"]) == 7
 
 
 def test_prediction_service_all_strategies(monkeypatch):

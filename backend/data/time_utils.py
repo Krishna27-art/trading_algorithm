@@ -142,7 +142,37 @@ BLACKOUT_DATES: Set[date] = {
 }
 
 
+# NSE special LIVE trading sessions held on days that are normally closed.
+# Kite returns real candles for these dates, so they must not be treated as
+# corrupt data. Sources: NSE circulars for each session.
+#
+# FULL: regular 09:15-15:30 session (counts as a normal trading day).
+SPECIAL_FULL_SESSIONS: Set[date] = {
+    date(2025, 2, 1),   # Saturday - Union Budget live session
+    date(2026, 2, 1),   # Sunday   - Union Budget live session
+}
+# PARTIAL: short / irregular sessions (DR-site switch drills, Muhurat). Real
+# data, but not a normal session, so intraday strategies must not use them.
+SPECIAL_PARTIAL_SESSIONS: Set[date] = {
+    date(2023, 11, 12),  # Sunday  - Muhurat trading (evening)
+    date(2024, 1, 20),   # Saturday - DR-site switch live session
+    date(2024, 3, 2),    # Saturday - DR-site switch live session
+    date(2024, 5, 18),   # Saturday - DR-site switch live session
+    date(2024, 11, 1),   # Muhurat trading on an exchange holiday
+    date(2025, 10, 21),  # Muhurat trading on an exchange holiday
+}
+
+
 class MarketCalendar:
+    @staticmethod
+    def is_special_session(d: date) -> bool:
+        """True for any NSE special live session on a normally closed day."""
+        return d in SPECIAL_FULL_SESSIONS or d in SPECIAL_PARTIAL_SESSIONS
+
+    @staticmethod
+    def is_partial_special_session(d: date) -> bool:
+        return d in SPECIAL_PARTIAL_SESSIONS
+
     @staticmethod
     def _all_holidays() -> Set[date]:
         merged: Set[date] = set()
@@ -152,6 +182,8 @@ class MarketCalendar:
 
     @staticmethod
     def is_trading_day(d: date) -> bool:
+        if d in SPECIAL_FULL_SESSIONS:
+            return True
         if d.weekday() >= 5:
             return False
         if d.year not in HOLIDAYS_BY_YEAR:

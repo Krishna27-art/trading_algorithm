@@ -13,17 +13,12 @@ import pandas as pd
 
 from backend.data.time_utils import now_ist, now_ist_iso, now_ist_naive
 from backend.database.db import SignalEventRecord, db_manager
-from backend.strategy.base_strategy import SignalAction
 from backend.strategy.prediction_service import (
     SingleStrategyPrediction,
     _positive_number,
     prediction_service,
 )
-from backend.strategy.ssf_l5_srm_strategy import BookSnapshot
-from backend.streaming.crsd_live_runtime import crsd_live_runtime
 from backend.streaming.live_market_state import live_market_state
-from backend.streaming.ssf_runtime import ssf_live_runtime
-from backend.streaming.ssf_runtime import ssf_context_store
 
 
 logger = logging.getLogger("backend.streaming.live_signal_engine")
@@ -47,8 +42,6 @@ _CLAIMED = "CLAIMED"
 _DUPLICATE = "DUPLICATE"
 _IN_FLIGHT = "IN_FLIGHT"
 _OUT_OF_ORDER = "OUT_OF_ORDER"
-
-_SSF_STRATEGY = "ssf_l5_srm"
 
 
 class LiveSignalEngine:
@@ -80,8 +73,6 @@ class LiveSignalEngine:
         self._max_signal_age_seconds = int(max_signal_age_seconds)
         self._require_persistence = bool(require_persistence)
 
-        self._ssf_runtime = ssf_live_runtime
-        self._crsd_runtime = crsd_live_runtime
         self._scanner_snapshot: Optional[Any] = None
         self._db = db_manager
         self._closed_signals_today: Dict[Tuple[str, str, str], str] = {}
@@ -665,15 +656,22 @@ class LiveSignalEngine:
         ):
             return None
 
+        # A signal stays open over several candles until its stop, target or
+        # time exit. Key the journal entry on the candle that CREATED the
+        # signal, so later candles find the same entry (ALREADY_PERSISTED)
+        # instead of being rejected as a duplicate and withheld.
+        origin = self._normalize_timestamp(self._pred_field(p_obj, "signal_timestamp"))
+        if origin is None or origin.date() != candle_timestamp.date():
+            origin = candle_timestamp
         return SignalEventRecord(
-            signal_id=f"SIG_{strat_key.upper()}_{symbol}_{candle_timestamp.strftime('%Y%m%d_%H%M%S')}",
+            signal_id=f"SIG_{strat_key.upper()}_{symbol}_{origin.strftime('%Y%m%d_%H%M%S')}",
             trading_date=candle_timestamp.strftime("%Y-%m-%d"),
             symbol=symbol,
             instrument_token=token,
             strategy=strat_key,
             direction=self._pred_field(p_obj, "direction"),
             generated_at=now_ist_naive(),
-            candle_timestamp=candle_timestamp,
+            candle_timestamp=origin,
             entry_price=round(float(entry), 2),
             stop_loss=round(float(stop), 2),
             target=round(float(target), 2),
@@ -782,8 +780,6 @@ class LiveSignalEngine:
         vwap: float,
         kite_client: Optional[Any],
     ) -> Tuple[Optional[Dict[str, Any]], bool]:
-        self._crsd_runtime.on_candle(symbol, candle_dict)
-
         data = self._copy_dataframe(live_market_state.get_candles_df(symbol))
 
         if data.empty:
@@ -868,73 +864,6 @@ class LiveSignalEngine:
                 )
                 return unavailable_result, False
 
-            book_snap = state.book_snapshot if state is not None else None
-
-            ctx = ssf_context_store.get(symbol)
-            if book_snap is not None:
-                book_snap = BookSnapshot(
-                    timestamp=book_snap.timestamp,
-                    bids=book_snap.bids,
-                    asks=book_snap.asks,
-                    ltp=book_snap.ltp,
-                    fut_ltp=ctx.fut_ltp,
-                    fut_oi=ctx.fut_oi,
-                    sector_ret_30m=ctx.sector_ret_30m,
-                    stock_ret_30m=ctx.stock_ret_30m,
-                    circuit_lower=ctx.circuit_lower or book_snap.circuit_lower,
-                    circuit_upper=ctx.circuit_upper or book_snap.circuit_upper,
-                    futures_updated_at=ctx.futures_updated_at,
-                    sector_return_updated_at=ctx.sector_return_updated_at,
-                    stock_return_updated_at=ctx.stock_return_updated_at,
-                )
-
-            ssf_strat = None
-            if token is not None and isinstance(token, int) and token > 0:
-                ssf_strat = self._ssf_runtime.get_strategy(
-                    symbol=symbol,
-                    token=token,
-                    current_price=float(live_ltp),
-                )
-
-            live_states = live_market_state.get_all_symbols_state()
-            live_ltp_by_symbol = {
-                sym: (float(st.ltp), st.last_tick_time)
-                for sym, st in live_states.items()
-                if (
-                    st is not None
-                    and st.ltp is not None
-                    and st.ltp > 0
-                    and st.last_tick_time is not None
-                )
-            }
-
-            # Peer/market frames must end at the SAME bar being evaluated.
-            # ``as_of`` is a wall-clock "now" for the completed-candle lookup,
-            # so pass the candle's completion time, not its open time (the
-            # open time resolves to the previous bar and misaligns peers).
-            crsd_ctx = self._crsd_runtime.get_context(
-                symbol,
-                kite_client=kite_client,
-                as_of=candle_end,
-            )
-
-            peer_ctx = None
-            try:
-                from backend.data.sector_peer_manager import SectorPeerManager
-
-                peer_ctx = SectorPeerManager.build_peer_context(
-                    symbol,
-                    kite_client=kite_client,
-                    allow_network_fetch=kite_client is not None,
-                    as_of=candle_end,
-                )
-            except Exception as peer_exc:
-                logger.debug(
-                    "[LiveSignalEngine] Peer context construction skipped for %s: %s",
-                    symbol,
-                    peer_exc,
-                )
-
             stock_metric = (
                 self._scanner_snapshot.rankings.get(symbol)
                 if self._scanner_snapshot is not None
@@ -947,12 +876,6 @@ class LiveSignalEngine:
                 current_ltp=live_ltp,
                 token=token,
                 stock_metric=stock_metric,
-                book_snapshot=book_snap,
-                peer_context=peer_ctx,
-                kite_client=kite_client,
-                ssf_strategy=ssf_strat,
-                live_ltp_by_symbol=live_ltp_by_symbol,
-                crsd_context=crsd_ctx,
             )
             preds = dict(preds)
 
@@ -1197,376 +1120,6 @@ class LiveSignalEngine:
 
             return error_result, False
 
-    def _guard_ssf_signal(
-        self,
-        symbol: str,
-        token: int,
-        signal: Any,
-        prediction: Any,
-        ltp: float,
-        snapshot_ts: datetime,
-    ) -> Tuple[Any, Optional[Dict[str, Any]]]:
-        if signal.action not in (SignalAction.BUY, SignalAction.SELL):
-            return prediction, None
-
-        direction = "LONG" if signal.action == SignalAction.BUY else "SHORT"
-        trading_date = snapshot_ts.strftime("%Y-%m-%d")
-        signal_id = f"SIG_SSF_{symbol}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
-        block_reason: Optional[str] = None
-        persisted = False
-
-        state = self.signal_closed_state(symbol, _SSF_STRATEGY, trading_date)
-        if state == _CLOSED:
-            block_reason = (
-                "SSF_L5_SRM signal concluded for this session: "
-                + (
-                    self.get_closed_reason(symbol, _SSF_STRATEGY, trading_date)
-                    or "Session signal already resolved"
-                )
-            )
-        elif state == _DB_ERROR:
-            block_reason = (
-                "SSF_L5_SRM signal state is unknown because the journal "
-                "database is unavailable; signal withheld"
-            )
-
-        if block_reason is None:
-            try:
-                entry = float(signal.entry_price or ltp)
-                stop = float(signal.stop_loss or 0.0)
-                target = float(signal.target or 0.0)
-            except (TypeError, ValueError):
-                entry = stop = target = 0.0
-
-            if not (
-                self._valid_price(entry)
-                and self._valid_price(stop)
-                and self._valid_price(target)
-            ):
-                logger.error(
-                    "[LiveSignalEngine] SSF signal %s has invalid entry/stop/target and cannot be journaled",
-                    signal_id,
-                )
-                if self._require_persistence:
-                    block_reason = (
-                        "SSF_L5_SRM signal lacks valid entry, stop and target "
-                        "and cannot be journaled; signal withheld"
-                    )
-            else:
-                record = SignalEventRecord(
-                    signal_id=signal_id,
-                    trading_date=trading_date,
-                    symbol=symbol,
-                    instrument_token=token,
-                    strategy=_SSF_STRATEGY,
-                    direction=direction,
-                    generated_at=now_ist_naive(),
-                    candle_timestamp=None,
-                    entry_price=round(entry, 2),
-                    stop_loss=round(stop, 2),
-                    target=round(target, 2),
-                    notes=signal.reason or "SSF Level-5 book entry",
-                )
-                persisted = self._persist_signal(record) != _PERSIST_FAILED
-                if not persisted:
-                    logger.error(
-                        "[LiveSignalEngine] Signal %s generated but NOT persisted",
-                        signal_id,
-                    )
-                    if self._require_persistence:
-                        block_reason = (
-                            "SSF_L5_SRM signal could not be written to the "
-                            "journal; signal withheld"
-                        )
-
-        if block_reason is not None:
-            logger.warning(
-                "[LiveSignalEngine] Suppressed SSF signal for %s: %s",
-                symbol,
-                block_reason,
-            )
-            return (
-                self._suppressed_prediction(
-                    symbol,
-                    _SSF_STRATEGY,
-                    prediction,
-                    block_reason,
-                ),
-                {
-                    "signal_id": signal_id,
-                    "generated": True,
-                    "persisted": persisted,
-                    "published": False,
-                },
-            )
-
-        return prediction, {
-            "signal_id": signal_id,
-            "generated": True,
-            "persisted": persisted,
-            "published": True,
-        }
-
-    def on_book_update(
-        self,
-        symbol: str,
-        snapshot: Any,
-    ) -> None:
-        clean = self._normalize_symbol(symbol)
-        if clean is None:
-            return
-
-        if not isinstance(snapshot, BookSnapshot):
-            return
-
-        snapshot_ts = self._normalize_timestamp(
-            getattr(snapshot, "timestamp", None)
-        )
-        if snapshot_ts is None:
-            return
-
-        age = (now_ist_naive() - snapshot_ts).total_seconds()
-
-        if age < 0 or age > self._max_ltp_age_seconds:
-            logger.warning(
-                "[LiveSignalEngine] Rejecting stale L5 snapshot for %s: age=%.1fs",
-                clean,
-                age,
-            )
-            return
-
-        token = self._token_for(clean)
-        ltp = snapshot.ltp
-
-        if not self._valid_price(ltp):
-            return
-
-        if token is None or not isinstance(token, int) or token <= 0:
-            logger.warning(
-                "[LiveSignalEngine] No valid Kite token for SSF update: %s",
-                clean,
-            )
-            return
-
-        ctx = ssf_context_store.get(clean)
-
-        enriched = BookSnapshot(
-            timestamp=snapshot.timestamp,
-            bids=snapshot.bids,
-            asks=snapshot.asks,
-            ltp=snapshot.ltp,
-            fut_ltp=ctx.fut_ltp,
-            fut_oi=ctx.fut_oi,
-            sector_ret_30m=ctx.sector_ret_30m,
-            stock_ret_30m=ctx.stock_ret_30m,
-            circuit_lower=ctx.circuit_lower or snapshot.circuit_lower,
-            circuit_upper=ctx.circuit_upper or snapshot.circuit_upper,
-            futures_updated_at=ctx.futures_updated_at,
-            sector_return_updated_at=ctx.sector_return_updated_at,
-            stock_return_updated_at=ctx.stock_return_updated_at,
-        )
-
-        ltp_timestamp = snapshot_ts
-        snapshot_iso = snapshot_ts.isoformat()
-
-        try:
-            strategy = self._ssf_runtime.get_strategy(
-                symbol=clean,
-                token=token,
-                current_price=float(ltp),
-            )
-            signal = strategy.on_book_update(enriched)
-            ssf_lifecycle: Optional[Dict[str, Any]] = None
-
-            if signal is None:
-                ssf_prediction = SingleStrategyPrediction(
-                    status="WAITING",
-                    reason="Current Level-5 conditions do not qualify.",
-                    levels=getattr(strategy, "last_features", {}) or {},
-                    metrics={},
-                    strategy=_SSF_STRATEGY,
-                    symbol=clean,
-                )
-            else:
-                ssf_prediction = prediction_service._prediction_from_signal(
-                    status=(
-                        "SSF_LONG"
-                        if signal.action == SignalAction.BUY
-                        else "SSF_SHORT"
-                    ),
-                    signal=signal,
-                    ltp=float(ltp),
-                    default_reason=(
-                        signal.reason
-                        or "SSF Level-5 generated a validated live signal."
-                    ),
-                    levels=getattr(strategy, "last_features", {}) or {},
-                )
-                ssf_prediction, ssf_lifecycle = self._guard_ssf_signal(
-                    clean,
-                    token,
-                    signal,
-                    ssf_prediction,
-                    float(ltp),
-                    snapshot_ts,
-                )
-
-            with self._lock:
-                prior_payload = self._predictions.get(clean)
-                if isinstance(prior_payload, dict):
-                    prior_per_strategy = dict(prior_payload.get("predictions", {}))
-                else:
-                    prior_per_strategy = {}
-
-            if len(prior_per_strategy) <= 1:
-                df_candles = live_market_state.get_candles_df(clean)
-                if not df_candles.empty:
-                    last_row = df_candles.iloc[-1].to_dict()
-                    candle_ts = last_row.get("datetime")
-                    if candle_ts is not None:
-                        c_dict = {
-                            "symbol": clean,
-                            "datetime": candle_ts,
-                            "open": float(last_row.get("open", 0.0)),
-                            "high": float(last_row.get("high", 0.0)),
-                            "low": float(last_row.get("low", 0.0)),
-                            "close": float(last_row.get("close", 0.0)),
-                            "volume": int(last_row.get("volume", 0)),
-                        }
-                        v_val = last_row.get("vwap")
-                        try:
-                            v_val = float(v_val) if v_val is not None else None
-                        except (TypeError, ValueError):
-                            v_val = None
-                        self.on_candle_close(c_dict, vwap=v_val)
-                        with self._lock:
-                            prior_payload = self._predictions.get(clean)
-                            if isinstance(prior_payload, dict):
-                                prior_per_strategy = dict(
-                                    prior_payload.get("predictions", {})
-                                )
-
-            with self._lock:
-                prior_per_strategy.pop("SSF-L5-SRM", None)
-                prior_per_strategy[_SSF_STRATEGY] = ssf_prediction
-
-                consensus = prediction_service.calculate_consensus(
-                    prior_per_strategy
-                )
-
-            evaluation_dt = now_ist_naive()
-            evaluation_iso = now_ist_iso()
-            has_prior = isinstance(prior_payload, dict)
-
-            top_freshness = self._refresh_freshness_block(
-                prior_payload.get("data_freshness") if has_prior else None,
-                evaluation_dt,
-            )
-
-            predictions_out = {
-                key: self._prediction_to_dict(value)
-                for key, value in prior_per_strategy.items()
-            }
-            ssf_entry = predictions_out.get(_SSF_STRATEGY)
-            if isinstance(ssf_entry, dict):
-                ssf_entry.update(
-                    self._stamp(
-                        clean,
-                        snapshot_iso if signal is not None else None,
-                        None,
-                        evaluation_iso,
-                        self._compute_freshness(
-                            snapshot_ts,
-                            self._max_ltp_age_seconds,
-                            evaluation_dt,
-                        ),
-                    )
-                )
-                ssf_entry["source_book_time"] = snapshot_iso
-                if ssf_lifecycle is not None:
-                    ssf_entry["signal_id"] = ssf_lifecycle["signal_id"]
-                    ssf_entry["lifecycle"] = dict(ssf_lifecycle)
-
-            result = {
-                "symbol": clean,
-                "token": token,
-                "ltp": round(float(ltp), 2),
-                "ltp_source": "L5_STREAM",
-                "ltp_timestamp": ltp_timestamp.isoformat(),
-                "candle_close": (
-                    prior_payload.get("candle_close") if has_prior else None
-                ),
-                "candle_timestamp": (
-                    prior_payload.get("candle_timestamp") if has_prior else None
-                ),
-                "vwap": prior_payload.get("vwap") if has_prior else None,
-                "predictions": predictions_out,
-                "consensus": consensus,
-                "timestamp": evaluation_iso,
-                "data_source": "KITE_STREAM",
-            }
-            result.update(
-                self._stamp(
-                    clean,
-                    prior_payload.get("signal_time") if has_prior else None,
-                    prior_payload.get("source_candle_time") if has_prior else None,
-                    evaluation_iso,
-                    top_freshness,
-                )
-            )
-
-            self._store_result(clean, result)
-
-        except Exception as exc:
-            logger.exception(
-                "[LiveSignalEngine] SSF book-update failed for %s: %s: %s",
-                clean,
-                type(exc).__name__,
-                exc,
-            )
-            ssf_prediction = SingleStrategyPrediction(
-                status="ERROR",
-                reason=f"SSF evaluation failed: {type(exc).__name__}: {exc}",
-                levels={},
-                metrics={},
-                strategy=_SSF_STRATEGY,
-                symbol=clean,
-            )
-            evaluation_dt = now_ist_naive()
-            evaluation_iso = now_ist_iso()
-            with self._lock:
-                prior_payload = self._predictions.get(clean)
-                if isinstance(prior_payload, dict):
-                    prior_per_strategy = dict(prior_payload.get("predictions", {}))
-                    prior_per_strategy.pop("SSF-L5-SRM", None)
-                    prior_per_strategy[_SSF_STRATEGY] = ssf_prediction
-                    consensus = prediction_service.calculate_consensus(
-                        prior_per_strategy
-                    )
-                    predictions_out = {
-                        k: self._prediction_to_dict(v)
-                        for k, v in prior_per_strategy.items()
-                    }
-                    ssf_entry = predictions_out.get(_SSF_STRATEGY)
-                    if isinstance(ssf_entry, dict):
-                        ssf_entry.update(
-                            self._stamp(
-                                clean,
-                                None,
-                                None,
-                                evaluation_iso,
-                                self._compute_freshness(
-                                    None,
-                                    self._max_ltp_age_seconds,
-                                    evaluation_dt,
-                                ),
-                            )
-                        )
-                    updated_payload = dict(prior_payload)
-                    updated_payload["predictions"] = predictions_out
-                    updated_payload["consensus"] = consensus
-                    self._store_result(clean, updated_payload)
-
     def on_tick(
         self,
         symbol: str,
@@ -1654,22 +1207,6 @@ class LiveSignalEngine:
                 return
             self._predictions[clean] = result
 
-    def get_ssf_strategy(
-        self,
-        symbol: str,
-        token: int = 0,
-        current_price: float = 0.0,
-    ) -> Any:
-        return self._ssf_runtime.get_strategy(symbol, token, current_price)
-
-    def prepare_ssf_session(
-        self,
-        symbol: str,
-        reference_date: Any,
-        kite_client: Optional[Any] = None,
-    ) -> None:
-        self._ssf_runtime.prepare_session(symbol, reference_date, kite_client)
-
     def get_prediction(
         self,
         symbol: str,
@@ -1717,9 +1254,6 @@ class LiveSignalEngine:
             self._last_candle_time.clear()
             self._inflight_candles.clear()
             self._closed_signals_today.clear()
-        self._ssf_runtime.reset()
-        self._crsd_runtime.reset()
-        ssf_context_store.reset()
 
 
 live_signal_engine = LiveSignalEngine()

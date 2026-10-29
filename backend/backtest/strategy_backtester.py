@@ -1,20 +1,14 @@
 """
 Generic Strategy-Agnostic Event-Driven Backtester.
 
-EventDrivenBacktester (event_engine.py) has the ORB+VWAP rules hardcoded
-directly into its bar loop — it can't backtest anything else. This engine
-does the same job (bar-by-bar simulation, zero look-ahead,
-real transaction costs) but delegates
-all entry/exit decisions to a `BaseStrategy` instance via on_candle()/on_tick(),
-the same interface the live ExecutionEngine already uses. Any strategy
-written against strategy/base_strategy.py — CPRRegimeBreakoutStrategy,
-BufferedDualEMAStrategy, a future one — plugs in here without this file
-changing.
+Bar-by-bar simulation, zero look-ahead, real Zerodha intraday charges. All
+entry/exit decisions are delegated to a `BaseStrategy` via on_candle(), the
+same interface the live signal path uses, so Gap Fade, RSI x EMA and ORB-SIP
+all plug in without this file changing.
 
-It also calls strategy.seed_context() once per session with a trailing
-window of prior days' bars, before reset_session() — so strategies that need
-cross-day context (CPR's prior-day pivots, Dual-EMA's SMA200/EMA warm-up)
-get it, and strategies that don't (ORB) just ignore it.
+It calls strategy.seed_context() once per session with a trailing window of
+prior days' bars, before reset_session(), so strategies get their prior-day
+context (previous close, daily range, volume averages, RSI warm-up).
 
 Fix 2.4: DB write path wired — trades are persisted to SQLite on entry and
 exit via DatabaseManager.
@@ -42,7 +36,6 @@ from backend.database.db import DatabaseManager, ExitReason, OrderDirection, Tra
 from backend.indicators.vwap import calculate_session_vwap
 from backend.monitoring.logger import logger
 from backend.strategy.base_strategy import BaseStrategy, SignalAction
-from backend.strategy.orb_strategy import IntradayORBStrategy
 
 
 @dataclass
@@ -502,33 +495,3 @@ class StrategyBacktester:
 
         except Exception as e:
             logger.warning(f"DB persist failed for trade {trade.get('trade_id')}: {e}")
-
-
-class EventDrivenBacktester(StrategyBacktester):
-    def __init__(
-        self,
-        instrument: InstrumentConfig,
-        app_settings: AppSettings = settings,
-        execution_policy: ExecutionPolicy = ExecutionPolicy.CONSERVATIVE,
-        strategy_factory: Optional[Callable[[], BaseStrategy]] = None,
-        context_lookback_days: int = 30,
-        slippage_points: float = 0.5,
-        fill_policy: str = "NEXT_BAR_OPEN",
-    ):
-        factory = strategy_factory or (
-            lambda: IntradayORBStrategy(
-                instrument=instrument,
-                strategy_config=app_settings.strategy,
-                execution_policy=execution_policy,
-            )
-        )
-        super().__init__(
-            strategy_factory=factory,
-            instrument=instrument,
-            app_settings=app_settings,
-            context_lookback_days=context_lookback_days,
-            fill_policy=fill_policy,
-        )
-        self.execution_policy = execution_policy
-        self.slippage_points = slippage_points
-

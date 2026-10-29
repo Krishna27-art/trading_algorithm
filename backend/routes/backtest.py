@@ -36,28 +36,16 @@ _backtest_slot = threading.Semaphore(1)
 
 # strategy key -> (display name, accepted aliases)
 STRATEGIES: Dict[str, Tuple[str, Tuple[str, ...]]] = {
-    "orb": ("30-Min Volatility-Filtered ORB", ("orb",)),
-    "cpr": ("Central Pivot Range (CPR) Regime", ("cpr",)),
-    "dual_ema": ("Adaptive Dual-EMA Trend System", ("dual_ema",)),
-    "apex": ("APEX-AIVEM Catalyst & Momentum", ("apex",)),
-    "sector_impulse": ("Sector Impulse Transmission (SIT)", ("sector_impulse", "sit")),
-    "ssf_l5_srm": ("SSF-L5-SRM Microprice & Residual Momentum", ("ssf_l5_srm", "ssf")),
-    "aou_oss": ("Analytic Ornstein-Uhlenbeck Optimal-Stopping (AOU-OSS)", ("aou_oss",)),
-    "crsd": ("Cross-Sectional Residual Shock Divergence (CRSD)", ("crsd",)),
-    # Research only: not part of live consensus until proven out-of-sample.
-    "orb_retest": ("ORB Retest (15m range + ATR/RVOL, research)", ("orb_retest",)),
+    "gap_fade": ("Gap Fade (fade a 1%+ opening gap after 30 min)", ("gap_fade", "gap")),
+    "rsi_ema": ("RSI x 9 EMA (VWAP + volume filtered)", ("rsi_ema", "rsi")),
+    # Did not pass its own backtest (lost money in the first half): experimental.
+    "orb_sip": ("ORB 30-min, stocks in play (experimental)", ("orb_sip", "orb")),
 }
 
-# The 7 single-instrument directional strategies compared in research
-RESEARCH_STRATEGIES = [
-    "orb",
-    "cpr",
-    "dual_ema",
-    "apex",
-    "sector_impulse",
-    "ssf_l5_srm",
-    "aou_oss",
-]
+# Strategies compared side by side in research
+RESEARCH_STRATEGIES = ["gap_fade", "rsi_ema", "orb_sip"]
+
+DEFAULT_SYMBOL = "RELIANCE"
 
 
 def _canonical_strategy(name: str) -> Optional[str]:
@@ -87,105 +75,13 @@ class StrategyUnavailable(Exception):
         self.reason = reason
 
 
-def _peer_history(symbol: str, days: int, kite, auth_err: Optional[str]):
-    """Real Kite 15m history for a peer over the SAME window as the target."""
-    from backend.data.historical_loader import exclude_irregular_sessions
+def _make_factory(key: str, inst, kite=None, ctx: Any = None) -> Callable[[], Any]:
+    from backend.strategy import STRATEGIES as STRATEGY_CLASSES
 
-    inst, token = _resolve_instrument(symbol, kite)
-    df = _load_history(inst, token, days, kite, auth_err)
-    df, _ = exclude_irregular_sessions(df)
-    return df
-
-
-def _backtest_sector_context(inst, days: int, kite, auth_err: Optional[str]):
-    """Leader / market / sector frames covering the full backtest window."""
-    from backend.data.models import PeerContext
-    from backend.data.sector_peer_manager import SectorPeerManager
-
-    try:
-        leader, market, sector = SectorPeerManager.get_peer_symbols(inst.symbol)
-    except ValueError:
-        raise StrategyUnavailable(
-            "NOT_APPLICABLE", f"{inst.symbol} has no sector classification."
-        )
-    if sector == inst.symbol:
-        # A sector leader cannot be its own sector reference.
-        raise StrategyUnavailable(
-            "NOT_APPLICABLE",
-            f"{inst.symbol} is the sector reference itself; no independent sector leg.",
-        )
-    frames = {}
-    for role, sym in (("leader", leader), ("market", market), ("sector", sector)):
-        try:
-            frames[role] = _peer_history(sym, days, kite, auth_err)
-        except HTTPException as exc:
-            raise StrategyUnavailable("UNAVAILABLE", f"{role} {sym}: {exc.detail}")
-    return PeerContext(leader=frames["leader"], market=frames["market"], sector=frames["sector"])
-
-
-def _backtest_crsd_context(inst, days: int, kite, auth_err: Optional[str]):
-    """CRSD peer basket + NIFTY market frame covering the full backtest window."""
-    from backend.data.sector_peer_manager import SectorPeerManager
-    from backend.strategy.crsd_strategy import CRSDPeerContext
-
-    sec = SectorPeerManager.get_sector_for_symbol(inst.symbol)
-    if sec is None:
-        raise StrategyUnavailable(
-            "NOT_APPLICABLE", f"{inst.symbol} has no sector classification."
-        )
-    try:
-        market = _peer_history("NIFTY", days, kite, auth_err)
-    except HTTPException as exc:
-        raise StrategyUnavailable("UNAVAILABLE", f"market NIFTY: {exc.detail}")
-
-    peers = {}
-    failures = []
-    for sym in [m for m in sec.constituents if m != inst.symbol][:8]:
-        try:
-            peers[sym] = _peer_history(sym, days, kite, auth_err)
-        except HTTPException as exc:
-            failures.append(f"{sym}: {exc.detail}")
-    if len(peers) < 2:
-        raise StrategyUnavailable(
-            "UNAVAILABLE",
-            "CRSD needs at least 2 peers with real history; "
-            + ("; ".join(failures[:3]) or "none available."),
-        )
-    return CRSDPeerContext(peers=peers, market=market)
-
-
-def _make_factory(key: str, inst, kite, ctx: Any = None) -> Callable[[], Any]:
-    from backend.config.settings import settings
-
-    if key == "orb":
-        from backend.strategy.orb_strategy import IntradayORBStrategy
-        return lambda: IntradayORBStrategy(inst, settings.strategy)
-    if key == "orb_retest":
-        from backend.strategy.orb_retest_strategy import ORBRetestStrategy
-        return lambda: ORBRetestStrategy(inst, settings.strategy)
-    if key == "cpr":
-        from backend.strategy.cpr_strategy import CPRRegimeBreakoutStrategy
-        return lambda: CPRRegimeBreakoutStrategy(inst, settings.strategy)
-    if key == "dual_ema":
-        from backend.strategy.dual_ema_strategy import BufferedDualEMAStrategy
-        return lambda: BufferedDualEMAStrategy(inst, settings.strategy)
-    if key == "apex":
-        from backend.strategy.apex_engine import ApexStrategy
-        return lambda: ApexStrategy(inst, settings.strategy)
-    if key == "sector_impulse":
-        from backend.strategy.sector_impulse_strategy import SectorImpulseStrategy
-        return lambda: SectorImpulseStrategy(inst, settings.strategy, ctx=ctx)
-    if key == "ssf_l5_srm":
-        # Order-book strategy: 15m OHLCV has no depth, so this only exercises its regime gate.
-        from backend.strategy.ssf_l5_srm_strategy import SsfL5SrmStrategy
-        return lambda: SsfL5SrmStrategy(inst, settings.strategy)
-    if key == "aou_oss":
-        from backend.strategy.aou_oss_strategy import AouOssStrategy
-        return lambda: AouOssStrategy(inst, settings.strategy)
-    if key == "crsd":
-        from backend.strategy.crsd_strategy import CRSDStrategy
-        return lambda: CRSDStrategy(inst, settings.strategy, ctx=ctx)
-    raise HTTPException(status_code=400, detail=f"Unknown strategy '{key}'.")
+    cls = STRATEGY_CLASSES.get(key)
+    if cls is None:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy '{key}'.")
+    return lambda: cls(inst.symbol)
 
 
 def _resolve_instrument(symbol: str, kite, instrument_type: Optional[str] = None):
@@ -193,7 +89,7 @@ def _resolve_instrument(symbol: str, kite, instrument_type: Optional[str] = None
     from backend.config.universe import create_instrument_config_for_equity, resolve_universe_tokens
     from backend.data.instrument_resolver import instrument_resolver
 
-    clean_sym = (symbol or "NIFTY").strip().upper()
+    clean_sym = (symbol or DEFAULT_SYMBOL).strip().upper()
     if clean_sym not in ("NIFTY", "NIFTY 50", "BANKNIFTY"):
         token = instrument_resolver.resolve_token(clean_sym, exchange="NSE", kite_client=kite)
         if not token:
@@ -312,33 +208,12 @@ def _load_backtest_data(inst, token, days: int, kite, auth_err: Optional[str]):
     return df, [str(d) for d in dropped]
 
 
-def _strategy_context(key: str, inst, days: int, kite, auth_err: Optional[str]):
-    if key == "sector_impulse":
-        return _backtest_sector_context(inst, days, kite, auth_err)
-    if key == "crsd":
-        return _backtest_crsd_context(inst, days, kite, auth_err)
-    return None
-
-
-def _make_backtester(key: str, inst, kite, ctx: Any):
-    """Backtester for one strategy (pair backtester for CRSD)."""
+def _make_backtester(key: str, inst, kite=None, ctx: Any = None):
+    from backend.backtest.strategy_backtester import StrategyBacktester
     from backend.config.settings import settings
 
-    if key == "crsd":
-        from backend.backtest.pair_backtester import PairBacktester
-        from backend.strategy.crsd_strategy import CRSDStrategy
-
-        return PairBacktester(
-            strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=ctx),
-            instrument=inst,
-            peer_context=ctx,
-            app_settings=settings,
-        )
-
-    from backend.backtest.strategy_backtester import StrategyBacktester
-
     return StrategyBacktester(
-        strategy_factory=_make_factory(key, inst, kite, ctx),
+        strategy_factory=_make_factory(key, inst),
         instrument=inst,
         app_settings=settings,
         persist_trades=False,
@@ -363,8 +238,7 @@ def _run_one_with_trades(key: str, inst, kite, df, days: int = 180, auth_err: Op
     """(report, trades, skipped_entries) for one strategy."""
     from backend.config.settings import settings
 
-    ctx = _strategy_context(key, inst, days, kite, auth_err)
-    backtester = _make_backtester(key, inst, kite, ctx)
+    backtester = _make_backtester(key, inst)
     trades = backtester.generate_trades(df, initial_capital=settings.initial_capital)
     report = _report_for(trades, df, settings.initial_capital)
     return report, trades, list(getattr(backtester, "skipped_entries", []) or [])
@@ -407,8 +281,8 @@ def _serialize_rounded(rep) -> dict:
     }
 
 
-def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
-    """Run all 7 single-instrument intraday strategies on validated real/cached data."""
+def run_all_backtests(days: int = 180, symbol: str = DEFAULT_SYMBOL) -> Dict[str, Any]:
+    """Run all 3 intraday strategies on validated real/cached data."""
     from backend.config.settings import settings
 
     kite, auth_err = get_active_kite_with_diagnostics(force_validate=False)
@@ -461,7 +335,7 @@ def run_all_backtests(days: int = 180, symbol: str = "NIFTY") -> Dict[str, Any]:
             "mc_max_drawdown_p95": robustness[key]["max_drawdown_pct_p95"],
             "mc_probability_of_loss": robustness[key]["probability_of_loss_pct"],
             "mc_reliable": robustness[key]["reliable"],
-            "execution_note": "REGIME_ONLY: Order book depth absent" if key == "ssf_l5_srm" else None,
+            "execution_note": "EXPERIMENTAL: did not pass its own backtest" if key == "orb_sip" else None,
         })
 
     return {
@@ -492,25 +366,20 @@ def _guarded(fn, *args, **kwargs):
 
 
 @router.get("/api/research/backtest")
-def get_research_backtest(days: int = 180, symbol: str = "NIFTY"):
-    """Backtest all 7 intraday strategies and return a comparative summary."""
+def get_research_backtest(days: int = 180, symbol: str = DEFAULT_SYMBOL):
+    """Backtest all 3 intraday strategies and return a comparative summary."""
     return _guarded(run_all_backtests, days=days, symbol=symbol)
 
 
 @router.post("/api/research/backtest")
-def post_research_backtest(days: int = 180, symbol: str = "NIFTY"):
-    """Backtest all 7 intraday strategies and return a comparative summary."""
+def post_research_backtest(days: int = 180, symbol: str = DEFAULT_SYMBOL):
+    """Backtest all 3 intraday strategies and return a comparative summary."""
     return _guarded(run_all_backtests, days=days, symbol=symbol)
 
 
 @router.post("/api/strategy/backtest")
-def trigger_backtest(days: int = 180, symbol: str = "NIFTY", strategy: str = "cpr"):
+def trigger_backtest(days: int = 180, symbol: str = DEFAULT_SYMBOL, strategy: str = "gap_fade"):
     """Backtest one strategy over validated real Kite historical candles."""
-    if (strategy or "").lower() == "rm100":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="RM-100 is a research/experimental strategy and is not wired into this backend.",
-        )
     key = _canonical_strategy(strategy)
     if key is None:
         raise HTTPException(
@@ -525,90 +394,7 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
     inst, token = _resolve_instrument(symbol, kite)
     df, excluded_sessions = _load_backtest_data(inst, token, days, kite, auth_err)
 
-    def _unavailable(exc: StrategyUnavailable):
-        code = (
-            status.HTTP_422_UNPROCESSABLE_ENTITY
-            if exc.state == "NOT_APPLICABLE"
-            else status.HTTP_503_SERVICE_UNAVAILABLE
-        )
-        return HTTPException(
-            status_code=code,
-            detail=f"{STRATEGIES[key][0]} {exc.state.replace('_', ' ').lower()} for {inst.symbol}: {exc.reason}",
-        )
-
-    if key == "crsd":
-        from backend.backtest.pair_backtester import PairBacktester
-        from backend.backtest.performance import PerformanceAnalyzer
-        from backend.strategy.crsd_strategy import CRSDStrategy
-        from backend.config.settings import settings
-
-        try:
-            peer_ctx = _backtest_crsd_context(inst, days, kite, auth_err)
-        except StrategyUnavailable as exc:
-            raise _unavailable(exc)
-        backtester = PairBacktester(
-            strategy_factory=lambda: CRSDStrategy(inst, settings.strategy, ctx=peer_ctx),
-            instrument=inst,
-            peer_context=peer_ctx,
-            app_settings=settings,
-        )
-        trades = backtester.generate_trades(df, initial_capital=settings.initial_capital)
-        report = _report_for(trades, df, settings.initial_capital)
-
-        target_gross = sum(float(t.get("target_gross_pnl", 0)) for t in trades)
-        hedge_gross = sum(float(t.get("hedge_gross_pnl", 0)) for t in trades)
-        target_cost = sum(float(t.get("target_cost", 0)) for t in trades)
-        hedge_cost = sum(float(t.get("hedge_cost", 0)) for t in trades)
-        total_costs = target_cost + hedge_cost
-        peer_symbols = peer_ctx.symbols() if peer_ctx else []
-
-        return {
-            "success": True,
-            "strategy": key,
-            "data_source": "REAL_KITE",
-            "excluded_irregular_sessions": excluded_sessions,
-            "pair_info": {
-                "target_symbol": inst.symbol,
-                "hedge_basket": peer_symbols,
-                "target_gross_pnl": round(target_gross, 2),
-                "hedge_gross_pnl": round(hedge_gross, 2),
-                "target_costs": round(target_cost, 2),
-                "hedge_costs": round(hedge_cost, 2),
-                "total_leg_costs": round(total_costs, 2),
-            },
-            "trades": trades,
-            "robustness": {"monte_carlo": _monte_carlo(trades)},
-            "report": {
-                "symbol": inst.symbol,
-                "strategy": "CRSD",
-                "total_trades": report.total_trades,
-                "long_trades": report.long_trades,
-                "short_trades": report.short_trades,
-                "winning_trades": report.winning_trades,
-                "losing_trades": report.losing_trades,
-                "win_rate_pct": round(report.win_rate_pct, 1),
-                "gross_pnl": round(report.gross_pnl, 2),
-                "total_transaction_costs": round(report.total_transaction_costs, 2),
-                "net_pnl": round(report.net_pnl, 2),
-                "profit_factor": _safe_pf(report.profit_factor),
-                "sharpe_ratio": report.sharpe_ratio,
-                "cagr_pct": report.cagr_pct,
-                "max_drawdown_pct": report.max_drawdown_pct,
-                "max_consecutive_losses": report.max_consecutive_losses,
-                "avg_r_multiple": report.avg_r_multiple,
-                "expectancy_rupees": report.expectancy_rupees,
-                "long_win_rate": report.long_win_rate,
-                "short_win_rate": report.short_win_rate,
-                "long_net_pnl": report.long_net_pnl,
-                "short_net_pnl": report.short_net_pnl,
-                "yearly_returns": report.yearly_returns,
-            },
-        }
-
-    try:
-        report, trades, skipped = _run_one_with_trades(key, inst, kite, df, days=days, auth_err=auth_err)
-    except StrategyUnavailable as exc:
-        raise _unavailable(exc)
+    report, trades, skipped = _run_one_with_trades(key, inst, kite, df, days=days, auth_err=auth_err)
 
     return {
         "success": True,
@@ -649,8 +435,8 @@ def _trigger_one(days: int, symbol: str, key: str) -> Dict[str, Any]:
 @router.post("/api/strategy/walk_forward")
 def trigger_walk_forward(
     days: int = 365,
-    symbol: str = "NIFTY",
-    strategy: str = "orb",
+    symbol: str = DEFAULT_SYMBOL,
+    strategy: str = "gap_fade",
     train_days: int = 60,
     test_days: int = 20,
 ):
@@ -684,22 +470,10 @@ def _walk_forward_one(days: int, symbol: str, key: str, train_days: int, test_da
     inst, token = _resolve_instrument(symbol, kite)
     df, excluded_sessions = _load_backtest_data(inst, token, days, kite, auth_err)
 
-    try:
-        ctx = _strategy_context(key, inst, days, kite, auth_err)
-    except StrategyUnavailable as exc:
-        raise HTTPException(
-            status_code=(
-                status.HTTP_422_UNPROCESSABLE_ENTITY
-                if exc.state == "NOT_APPLICABLE"
-                else status.HTTP_503_SERVICE_UNAVAILABLE
-            ),
-            detail=f"{STRATEGIES[key][0]}: {exc.reason}",
-        )
-
     validator = RollingWalkForwardValidator(
         instrument=inst,
         app_settings=settings,
-        backtester_factory=lambda fold_inst: _make_backtester(key, fold_inst, kite, ctx),
+        backtester_factory=lambda fold_inst: _make_backtester(key, fold_inst),
     )
     try:
         result = validator.validate(

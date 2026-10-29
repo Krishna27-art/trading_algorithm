@@ -959,9 +959,7 @@ def make_book_snapshot_from_quote(
             else None
         )
 
-    from backend.strategy.ssf_l5_srm_strategy import (
-        BookSnapshot,
-    )
+    from backend.data.models import BookSnapshot
 
     return BookSnapshot(
         timestamp=snapshot_timestamp,

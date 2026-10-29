@@ -10,25 +10,15 @@ import { apiGet, apiPost, hasSharedSecret } from '../api/client'
 
 const STRATEGIES = [
   { id: 'all', label: 'All' },
-  { id: 'orb', label: 'ORB' },
-  { id: 'cpr', label: 'CPR' },
-  { id: 'dual_ema', label: 'Dual EMA' },
-  { id: 'apex', label: 'APEX-AIVEM' },
-  { id: 'sector_impulse', label: 'Sector Impulse' },
-  { id: 'ssf_l5_srm', label: 'SSF-L5-SRM' },
-  { id: 'aou_oss', label: 'AOU-OSS' },
-  { id: 'crsd', label: 'CRSD' },
+  { id: 'gap_fade', label: 'Gap Fade' },
+  { id: 'rsi_ema', label: 'RSI x EMA' },
+  { id: 'orb_sip', label: 'ORB Stocks-in-Play' },
 ]
 
 const ALL_STRATEGY_KEYS = [
-  'orb',
-  'cpr',
-  'dual_ema',
-  'apex',
-  'sector_impulse',
-  'ssf_l5_srm',
-  'aou_oss',
-  'crsd',
+  'gap_fade',
+  'rsi_ema',
+  'orb_sip',
 ]
 
 const MAX_AUTO_START_ATTEMPTS = 5
@@ -1150,14 +1140,9 @@ function formatCurrency(value) {
 function labelFor(key) {
   return (
     {
-      orb: 'ORB',
-      cpr: 'CPR',
-      dual_ema: 'Dual EMA',
-      apex: 'APEX-AIVEM',
-      sector_impulse: 'Sector Impulse',
-      ssf_l5_srm: 'SSF-L5-SRM',
-      aou_oss: 'AOU-OSS',
-      crsd: 'CRSD',
+      gap_fade: 'Gap Fade',
+      rsi_ema: 'RSI x EMA',
+      orb_sip: 'ORB Stocks-in-Play',
     }[key] || key
   )
 }
@@ -1379,7 +1364,7 @@ function computeStrategyDiagnostics(key, pred, candidate) {
   } else if (key === 'apex') {
     const vix = lv.india_vix != null ? `VIX ${lv.india_vix}` : 'VIX CACHED'
     runtimeState = `SESSION OPEN · ${vix}`
-  } else if (key === 'orb') {
+  } else if (key === 'orb_sip') {
     runtimeState = '09:15-09:45 IST WINDOW'
   } else if (key === 'cpr') {
     runtimeState = 'PRIOR SESSION PIVOTS'
